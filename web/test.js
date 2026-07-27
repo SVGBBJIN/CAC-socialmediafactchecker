@@ -7,7 +7,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { normalize, join } from "node:path";
 
-import { streamChat, shouldFallThrough, errorMessage, toGeminiContents } from "./lib/gemini.js";
+import {
+  streamChat,
+  shouldFallThrough,
+  errorMessage,
+  toGeminiContents,
+  youTubeVideoID,
+  findYouTubeVideoIDs,
+} from "./lib/gemini.js";
 import {
   passwordMatches,
   checkRateLimit,
@@ -198,6 +205,48 @@ test("the API key travels as a header, never in the URL", async () => {
 
   assert.equal(seen.url.includes("AIzaSECRET"), false, "key must not be in the query string");
   assert.equal(seen.init.headers["x-goog-api-key"], "AIzaSECRET");
+});
+
+test("recognizes YouTube URLs in every share format", () => {
+  assert.equal(youTubeVideoID("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "dQw4w9WgXcQ");
+  assert.equal(youTubeVideoID("https://youtu.be/dQw4w9WgXcQ"), "dQw4w9WgXcQ");
+  assert.equal(youTubeVideoID("https://www.youtube.com/shorts/dQw4w9WgXcQ"), "dQw4w9WgXcQ");
+  assert.equal(youTubeVideoID("https://www.youtube.com/embed/dQw4w9WgXcQ"), "dQw4w9WgXcQ");
+  assert.equal(youTubeVideoID("https://www.youtube.com/live/dQw4w9WgXcQ"), "dQw4w9WgXcQ");
+  // Share links carry extra params (playlist, timestamp) that must not break the match.
+  assert.equal(
+    youTubeVideoID("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s&list=PL123"),
+    "dQw4w9WgXcQ",
+  );
+});
+
+test("rejects non-video YouTube URLs and non-YouTube URLs", () => {
+  assert.equal(youTubeVideoID("https://www.youtube.com/channel/UCabc"), null);
+  assert.equal(youTubeVideoID("https://example.com/watch?v=dQw4w9WgXcQ"), null);
+  assert.equal(youTubeVideoID("not a url"), null);
+  assert.equal(youTubeVideoID("https://www.youtube.com/shorts/tooshort"), null);
+});
+
+test("finds every distinct video mentioned in free text, in order, without duplicates", () => {
+  const text =
+    "check this https://youtu.be/dQw4w9WgXcQ and also " +
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ plus https://youtu.be/AbCdEfGhIjK";
+  assert.deepEqual(findYouTubeVideoIDs(text), ["dQw4w9WgXcQ", "AbCdEfGhIjK"]);
+});
+
+test("a YouTube link becomes a file_data part alongside the text", () => {
+  const contents = toGeminiContents([
+    { role: "user", content: "what claims does https://youtu.be/dQw4w9WgXcQ make?" },
+  ]);
+  assert.deepEqual(contents, [
+    {
+      role: "user",
+      parts: [
+        { file_data: { file_uri: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } },
+        { text: "what claims does https://youtu.be/dQw4w9WgXcQ make?" },
+      ],
+    },
+  ]);
 });
 
 test("assistant maps to Gemini's `model` role", () => {

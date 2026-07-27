@@ -98,11 +98,99 @@ function describeFailure(status, message, model) {
   return new GeminiError(message, { status: 502, model });
 }
 
+/**
+ * Extract an 11-character YouTube video ID from a URL, or null.
+ *
+ * Mirrors `YouTubeExtractor.videoID(from:)` in Sources/SeerCore/Extractors/YouTubeExtractor.swift:
+ * same formats handled (`watch?v=`, `youtu.be/`, `/shorts/`, `/embed/`, `/live/`, `/v/`),
+ * same 11-character base64url shape check.
+ */
+export function youTubeVideoID(urlString) {
+  let url;
+  try {
+    url = new URL(urlString);
+  } catch {
+    return null;
+  }
+
+  if (!isYouTubeHost(url.hostname)) return null;
+
+  const host = url.hostname.toLowerCase();
+  const segments = url.pathname.split("/").filter(Boolean);
+
+  if (host.includes("youtu.be")) {
+    return segments[0] && isValidVideoID(segments[0]) ? segments[0] : null;
+  }
+
+  const queryID = url.searchParams.get("v");
+  if (queryID && isValidVideoID(queryID)) return queryID;
+
+  const videoPathPrefixes = new Set(["shorts", "embed", "live", "v"]);
+  if (segments.length > 1 && videoPathPrefixes.has(segments[0].toLowerCase())) {
+    return isValidVideoID(segments[1]) ? segments[1] : null;
+  }
+
+  return null;
+}
+
+function isValidVideoID(candidate) {
+  return /^[A-Za-z0-9_-]{11}$/.test(candidate);
+}
+
+/**
+ * Mirrors `Platform.detect(from:)`'s YouTube branch: strips a leading `www.`/`m.`/etc.
+ * subdomain so `m.youtube.com` and `youtube.com` agree, and accepts regional subdomains.
+ */
+function isYouTubeHost(hostname) {
+  const bare = hostname.toLowerCase().replace(/^(www|m|mobile|vm|vt)\./, "");
+  return (
+    bare === "youtube.com" ||
+    bare === "youtu.be" ||
+    bare === "youtube-nocookie.com" ||
+    bare.endsWith(".youtube.com")
+  );
+}
+
+const URL_PATTERN = /https?:\/\/[^\s<>"]+/g;
+
+/** Every distinct YouTube video ID mentioned anywhere in a message, in first-seen order. */
+export function findYouTubeVideoIDs(text) {
+  const found = [];
+  const seen = new Set();
+  for (const match of String(text).matchAll(URL_PATTERN)) {
+    const id = youTubeVideoID(match[0]);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      found.push(id);
+    }
+  }
+  return found;
+}
+
+function canonicalYouTubeURL(videoID) {
+  return `https://www.youtube.com/watch?v=${videoID}`;
+}
+
+/**
+ * A message's parts: one `file_data` part per distinct YouTube link it mentions, so
+ * Gemini fetches and watches the video itself — same trick as the native-ingestion path
+ * in GeminiVideoClient.swift, just without a dedicated transcription prompt — plus the
+ * text part.
+ */
+function partsFor(content) {
+  const text = String(content ?? "");
+  const parts = findYouTubeVideoIDs(text).map((id) => ({
+    file_data: { file_uri: canonicalYouTubeURL(id) },
+  }));
+  parts.push({ text });
+  return parts;
+}
+
 /** `[{role: "user"|"assistant", content: "..."}]` → Gemini's `contents` shape. */
 export function toGeminiContents(messages) {
   return messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: String(m.content ?? "") }],
+    parts: partsFor(m.content),
   }));
 }
 
