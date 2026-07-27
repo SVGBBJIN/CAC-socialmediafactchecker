@@ -49,6 +49,57 @@ final class OEmbedParsingTests: XCTestCase {
         XCTAssertTrue(document.contains("viewport"))
     }
 
+    /// TikTok's own share sheet hands out `vm.tiktok.com` links, and oEmbed will not
+    /// follow them — so this is the common path, not an edge case.
+    func testShortLinkIsExpandedBeforeAskingOEmbed() async throws {
+        let transport = StubTransport([
+            .redirected(to: "https://www.tiktok.com/@scout2015/video/6718335390845095173"),
+            .ok(Self.liveTikTokResponse),
+        ])
+        let resolver = OEmbedResolver.tikTok(transport: transport, sleeper: ImmediateSleeper())
+        let shared = URL(string: "https://vm.tiktok.com/ZMabcdefg/")!
+
+        let embed = try await resolver.resolve(shared)
+
+        let requests = await transport.requests
+        XCTAssertEqual(requests.first?.httpMethod, "HEAD", "expansion should not fetch the body")
+        let oEmbedURL = requests.last?.url?.absoluteString ?? ""
+        XCTAssertTrue(
+            oEmbedURL.contains("6718335390845095173"),
+            "oEmbed should be asked about the expanded URL, got \(oEmbedURL)"
+        )
+        XCTAssertFalse(oEmbedURL.contains("vm.tiktok.com"), "the short link should not survive")
+        // Provenance must still point at what the user actually shared.
+        XCTAssertEqual(embed.sourceURL, shared)
+    }
+
+    /// A failed expansion must not swallow the request: the oEmbed error is the useful
+    /// one to show the user.
+    func testFailedExpansionFallsBackToTheOriginalURL() async throws {
+        let transport = StubTransport(
+            [.ok(Self.liveTikTokResponse)],
+            transportErrors: [ExtractionError.timedOut(after: 5)]
+        )
+        let resolver = OEmbedResolver.tikTok(transport: transport, sleeper: ImmediateSleeper())
+        _ = try await resolver.resolve(URL(string: "https://vm.tiktok.com/ZMabcdefg/")!)
+
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertTrue(requests.last?.url?.absoluteString.contains("vm.tiktok.com") ?? false)
+    }
+
+    /// Canonical URLs must not pay for a redirect hop they don't need.
+    func testCanonicalURLSkipsExpansion() async throws {
+        let transport = StubTransport([.ok(Self.liveTikTokResponse)])
+        let resolver = OEmbedResolver.tikTok(transport: transport, sleeper: ImmediateSleeper())
+        _ = try await resolver.resolve(
+            URL(string: "https://www.tiktok.com/@scout2015/video/6718335390845095173")!
+        )
+
+        let count = await transport.requestCount
+        XCTAssertEqual(count, 1, "no HEAD request should be made for an already-canonical URL")
+    }
+
     func testInstagramResolverCarriesTheAccessToken() async {
         // Instagram's endpoint rejects unauthenticated calls; the token has to be on
         // the query string. Assert it's actually attached.
@@ -145,6 +196,80 @@ final class CaptureBasedExtractorTests: XCTestCase {
             XCTFail("expected refusal")
         } catch let error as ExtractionError {
             guard case .emptyResult = error else { return XCTFail("got \(error)") }
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    /// A host match is not enough. A profile or tag page is correctly detected as TikTok
+    /// and has no video in it — declining up front beats an oEmbed error the user can't
+    /// act on.
+    func testCanHandleRejectsURLsWithNoPostInThem() {
+        let extractor = CaptureBasedExtractor.tikTok(
+            captureSource: MockCaptureSource.speaking(),
+            transcriber: MockTranscriber(returning: Transcription(text: "x")),
+            resolver: StubResolver()
+        )
+        let accepted = [
+            "https://www.tiktok.com/@user/video/6718335390845095173",
+            "https://www.tiktok.com/@user/photo/123",
+            "https://vm.tiktok.com/ZMabcdefg/",
+            "https://www.tiktok.com/t/ZTabcdefg/",
+        ]
+        let rejected = [
+            "https://www.tiktok.com/@user",
+            "https://www.tiktok.com/tag/news",
+            "https://www.tiktok.com/discover/something",
+            "https://www.tiktok.com/",
+        ]
+        for string in accepted {
+            XCTAssertTrue(extractor.canHandle(URL(string: string)!), "should accept \(string)")
+        }
+        for string in rejected {
+            XCTAssertFalse(extractor.canHandle(URL(string: string)!), "should reject \(string)")
+        }
+    }
+
+    func testInstagramCanHandleDistinguishesPostsFromProfiles() {
+        let extractor = CaptureBasedExtractor.instagram(
+            accessToken: "token",
+            captureSource: MockCaptureSource.speaking(),
+            transcriber: MockTranscriber(returning: Transcription(text: "x")),
+            resolver: StubResolver(platform: .instagram)
+        )
+        for string in [
+            "https://www.instagram.com/reel/ABCDEFGHIJK/",
+            "https://www.instagram.com/p/ABCDEFGHIJK/",
+            "https://www.instagram.com/tv/ABCDEFGHIJK/",
+        ] {
+            XCTAssertTrue(extractor.canHandle(URL(string: string)!), "should accept \(string)")
+        }
+        for string in [
+            "https://www.instagram.com/someuser",
+            "https://www.instagram.com/explore/tags/news/",
+            "https://www.instagram.com/reel/",
+        ] {
+            XCTAssertFalse(extractor.canHandle(URL(string: string)!), "should reject \(string)")
+        }
+    }
+
+    /// Audible audio went in, so nothing coming back means transcription failed. Letting
+    /// it through would put the creator's caption in `transcript`'s place and have the
+    /// fact-check layer report on text nobody spoke.
+    func testEmptyTranscriptFromAudibleAudioIsAnError() async {
+        let extractor = CaptureBasedExtractor.tikTok(
+            captureSource: MockCaptureSource.speaking(),
+            transcriber: MockTranscriber(returning: Transcription(text: "   ")),
+            resolver: StubResolver()
+        )
+        do {
+            _ = try await extractor.extract(from: URL(string: "https://www.tiktok.com/@u/video/1")!)
+            XCTFail("expected an empty transcript to fail")
+        } catch let error as ExtractionError {
+            guard case .emptyResult(let reason) = error else {
+                return XCTFail("expected emptyResult, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("transcription"))
         } catch {
             XCTFail("unexpected \(error)")
         }

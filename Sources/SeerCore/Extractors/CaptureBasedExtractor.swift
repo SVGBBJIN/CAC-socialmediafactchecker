@@ -34,7 +34,47 @@ public struct CaptureBasedExtractor: ClaimExtractor {
     }
 
     public func canHandle(_ url: URL) -> Bool {
-        Platform.detect(from: url) == platform
+        Platform.detect(from: url) == platform && Self.identifiesSinglePost(url, on: platform)
+    }
+
+    /// Whether `url` names one post, rather than a profile, tag or discovery page.
+    ///
+    /// `Platform.detect` only answers *which* platform a link belongs to.
+    /// `tiktok.com/@someone` and `instagram.com/someone` are both detected correctly and
+    /// neither contains a video. Accepting them costs an oEmbed round trip and returns
+    /// an upstream error the user can do nothing with, where declining lets the pipeline
+    /// say "that isn't a video" up front — the same reason ``YouTubeExtractor`` checks
+    /// for a video ID instead of trusting the host.
+    static func identifiesSinglePost(_ url: URL, on platform: Platform) -> Bool {
+        let segments = url.pathComponents.dropFirst().map { $0.lowercased() }
+        let host = url.host?.lowercased() ?? ""
+
+        switch platform {
+        case .tikTok:
+            // Short links are opaque redirect keys with no post ID to inspect, so the
+            // most that can be checked is that one is present. `OEmbedResolver` expands
+            // them before asking oEmbed anything.
+            if host.hasPrefix("vm.") || host.hasPrefix("vt.") { return !segments.isEmpty }
+            if segments.first == "t" { return segments.count > 1 }
+            // Canonical form is /@user/video/<id>; /photo/ is the image-post variant.
+            if let index = segments.firstIndex(where: { $0 == "video" || $0 == "photo" }) {
+                return index + 1 < segments.count
+            }
+            // Legacy /v/<id>.html
+            if segments.first == "v" { return segments.count > 1 }
+            return false
+
+        case .instagram:
+            let postPrefixes: Set<String> = ["p", "reel", "reels", "tv"]
+            guard let index = segments.firstIndex(where: { postPrefixes.contains($0) }) else {
+                return false
+            }
+            return index + 1 < segments.count
+
+        case .youTube, .unknown:
+            // Not this extractor's fork; `canHandle`'s platform check already excluded it.
+            return false
+        }
     }
 
     public func extract(from url: URL) async throws -> ClaimContext {
@@ -62,6 +102,16 @@ public struct CaptureBasedExtractor: ClaimExtractor {
         // 4. Transcribe.
         try Task.checkCancellation()
         let transcription = try await transcriber.transcribe(captured)
+
+        // 5. Step 3 established there was audible audio, so nothing back from the
+        //    transcriber means transcription failed — not that the video said nothing.
+        //    Without this the caption below stands in for speech that was never read,
+        //    and the fact-check layer reports on a caption believing it has the audio.
+        guard !transcription.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ExtractionError.emptyResult(
+                reason: "audio was captured but transcription returned no text"
+            )
+        }
 
         return ClaimContext(
             transcript: transcription.text,

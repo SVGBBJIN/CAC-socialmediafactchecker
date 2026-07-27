@@ -9,7 +9,10 @@ import { authorize, config, validateMessages, GuardError } from "../lib/guard.js
 
 const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT ||
-  "You are a helpful assistant. Be direct and concise. Use markdown for structure when it helps.";
+  "You are a helpful assistant. Be direct and concise. Use markdown for structure when it helps. " +
+    "When the user shares a YouTube link, it is attached as video for you to watch directly — " +
+    "don't say you can't access it. Transcribe or quote the specific claims made before " +
+    "evaluating them.";
 
 async function readBody(req) {
   // Vercel parses JSON bodies for you; a bare Node server does not.
