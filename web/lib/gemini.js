@@ -1,0 +1,228 @@
+// Gemini chat client.
+//
+// Deliberately mirrors Sources/SeerCore/Gemini/GeminiModel.swift: the same ordered
+// model chain, and the same rule for when a failure means "try the next model" rather
+// than "give up". Model availability is not a constant — preview IDs get retired and a
+// key's tier may not be entitled to the newest model — so pinning one ID breaks in the
+// field. See the comments in GeminiModel.swift for the full reasoning.
+
+const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+
+/** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
+export const DEFAULT_MODEL_CHAIN = [
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  // 3-series Flash only ships under the preview ID; there is no `gemini-3-flash`.
+  "gemini-3-flash-preview",
+  "gemini-2.5-flash",
+  // The 2-series ID is `2.0`, not `2`.
+  "gemini-2.0-flash",
+];
+
+export function modelChainFromEnv(env = process.env) {
+  const raw = env.GEMINI_MODEL_CHAIN;
+  if (!raw) return DEFAULT_MODEL_CHAIN;
+  const models = raw.split(",").map((m) => m.trim()).filter(Boolean);
+  return models.length > 0 ? models : DEFAULT_MODEL_CHAIN;
+}
+
+export class GeminiError extends Error {
+  constructor(message, { status = 502, model, retryable = false } = {}) {
+    super(message);
+    this.name = "GeminiError";
+    this.status = status;
+    this.model = model;
+    this.retryable = retryable;
+  }
+}
+
+/**
+ * Whether a failure against one model means "try the next one".
+ *
+ * - 404: no such model for this API version. Fall through.
+ * - 403: key isn't entitled to this model. Fall through.
+ * - 400 mentioning an unknown/unsupported model: fall through.
+ * - Everything else (401 bad key, 429 quota, 5xx) is terminal here — falling through
+ *   would spend the same broken credential four more times.
+ */
+export function shouldFallThrough(status, message = "") {
+  if (status === 404 || status === 403) return true;
+  if (status !== 400) return false;
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("not found") ||
+    lowered.includes("not supported") ||
+    lowered.includes("unsupported") ||
+    lowered.includes("invalid model")
+  );
+}
+
+/** Pull a human-readable message out of an error body without assuming a shape. */
+export function errorMessage(body, status) {
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed?.error?.message) return parsed.error.message;
+    if (typeof parsed?.message === "string") return parsed.message;
+  } catch {
+    // Not JSON; fall through to the raw body.
+  }
+  const text = String(body || "").slice(0, 500);
+  return text || `HTTP ${status}`;
+}
+
+/**
+ * Map an upstream status onto something the browser can act on, without ever leaking
+ * the upstream body verbatim for auth failures (it can echo key fragments).
+ */
+function describeFailure(status, message, model) {
+  if (status === 401 || (status === 403 && !shouldFallThrough(status, message))) {
+    return new GeminiError(
+      "Gemini rejected the API key. Check GEMINI_API_KEY in web/.env.local, and that the key is enabled for the Generative Language API.",
+      { status: 502, model },
+    );
+  }
+  if (status === 429) {
+    return new GeminiError("Gemini quota or rate limit reached. Try again shortly.", {
+      status: 429,
+      model,
+      retryable: true,
+    });
+  }
+  if (status >= 500) {
+    return new GeminiError(`Gemini is having trouble (HTTP ${status}). Try again shortly.`, {
+      status: 502,
+      model,
+      retryable: true,
+    });
+  }
+  return new GeminiError(message, { status: 502, model });
+}
+
+/** `[{role: "user"|"assistant", content: "..."}]` → Gemini's `contents` shape. */
+export function toGeminiContents(messages) {
+  return messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: String(m.content ?? "") }],
+  }));
+}
+
+async function* parseSSE(body, signal) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  for await (const chunk of body) {
+    if (signal?.aborted) return;
+    buffer += decoder.decode(chunk, { stream: true });
+
+    // SSE frames are separated by a blank line, but Gemini emits one `data:` line per
+    // frame, so splitting on newlines is enough and avoids buffering a whole frame.
+    let newline;
+    while ((newline = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line.startsWith("data:")) continue;
+
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+
+      let frame;
+      try {
+        frame = JSON.parse(payload);
+      } catch {
+        continue; // A partial or non-JSON frame is not worth failing the stream over.
+      }
+
+      const blockReason = frame?.promptFeedback?.blockReason;
+      if (blockReason) {
+        throw new GeminiError(`Gemini declined to answer (${blockReason}).`, { status: 502 });
+      }
+
+      const candidate = frame?.candidates?.[0];
+      for (const part of candidate?.content?.parts ?? []) {
+        if (typeof part.text === "string" && part.text.length > 0) {
+          yield { type: "delta", text: part.text };
+        }
+      }
+
+      const finish = candidate?.finishReason;
+      if (finish && finish !== "STOP" && finish !== "MAX_TOKENS") {
+        throw new GeminiError(`Gemini stopped early (${finish}).`, { status: 502 });
+      }
+    }
+  }
+}
+
+/**
+ * Stream a chat completion, walking the model chain until one answers.
+ *
+ * Yields `{type: "model", model}` once a model accepts, then `{type: "delta", text}`
+ * for each token chunk. Throws `GeminiError` on failure.
+ */
+export async function* streamChat({
+  apiKey,
+  messages,
+  system,
+  models = DEFAULT_MODEL_CHAIN,
+  temperature = 0.7,
+  signal,
+  fetchImpl = fetch,
+}) {
+  const requestBody = {
+    contents: toGeminiContents(messages),
+    generationConfig: { temperature },
+  };
+  if (system) {
+    requestBody.systemInstruction = { parts: [{ text: system }] };
+  }
+
+  let lastError = null;
+
+  for (const model of models) {
+    const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          // Header rather than a `?key=` query param: query strings land in proxy and
+          // server access logs, headers generally don't.
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) return;
+      throw new GeminiError(`Could not reach Gemini: ${error.message}`, {
+        status: 502,
+        model,
+        retryable: true,
+      });
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      const message = errorMessage(text, response.status);
+      if (shouldFallThrough(response.status, message)) {
+        lastError = describeFailure(response.status, message, model);
+        continue;
+      }
+      throw describeFailure(response.status, message, model);
+    }
+
+    if (!response.body) {
+      throw new GeminiError("Gemini returned an empty response body.", { status: 502, model });
+    }
+
+    yield { type: "model", model };
+    yield* parseSSE(response.body, signal);
+    return;
+  }
+
+  throw (
+    lastError ??
+    new GeminiError("No model in the chain was available for this API key.", { status: 502 })
+  );
+}

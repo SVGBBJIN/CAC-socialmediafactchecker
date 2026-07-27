@@ -48,7 +48,23 @@ Sources/SeerCore/          Pure Foundation — builds and tests anywhere
   Secrets/                 Keychain, AES-GCM bundle, store chaining
 Sources/SeerCapture/       iOS-only: WKWebView + RPScreenRecorder + diagnostic
 Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
+web/                       Chat UI — static front end, Gemini key held server-side
 ```
+
+## Chat UI
+
+`web/` is a chat interface over Gemini: static front end, one server route that holds the
+key. No build step, no dependencies.
+
+```bash
+cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
+cd web && npm run dev                  # → http://127.0.0.1:3000
+npm test                               # 19 tests, no network
+```
+
+Unlike the iOS path, the key here never reaches the client at all — there is a server to
+put it behind. See [web/README.md](web/README.md) for how that works, the controls that
+keep strangers off your quota, and the Vercel deploy.
 
 ## The architectural line
 

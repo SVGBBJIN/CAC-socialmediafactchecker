@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Seer Chat</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>👁</text></svg>"
+    />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <button class="new-chat" id="new-chat" type="button">
+            <span aria-hidden="true">＋</span> New chat
+          </button>
+        </div>
+        <nav class="conversations" id="conversations" aria-label="Conversations"></nav>
+        <div class="sidebar-foot">
+          <span class="dot" id="status-dot" aria-hidden="true"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button
+            class="icon-button"
+            id="toggle-sidebar"
+            type="button"
+            aria-label="Toggle conversation list"
+          >
+            ☰
+          </button>
+          <h1 id="chat-title">New chat</h1>
+          <span class="model-badge" id="model-badge" hidden></span>
+        </header>
+
+        <div class="messages" id="messages" role="log" aria-live="polite" aria-atomic="false">
+          <div class="empty-state" id="empty-state">
+            <h2>Ask anything</h2>
+            <p>Your API key stays on the server. The browser never receives it.</p>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <form class="composer" id="composer">
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Send a message…  (Enter to send, Shift+Enter for a new line)"
+              autocomplete="off"
+            ></textarea>
+            <button class="send" id="send" type="submit" aria-label="Send message">↑</button>
+            <button class="send stop" id="stop" type="button" hidden aria-label="Stop generating">
+              ■
+            </button>
+          </form>
+          <p class="composer-hint" id="composer-hint"></p>
+        </div>
+      </main>
+    </div>
+
+    <dialog class="passphrase" id="passphrase-dialog">
+      <form method="dialog" id="passphrase-form">
+        <h2>Passphrase required</h2>
+        <p>This chat is gated so it doesn't burn quota for strangers.</p>
+        <input
+          type="password"
+          id="passphrase-input"
+          placeholder="Passphrase"
+          autocomplete="current-password"
+        />
+        <button type="submit">Unlock</button>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

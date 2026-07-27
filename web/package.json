@@ -1,0 +1,14 @@
+{
+  "name": "seer-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chat UI for Seer. Static front end, Gemini called from a server-side route that holds the key.",
+  "scripts": {
+    "dev": "node server.js",
+    "test": "node --test test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
