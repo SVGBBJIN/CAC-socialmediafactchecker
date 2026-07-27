@@ -91,6 +91,7 @@ web/
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   lib/gemini.js    Gemini client + the model fallback chain.
   lib/guard.js     Passphrase check, rate limits, request validation.
+  lib/static.js    Request path → file on disk, with the containment rule.
   server.js        Local dev server. Mounts the same handlers Vercel runs.
 ```
 
@@ -98,6 +99,22 @@ web/
 Flash 3.6, then 3.5, 3-preview, 2.5, 2.0 — and falls through on availability errors
 (404/403) only. Model IDs get retired and key tiers differ; pinning one ID breaks in the
 field. See the comments in the Swift file for the full reasoning.
+
+## What keeps a request bounded
+
+- **Video attachments are sent once each.** A YouTube link becomes a `file_data` part at
+  its first mention only. Re-attaching it — which happens on every turn of a long thread
+  about one clip — makes Gemini ingest the same video repeatedly in a single request and
+  bill for each. Assistant turns never carry one.
+- **Two timeouts.** 30s for response headers, and a 120s stall timeout that is reset by
+  every chunk received. Without them a connection that opens and then goes quiet holds
+  the request, and the function instance behind it, indefinitely.
+- **A keep-alive every 15s.** Gemini's first token on a video it has to watch can take a
+  while, and proxies close silent connections. Sent as an SSE comment, so the client's
+  frame parser ignores it.
+- **An invalid key is terminal.** Gemini reports it as HTTP 400 / `API_KEY_INVALID`, not
+  401 — so it is matched on the message, not the status, and never falls through to the
+  next model with the same dead credential.
 
 ## Notes
 

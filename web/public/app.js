@@ -244,7 +244,18 @@ async function loadServerConfig() {
   try {
     const response = await fetch("/api/config");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    serverConfig = await response.json();
+    const received = await response.json();
+    // Merged over the defaults rather than replacing them: a partial or unexpected
+    // payload would otherwise leave `maxInputChars` undefined, and every length
+    // comparison against it silently false — losing the client-side cap entirely.
+    serverConfig = {
+      ...serverConfig,
+      ...received,
+      maxInputChars:
+        Number.isFinite(received?.maxInputChars) && received.maxInputChars > 0
+          ? received.maxInputChars
+          : serverConfig.maxInputChars,
+    };
   } catch {
     setStatus("Server unreachable", "bad");
     return;
@@ -275,7 +286,10 @@ function requestHeaders() {
 }
 
 async function send(text) {
-  let conversation = activeConversation() ?? newConversation();
+  const conversation = activeConversation() ?? newConversation();
+  // Remembered so the result can be filed against the conversation it belongs to even
+  // if the user switches away — or deletes it — while the answer is still streaming.
+  const conversationId = conversation.id;
 
   conversation.messages.push({ role: "user", content: text });
   if (conversation.messages.filter((m) => m.role === "user").length === 1) {
@@ -321,6 +335,8 @@ async function send(text) {
       throw new Error(payload.error ?? `Request failed (HTTP ${response.status}).`);
     }
 
+    if (!response.body) throw new Error("The server sent an empty response.");
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -334,9 +350,18 @@ async function send(text) {
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, boundary).trim();
         buffer = buffer.slice(boundary + 2);
+        // Anything that isn't a `data:` line is a comment or a field we don't use —
+        // the server's keep-alive pings arrive here as `: keep-alive`.
         if (!raw.startsWith("data:")) continue;
 
-        const frame = JSON.parse(raw.slice(5).trim());
+        let frame;
+        try {
+          frame = JSON.parse(raw.slice(5).trim());
+        } catch {
+          // One unreadable frame is not worth throwing away an answer in progress.
+          continue;
+        }
+
         if (frame.type === "model") {
           el.modelBadge.textContent = frame.model;
           el.modelBadge.hidden = false;
@@ -357,9 +382,16 @@ async function send(text) {
     setBusy(false);
   }
 
-  if (answer) conversation.messages.push({ role: "assistant", content: answer });
-  if (failed) conversation.messages.push({ role: "error", content: failed });
-  persist();
+  // Re-look up rather than reusing the captured object: if the conversation was deleted
+  // mid-stream it is no longer in `conversations`, and appending to the detached object
+  // would persist nothing while leaving the message on screen until the next render.
+  const target = conversations.find((c) => c.id === conversationId);
+  if (target) {
+    if (answer) target.messages.push({ role: "assistant", content: answer });
+    if (failed) target.messages.push({ role: "error", content: failed });
+    persist();
+  }
+
   renderMessages();
   el.input.focus();
 }

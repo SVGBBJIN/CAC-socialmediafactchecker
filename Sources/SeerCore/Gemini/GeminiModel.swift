@@ -56,12 +56,15 @@ public struct GeminiModelChain: Sendable, Equatable {
 ///   when a preview ID changes its input contract.
 /// - Everything else (429, 5xx, policy refusals) is handled by the retry layer or is
 ///   terminal; falling through would not help.
-func shouldFallThrough(to nextModel: Bool = true, on error: Error) -> Bool {
+func shouldFallThrough(on error: Error) -> Bool {
     guard case let ExtractionError.upstreamFailure(_, status, message) = error else { return false }
     switch status {
     case 404, 403:
         return true
     case 400:
+        // A bad *key* also arrives as a 400 (see `isInvalidKeyFailure`). It must not
+        // fall through: the next model would be tried with the same broken credential.
+        if isInvalidKeyFailure(status: status, message: message) { return false }
         let lowered = message.lowercased()
         return lowered.contains("not found")
             || lowered.contains("not supported")
@@ -70,4 +73,21 @@ func shouldFallThrough(to nextModel: Bool = true, on error: Error) -> Bool {
     default:
         return false
     }
+}
+
+/// Whether a failure is really "that key is no good", whatever status it arrived under.
+///
+/// Gemini answers an invalid key with **HTTP 400 / `API_KEY_INVALID`**, not 401 —
+/// verified against the live endpoint on 2026-07-27. Worth naming rather than leaving
+/// implicit: the message is the only thing distinguishing it from an ordinary bad
+/// request, and getting it wrong means walking the whole model chain with a credential
+/// that cannot work.
+func isInvalidKeyFailure(status: Int?, message: String) -> Bool {
+    if status == 401 { return true }
+    guard status == 400 || status == 403 else { return false }
+    let lowered = message.lowercased()
+    return lowered.contains("api key not valid")
+        || lowered.contains("api key is invalid")
+        || lowered.contains("invalid api key")
+        || lowered.contains("api_key_invalid")
 }

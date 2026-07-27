@@ -5,7 +5,6 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalize, join } from "node:path";
 
 import {
   streamChat,
@@ -14,7 +13,9 @@ import {
   toGeminiContents,
   youTubeVideoID,
   findYouTubeVideoIDs,
+  isInvalidKeyFailure,
 } from "./lib/gemini.js";
+import { resolveStaticPath, contentType } from "./lib/static.js";
 import {
   passwordMatches,
   checkRateLimit,
@@ -150,6 +151,53 @@ test("an upstream auth failure never echoes the upstream body back", async () =>
   );
 });
 
+/** Captured verbatim from the live endpoint on 2026-07-27 by sending a junk key. */
+const LIVE_INVALID_KEY_BODY = JSON.stringify({
+  error: {
+    code: 400,
+    message: "API key not valid. Please pass a valid API key.",
+    status: "INVALID_ARGUMENT",
+    details: [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        reason: "API_KEY_INVALID",
+        domain: "googleapis.com",
+        metadata: { service: "generativelanguage.googleapis.com" },
+      },
+    ],
+  },
+});
+
+test("an invalid key is recognised even though Gemini reports it as 400, not 401", async () => {
+  // The status is the thing that surprises: keying off 401 alone misses every real
+  // bad-key response, so the operator gets no pointer to where the key is configured.
+  let calls = 0;
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "junk",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b", "c"],
+        fetchImpl: async () => {
+          calls += 1;
+          return { ok: false, status: 400, text: async () => LIVE_INVALID_KEY_BODY };
+        },
+      }),
+    ),
+    /Check GEMINI_API_KEY/,
+  );
+  assert.equal(calls, 1, "a bad key is terminal — don't spend it on the rest of the chain");
+});
+
+test("isInvalidKeyFailure does not fire on unrelated 400s", () => {
+  assert.equal(isInvalidKeyFailure(400, "API key not valid. Please pass a valid API key."), true);
+  assert.equal(isInvalidKeyFailure(401, "anything"), true);
+  assert.equal(isInvalidKeyFailure(400, "Invalid JSON payload received."), false);
+  assert.equal(isInvalidKeyFailure(400, "models/x is not supported"), false);
+  assert.equal(isInvalidKeyFailure(429, "quota"), false);
+  assert.equal(isInvalidKeyFailure(500, "boom"), false);
+});
+
 test("a blocked prompt surfaces as an error, not as silence", async () => {
   await assert.rejects(
     collect(
@@ -225,6 +273,9 @@ test("rejects non-video YouTube URLs and non-YouTube URLs", () => {
   assert.equal(youTubeVideoID("https://example.com/watch?v=dQw4w9WgXcQ"), null);
   assert.equal(youTubeVideoID("not a url"), null);
   assert.equal(youTubeVideoID("https://www.youtube.com/shorts/tooshort"), null);
+  // Look-alike hosts: `youtu.be` has to match as a domain, not as a substring.
+  assert.equal(youTubeVideoID("https://youtu.be.example.com/dQw4w9WgXcQ"), null);
+  assert.equal(youTubeVideoID("https://notyoutube.com/watch?v=dQw4w9WgXcQ"), null);
 });
 
 test("finds every distinct video mentioned in free text, in order, without duplicates", () => {
@@ -249,6 +300,47 @@ test("a YouTube link becomes a file_data part alongside the text", () => {
   ]);
 });
 
+test("a video is attached once, at its first mention, not on every turn", () => {
+  // Re-attaching makes Gemini ingest the same video again in the same request, and bill
+  // for it. A long thread about one clip is the common case, not an edge case.
+  const contents = toGeminiContents([
+    { role: "user", content: "what claims are in https://youtu.be/dQw4w9WgXcQ ?" },
+    { role: "assistant", content: "It claims several things." },
+    { role: "user", content: "and what about the bit at 2:00 of https://youtu.be/dQw4w9WgXcQ ?" },
+  ]);
+
+  const fileParts = contents.flatMap((c) => c.parts.filter((p) => p.file_data));
+  assert.equal(fileParts.length, 1, "the same video should be attached exactly once");
+  assert.ok(contents[0].parts.some((p) => p.file_data), "attached at first mention");
+  assert.ok(contents[2].parts.every((p) => !p.file_data), "not re-attached later");
+});
+
+test("a second, different video still gets attached", () => {
+  const contents = toGeminiContents([
+    { role: "user", content: "https://youtu.be/dQw4w9WgXcQ" },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: "now compare it to https://youtu.be/AbCdEfGhIjK" },
+  ]);
+
+  const uris = contents.flatMap((c) => c.parts.filter((p) => p.file_data)).map((p) => p.file_data.file_uri);
+  assert.deepEqual(uris, [
+    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "https://www.youtube.com/watch?v=AbCdEfGhIjK",
+  ]);
+});
+
+test("an assistant turn never carries a file_data part", () => {
+  // A `model` turn is a record of what Gemini said, not an input to fetch. An assistant
+  // that quotes the link back would otherwise re-attach the video every request.
+  const contents = toGeminiContents([
+    { role: "user", content: "hi" },
+    { role: "assistant", content: "You mean https://youtu.be/dQw4w9WgXcQ ?" },
+  ]);
+
+  assert.equal(contents[1].role, "model");
+  assert.deepEqual(contents[1].parts, [{ text: "You mean https://youtu.be/dQw4w9WgXcQ ?" }]);
+});
+
 test("assistant maps to Gemini's `model` role", () => {
   assert.deepEqual(
     toGeminiContents([
@@ -260,6 +352,118 @@ test("assistant maps to Gemini's `model` role", () => {
       { role: "model", parts: [{ text: "b" }] },
     ],
   );
+});
+
+test("a final frame with no trailing newline is still delivered", () => {
+  // Losing it silently truncates the last words of an answer, which looks like the model
+  // stopping early rather than like a parser bug.
+  const body = `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "tail" }] } }] })}`;
+  return collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([body]),
+    }),
+  ).then((frames) => assert.deepEqual(frames.at(-1), { type: "delta", text: "tail" }));
+});
+
+test("a request that never gets response headers fails instead of hanging", async () => {
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["m"],
+        requestTimeoutMs: 20,
+        // Resolves only when aborted — the shape of a connection that opens and stalls.
+        fetchImpl: (url, init) =>
+          new Promise((_, reject) => {
+            init.signal.addEventListener(
+              "abort",
+              () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              { once: true },
+            );
+          }),
+      }),
+    ),
+    (error) => error.status === 504 && /did not respond within/.test(error.message),
+  );
+});
+
+test("a stream that stalls mid-answer fails instead of hanging", async () => {
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["m"],
+        idleTimeoutMs: 20,
+        fetchImpl: async (url, init) => ({
+          ok: true,
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(frame("first"));
+            await new Promise((_, reject) => {
+              init.signal.addEventListener("abort", () => reject(new Error("aborted")), {
+                once: true,
+              });
+            });
+          })(),
+        }),
+      }),
+    ),
+    (error) => error.status === 504 && /stopped sending data/.test(error.message),
+  );
+});
+
+test("a stream making steady progress is not killed by the idle timeout", async () => {
+  const encoder = new TextEncoder();
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      idleTimeoutMs: 60,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          // Four chunks, each well inside the window but together well past it: the
+          // deadline must be re-armed per chunk, not set once for the whole stream.
+          for (const word of ["a", "b", "c", "d"]) {
+            await new Promise((r) => setTimeout(r, 25));
+            yield encoder.encode(frame(word));
+          }
+        })(),
+      }),
+    }),
+  );
+
+  assert.deepEqual(
+    frames.filter((f) => f.type === "delta").map((f) => f.text),
+    ["a", "b", "c", "d"],
+  );
+});
+
+test("a caller who aborts gets silence, not an error to render", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      signal: controller.signal,
+      fetchImpl: async () => {
+        throw new Error("should not be called");
+      },
+    }),
+  );
+
+  assert.deepEqual(frames, []);
 });
 
 test("fall-through rules", () => {
@@ -351,20 +555,46 @@ test("an unknown role is coerced to user rather than passed upstream", () => {
 
 /* ---------------- Static path handling ---------------- */
 
-test("no encoded traversal escapes the public directory", () => {
-  const PUBLIC_DIR = "/srv/web/public";
+const PUBLIC_DIR = "/srv/web/public";
+
+test("no traversal, encoded or otherwise, escapes the public directory", () => {
   for (const attempt of [
     "/../.env.local",
     "/a/../../.env.local",
     "/%2e%2e/%2e%2e/package.json",
+    "/%2E%2E/%2E%2E/.env.local",
     "/../../../../etc/passwd",
+    "/sub/%2e%2e/%2e%2e/%2e%2e/etc/shadow",
   ]) {
-    const decoded = new URL(attempt, "http://localhost").pathname;
-    const relative = normalize(decoded === "/" ? "/index.html" : decoded);
-    const resolved = relative.includes("..") ? null : join(PUBLIC_DIR, relative);
+    const resolved = resolveStaticPath(new URL(attempt, "http://localhost").pathname, PUBLIC_DIR);
     assert.ok(
       resolved === null || resolved.startsWith(`${PUBLIC_DIR}/`),
       `${attempt} escaped to ${resolved}`,
     );
   }
+});
+
+test("percent-encoded filenames resolve instead of 404ing", () => {
+  // The previous string-matching guard never decoded, so any file with a space in its
+  // name was unreachable.
+  assert.equal(resolveStaticPath("/%20x.css", PUBLIC_DIR), `${PUBLIC_DIR}/ x.css`);
+  assert.equal(resolveStaticPath("/a%20b.css", PUBLIC_DIR), `${PUBLIC_DIR}/a b.css`);
+});
+
+test("a NUL byte or malformed encoding is refused outright", () => {
+  assert.equal(resolveStaticPath("/style.css%00/../../.env", PUBLIC_DIR), null);
+  assert.equal(resolveStaticPath("/%zz", PUBLIC_DIR), null);
+});
+
+test("ordinary paths still resolve, and / means index.html", () => {
+  assert.equal(resolveStaticPath("/", PUBLIC_DIR), `${PUBLIC_DIR}/index.html`);
+  assert.equal(resolveStaticPath("/app.js", PUBLIC_DIR), `${PUBLIC_DIR}/app.js`);
+  assert.equal(resolveStaticPath("/sub/dir/f.js", PUBLIC_DIR), `${PUBLIC_DIR}/sub/dir/f.js`);
+});
+
+test("content types are served for the assets the app actually ships", () => {
+  assert.equal(contentType("/x/index.html"), "text/html; charset=utf-8");
+  assert.equal(contentType("/x/app.js"), "text/javascript; charset=utf-8");
+  assert.equal(contentType("/x/style.CSS"), "text/css; charset=utf-8");
+  assert.equal(contentType("/x/unknown.bin"), "application/octet-stream");
 });

@@ -138,13 +138,21 @@ public struct RetryingHTTPClient: Sendable {
 
     static func retryAfterSeconds(from response: HTTPURLResponse) -> TimeInterval? {
         guard let raw = response.value(forHTTPHeaderField: "Retry-After") else { return nil }
-        if let seconds = TimeInterval(raw.trimmingCharacters(in: .whitespaces)) { return seconds }
-        // The header also permits an HTTP-date.
+        // Trimmed once and used for both forms. Previously only the numeric parse saw
+        // the trimmed value, so a well-formed HTTP-date arriving with surrounding
+        // whitespace parsed as neither and the server's guidance was silently dropped.
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if let seconds = TimeInterval(trimmed) { return seconds }
+
+        // The header also permits an HTTP-date. Built per call rather than cached in a
+        // `static`: `DateFormatter` is not `Sendable`, and this type is, so a shared
+        // instance would need `nonisolated(unsafe)` to satisfy strict concurrency. Not
+        // worth it on a path that is already about to sleep for seconds.
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "GMT")
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        guard let date = formatter.date(from: raw) else { return nil }
+        guard let date = formatter.date(from: trimmed) else { return nil }
         return max(0, date.timeIntervalSinceNow)
     }
 

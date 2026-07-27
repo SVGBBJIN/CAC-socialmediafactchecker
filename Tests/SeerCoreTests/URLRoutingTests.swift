@@ -45,6 +45,10 @@ final class YouTubeURLTests: XCTestCase {
             ("https://www.youtube.com/@someChannel", nil),
             ("https://www.youtube.com/playlist?list=PLabcdefghij", nil),
             ("https://www.youtube.com/shorts/not-an-id", nil),
+            // Look-alike host. `youtu.be` has to match as a domain: matched as a
+            // substring, this reads a video ID off an unrelated site's path and sends
+            // that site's URL upstream.
+            ("https://youtu.be.example.com/jNQXAC9IVRw", nil),
         ]
         for (string, expected) in cases {
             let url = URL(string: string)!
