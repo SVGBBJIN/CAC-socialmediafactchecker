@@ -18,12 +18,16 @@ public final class WebViewEmbedRenderer: NSObject {
 
     public override init() { super.init() }
 
-    /// Loads the embed into a web view added to `container`, and resolves once the
-    /// page reports its player is ready.
+    /// Loads the embed into a web view added to `container` and waits for the platform's
+    /// script to hydrate it into a player.
+    ///
+    /// Deliberately does **not** start playback — see ``startPlayback()``. The recorder
+    /// has to be running before the first frame of audio, so the caller decides when
+    /// playback begins.
     ///
     /// - Parameter settleTime: grace period after `didFinish` for the platform's own
-    ///   script to hydrate the blockquote into a player and start playback. The load
-    ///   callback fires when the *document* is done, which is well before the video is.
+    ///   script to hydrate the blockquote into a player. The load callback fires when
+    ///   the *document* is done, which is well before the player exists.
     public func present(
         _ embed: EmbeddedMedia,
         in container: UIView,
@@ -53,7 +57,6 @@ public final class WebViewEmbedRenderer: NSObject {
         }
 
         try await Task.sleep(nanoseconds: UInt64(settleTime * 1_000_000_000))
-        try await startPlaybackIfNeeded()
     }
 
     /// Nudges any `<video>` on the page into playing.
@@ -61,7 +64,12 @@ public final class WebViewEmbedRenderer: NSObject {
     /// Platform players usually autoplay muted, then unmute on interaction — which is
     /// precisely the case we cannot rely on, since a muted player is a silent
     /// recording. So unmute explicitly and set volume before playing.
-    private func startPlaybackIfNeeded() async throws {
+    ///
+    /// Note that this returns as soon as `play()` has been *issued*: the promise it
+    /// returns is deliberately not awaited, because a player that needs buffering can
+    /// leave it pending for seconds. Use ``observePlayback(for:pollInterval:)`` to find
+    /// out whether playback actually happened.
+    public func startPlayback() async {
         let script = """
         (function () {
           var videos = document.querySelectorAll('video');
@@ -97,6 +105,37 @@ public final class WebViewEmbedRenderer: NSObject {
         """
         let result = try? await webView?.evaluateJavaScript(script)
         return (result as? Bool) ?? (result as? NSNumber)?.boolValue ?? false
+    }
+
+    /// Watches for audible playback across `duration`, returning true if it was ever
+    /// observed. Doubles as the capture window — it spans the full `duration`.
+    ///
+    /// A single sample cannot answer this question, in either direction. Sample too
+    /// early and `currentTime` is still 0 because `play()` has only just been issued;
+    /// sample too late and a short clip has already run to its end and gone `paused`.
+    /// Both read as "never played", and the caller uses that to decide whether a
+    /// recording is trustworthy — so a false negative here throws away a perfectly good
+    /// capture and, worse, looks exactly like the ReplayKit audio defect this path is
+    /// trying to diagnose.
+    ///
+    /// So: poll, and latch on the first sighting.
+    public func observePlayback(
+        for duration: TimeInterval,
+        pollInterval: TimeInterval = 0.5
+    ) async -> Bool {
+        var everPlayed = false
+        let deadline = Date().addingTimeInterval(duration)
+
+        while true {
+            if !everPlayed {
+                everPlayed = await isPlayingAudibly()
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            try? await Task.sleep(nanoseconds: UInt64(min(pollInterval, remaining) * 1_000_000_000))
+        }
+
+        return everPlayed
     }
 
     public func tearDown() {

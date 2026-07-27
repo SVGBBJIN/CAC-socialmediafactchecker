@@ -101,9 +101,11 @@ public struct OEmbedResolver: EmbedResolver {
     }
 
     public func resolve(_ url: URL) async throws -> EmbeddedMedia {
+        let canonical = await expandedShortLink(url)
+
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
         components.queryItems =
-            [URLQueryItem(name: "url", value: url.absoluteString)] + additionalQueryItems
+            [URLQueryItem(name: "url", value: canonical.absoluteString)] + additionalQueryItems
 
         guard let requestURL = components.url else {
             throw ExtractionError.notAMediaURL(url)
@@ -119,7 +121,37 @@ public struct OEmbedResolver: EmbedResolver {
             sleeper: sleeper
         )
         let data = try await client.send(request)
+        // Provenance keeps the URL the user actually shared, not the expanded one.
         return try Self.parse(data, sourceURL: url, platform: platform)
+    }
+
+    /// Expands a share-sheet short link into the canonical post URL.
+    ///
+    /// TikTok's own "Copy link" produces `vm.tiktok.com/…`, `vt.tiktok.com/…` or
+    /// `tiktok.com/t/…` — redirect keys, not post URLs — so this is the *typical* input,
+    /// not an edge case. The oEmbed endpoint does not follow them; handed one it simply
+    /// fails. `URLSession` does follow redirects, so a HEAD request lands on the real URL
+    /// and reports it back via `response.url`.
+    ///
+    /// Best-effort by design: if expansion fails, the original URL goes to oEmbed so the
+    /// error the user sees comes from the endpoint rather than from this hop.
+    private func expandedShortLink(_ url: URL) async -> URL {
+        guard Self.isShortLink(url) else { return url }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await transport.send(request),
+              let resolved = response.url,
+              !Self.isShortLink(resolved)
+        else { return url }
+        return resolved
+    }
+
+    static func isShortLink(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        if host.hasPrefix("vm.") || host.hasPrefix("vt.") { return true }
+        let segments = url.pathComponents.dropFirst()
+        return host.hasSuffix("tiktok.com") && segments.first?.lowercased() == "t"
     }
 
     static func parse(_ data: Data, sourceURL: URL, platform: Platform) throws -> EmbeddedMedia {

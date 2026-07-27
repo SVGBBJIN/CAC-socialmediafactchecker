@@ -116,8 +116,6 @@ public struct AudioCaptureDiagnostic {
             return report
         }
 
-        report.playerReportedPlaying = await renderer.isPlayingAudibly()
-
         let recorder = RPScreenRecorder.shared()
         guard recorder.isAvailable, !recorder.isRecording else {
             report.failure = "RPScreenRecorder unavailable or already recording"
@@ -139,7 +137,13 @@ public struct AudioCaptureDiagnostic {
             return report
         }
 
-        try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+        // Playback starts only once the tap is live, and is then watched across the whole
+        // window. Sampling it once — as this did — reports "never played" for a clip that
+        // simply hadn't reached currentTime > 0 yet, and the summary below turns that
+        // into a confident *wrong* verdict blaming autoplay.
+        await renderer.startPlayback()
+        report.playerReportedPlaying = await renderer.observePlayback(for: duration)
+
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             recorder.stopCapture { _ in continuation.resume() }
         }

@@ -31,6 +31,13 @@ its platform's, so the two can't drift apart.
 
 ## Status
 
+> **Note on the capture path's test coverage.** `SeerCoreTests` depends on `SeerCore`
+> only, and every file in `SeerCapture` is behind `#if os(iOS)`, so on Linux CI those
+> files compile to nothing and no test touches them. Everything in `SeerCapture` —
+> `ScreenRecorderCaptureSource`, `WebViewEmbedRenderer`, `AudioCaptureDiagnostic` — is
+> therefore unverified by the test suite and needs a device or an iOS-SDK type-check.
+> Treat changes there with more suspicion than the green build implies.
+
 | Platform | Path | Status |
 |---|---|---|
 | YouTube | native ingestion | **Working.** Verified against the live API. |
@@ -131,6 +138,17 @@ Two things the naive version gets wrong, handled in `WebViewEmbedRenderer`:
   audio-session bug, from a completely different cause. The renderer explicitly unmutes and
   sets volume before playing, and `isPlayingAudibly()` verifies a `<video>` is actually
   playing, unmuted, past 0s before the recording is trusted.
+- **The recorder starts before playback, not after.** `present()` loads and hydrates the
+  embed but deliberately leaves it paused; the caller starts the recorder and only then
+  calls `startPlayback()`. Anything that sounds before the tap is live is audio the file
+  will never contain, and `startCapture` can sit on a permission prompt long enough for a
+  short clip to finish entirely.
+- **Playback is polled, not sampled.** `observePlayback(for:)` watches across the whole
+  window and latches on the first sighting. A single check cannot answer the question in
+  either direction: too early and `currentTime` is still 0 because `play()` has only just
+  been issued, too late and a short clip has already ended and gone `paused`. Both read as
+  "never played" — which discards a good capture *and* imitates the ReplayKit defect this
+  path exists to diagnose.
 
 The embed document is loaded against a real platform origin, not `about:blank`; platform
 embed scripts check the origin and refuse to hydrate otherwise.
