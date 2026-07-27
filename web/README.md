@@ -58,12 +58,21 @@ still applies when the app is the thing that's wrong.
 The layout is already what Vercel expects — `public/` served statically, `api/*.js` as
 Node functions — so the deploy is configuration, not a rewrite:
 
-1. **Root Directory → `web`** in the Vercel project settings. Without this it looks at the
-   repo root, finds a Swift package, and builds nothing useful.
-2. Add `GEMINI_API_KEY` and `APP_PASSWORD` as Environment Variables (all environments).
+1. Add `GEMINI_API_KEY` and `APP_PASSWORD` as Environment Variables (all environments).
    Vercel stores them encrypted and injects them at runtime — same `process.env` reads,
    no code change. `.env.local` is for local use only and is not uploaded.
+2. Check **Settings → Git → Production Branch** matches the branch you actually merge to.
+   If it doesn't, pushes build as previews and the production URL keeps serving whatever
+   was deployed the day the project was imported.
 3. Deploy.
+
+The repo root is a Swift package, so a root-directory build would otherwise find nothing
+web-shaped and produce an empty deployment — every path 404s. The `vercel.json` at the
+repo root is what prevents that: it builds `web/api/*.js` as Node functions and
+`web/public/**` as static files, and routes `/api/*` and `/` at them. Setting **Root
+Directory → `web`** in project settings instead also works — then Vercel sees `web/` as
+the project root, zero-config detection applies, and the root `vercel.json` is ignored.
+Either path deploys correctly; neither one requires the other.
 
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function
 instance and resets on a cold start, so on Vercel the real ceiling is looser than the
