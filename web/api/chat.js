@@ -4,18 +4,15 @@
 // ask for, the credential. Written against raw Node request/response objects so the
 // same file runs under `node server.js` locally and as a Vercel Node function.
 
-import { streamChat, modelChainFromEnv, GeminiError } from "../lib/gemini.js";
+import { modelChainFromEnv, GeminiError } from "../lib/gemini.js";
+import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "../lib/verified-chat.js";
 import { authorize, config, validateMessages, GuardError } from "../lib/guard.js";
 
-const SYSTEM_PROMPT =
-  process.env.SYSTEM_PROMPT ||
-  "You are a helpful assistant. Be direct and concise. Use markdown for structure when it helps. " +
-    "When the user shares a YouTube or TikTok link, the video is attached for you to watch " +
-    "directly — don't say you can't access it. Transcribe or quote the specific claims made " +
-    "before evaluating them, and read any text shown on screen, which on short-form video is " +
-    "often where the claim actually lives. A bracketed note in the user's turn saying a video " +
-    "could not be attached is from the app, not the user: say what went wrong and answer from " +
-    "the link alone.";
+// `SYSTEM_PROMPT` still overrides, but the default is the fact-checking prompt in
+// lib/verified-chat.js — the one that tells the model its facts come from `web_search`
+// and that its answer is audited against what that tool returned. Overriding it replaces
+// the instruction, not the enforcement: the audit runs either way.
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || FACT_CHECK_SYSTEM_PROMPT;
 
 // How long the stream may go without writing before we send an SSE comment to keep it
 // open. Proxies — Vercel's included — close a connection that has been silent too long,
@@ -115,7 +112,7 @@ export default async function handler(req, res) {
   heartbeat.unref?.();
 
   try {
-    for await (const frame of streamChat({
+    for await (const frame of verifiedChat({
       apiKey,
       messages,
       system: SYSTEM_PROMPT,

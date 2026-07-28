@@ -293,6 +293,118 @@ await withPage(async (page) => {
   );
 });
 
+/* ---------------- the evidence trail ---------------- */
+
+// What the server sends for a normal verified answer: a search, the answer, the ledger.
+const SEARCHED = {
+  frames: [
+    { type: "model", model: "gemini-3.6-flash" },
+    {
+      type: "search",
+      query: "bridge cost audit",
+      claim: "The bridge cost $4bn",
+      provider: "test",
+      results: [
+        { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" },
+        { n: 2, title: "Cost overrun coverage", url: "https://news.example/story", domain: "news.example" },
+      ],
+    },
+    { type: "delta", text: "The bridge cost $2.1 billion [1], so the claim is wrong [2]." },
+    {
+      type: "sources",
+      sources: [
+        { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" },
+        { n: 2, title: "Cost overrun coverage", url: "https://news.example/story", domain: "news.example" },
+      ],
+    },
+    { type: "done" },
+  ],
+};
+
+scriptedAs([SEARCHED]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .sources");
+
+  const chip = (await page.locator(".search-chip").innerText()).trim();
+  check("the search that was run is shown", /bridge cost audit/.test(chip), chip);
+
+  const sources = await page.locator(".sources ol li").count();
+  check("the bibliography lists every retrieved source", sources === 2, `count=${sources}`);
+
+  // The marker is a link to the page it cites — a citation the reader can't follow is
+  // most of the way to no citation at all.
+  const href = await page.locator("a.citation").first().getAttribute("href");
+  check("citation markers link to their source", href === "https://audit.example/report", String(href));
+
+  // …and it survives a reload, or the answer becomes unauditable the moment the page
+  // refreshes.
+  await page.reload();
+  await page.waitForSelector(".message.assistant .sources");
+  const afterReload = await page.locator("a.citation").count();
+  check("the evidence trail survives a reload", afterReload === 2, `count=${afterReload}`);
+});
+
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      { type: "delta", text: "REJECTED ANSWER with no citations." },
+      { type: "reset", reason: "citation-check" },
+      { type: "delta", text: "The bridge cost $2.1 billion [1]." },
+      {
+        type: "sources",
+        sources: [{ n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" }],
+      },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .sources");
+  const text = await page.locator(".message.assistant .body").last().innerText();
+  check("a rejected answer is cleared from the screen", !text.includes("REJECTED"), text);
+  check("the rewrite is what remains", text.includes("$2.1 billion"), text);
+});
+
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      { type: "delta", text: "The bridge cost $2.1 billion." },
+      { type: "unverified", message: "Unverified: 1 statement carries no citation.", violations: [] },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .unverified");
+  const notice = await page.locator(".unverified").innerText();
+  check("an answer that failed the check is labelled", /Unverified/.test(notice), notice);
+  await page.reload();
+  await page.waitForSelector(".message.assistant .unverified");
+  check("the label survives a reload", true);
+});
+
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      { type: "search", query: "bridge cost", error: "DuckDuckGo returned no parseable results." },
+      { type: "delta", text: "I could not check that claim." },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".search-chip.failed");
+  const chip = await page.locator(".search-chip.failed").innerText();
+  check("a failed search is shown as failed", /no parseable results/.test(chip), chip);
+});
+
 await browser.close();
 server.close();
 

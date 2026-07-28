@@ -510,6 +510,12 @@ function* framesFromLine(line) {
     if (typeof part.text === "string" && part.text.length > 0) {
       yield { type: "delta", text: part.text };
     }
+    // A tool call arrives as a whole part, not a token at a time; `args` is already an
+    // object here (Gemini sends structured arguments, not a JSON string like some APIs).
+    const call = part.functionCall ?? part.function_call;
+    if (call?.name) {
+      yield { type: "function_call", call: { name: call.name, args: call.args ?? {} } };
+    }
   }
 
   const finish = candidate?.finishReason;
@@ -545,10 +551,29 @@ async function* parseSSE(body, deadline, idleTimeoutMs) {
 }
 
 /**
+ * How many rounds of tool calls one message may take before the model is made to answer.
+ *
+ * Each round is a full model call plus however many searches it asked for, so this is a
+ * latency and a spend ceiling at once. Four is enough for a multi-claim video — one search
+ * per claim, plus a follow-up when the first query lands badly — and short of the loop a
+ * model can otherwise fall into, re-searching the same claim because it doesn't like the
+ * answer.
+ */
+export const MAX_TOOL_ROUNDS = 4;
+
+/**
  * Stream a chat completion, walking the model chain until one answers.
  *
  * Yields `{type: "model", model}` once a model accepts, then `{type: "delta", text}`
  * for each token chunk. Throws `GeminiError` on failure.
+ *
+ * When `tools` and `toolRunner` are supplied the model may call out mid-answer: a
+ * `functionCall` part suspends the stream, `toolRunner` executes it, the result is
+ * appended to the conversation and the model is called again with it. That loop runs up
+ * to `maxToolRounds` times and is what lets the model search the web before answering.
+ * `toolRunner(call, {signal})` returns `{response, frame}` — `response` goes back to the
+ * model as the `functionResponse` payload, and `frame`, if present, is yielded to the
+ * consumer so the UI can show what was searched.
  */
 export async function* streamChat({
   apiKey,
@@ -563,9 +588,11 @@ export async function* streamChat({
   idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS,
   attachTikTok = true,
   tikTokOptions = {},
+  tools = null,
+  toolRunner = null,
+  maxToolRounds = MAX_TOOL_ROUNDS,
 }) {
   const deadline = new StreamDeadline(signal);
-  let lastError = null;
   let tikTok = null;
 
   try {
@@ -582,94 +609,80 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const requestBody = {
-      contents: toGeminiContents(messages, { tikTok }),
-      // camelCase per the REST reference. Checked against the live endpoint on
-      // 2026-07-28: it accepts `maxOutputTokens` and `max_output_tokens` alike — the
-      // protobuf JSON parser takes both the proto field name and its JSON name, which is
-      // why the snake_case spelling in GeminiWire.swift is equally valid. A name it
-      // genuinely doesn't know is rejected outright ("Unknown name ..."), not ignored, so
-      // a typo here fails loudly rather than quietly dropping the cap.
-      generationConfig: { temperature, maxOutputTokens },
-    };
-    if (system) {
-      requestBody.systemInstruction = { parts: [{ text: system }] };
-    }
+    const contents = toGeminiContents(messages, { tikTok });
+    const useTools = Boolean(tools?.length && toolRunner);
+    let announced = null;
 
-    for (const model of models) {
-      if (deadline.callerAborted) return;
-      const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
-
-      let response;
-      deadline.arm(requestTimeoutMs);
-      try {
-        response = await fetchImpl(url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            // Header rather than a `?key=` query param: query strings land in proxy and
-            // server access logs, headers generally don't.
-            "x-goog-api-key": apiKey,
-          },
-          body: JSON.stringify(requestBody),
-          signal: deadline.signal,
-        });
-      } catch (error) {
-        // The caller giving up is not a failure to report — it's what they asked for.
-        if (deadline.callerAborted) return;
-        if (deadline.timedOut) {
-          throw new GeminiError(
-            `Gemini did not respond within ${Math.round(requestTimeoutMs / 1000)}s. Try again shortly.`,
-            { status: 504, model, retryable: true },
-          );
-        }
-        throw new GeminiError(`Could not reach Gemini: ${error.message}`, {
-          status: 502,
-          model,
-          retryable: true,
-        });
-      } finally {
-        deadline.clear();
+    for (let round = 0; ; round += 1) {
+      const requestBody = {
+        contents,
+        // camelCase per the REST reference. Checked against the live endpoint on
+        // 2026-07-28: it accepts `maxOutputTokens` and `max_output_tokens` alike — the
+        // protobuf JSON parser takes both the proto field name and its JSON name, which is
+        // why the snake_case spelling in GeminiWire.swift is equally valid. A name it
+        // genuinely doesn't know is rejected outright ("Unknown name ..."), not ignored, so
+        // a typo here fails loudly rather than quietly dropping the cap.
+        generationConfig: { temperature, maxOutputTokens },
+      };
+      if (system) {
+        requestBody.systemInstruction = { parts: [{ text: system }] };
       }
+      // Past the budget the tools are withdrawn rather than merely refused. A model handed
+      // a tool it is told not to use will often try anyway; a model with no tool declared
+      // answers with what it has, which is the outcome the budget exists to force.
+      if (useTools && round < maxToolRounds) requestBody.tools = tools;
 
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        const message = errorMessage(text, response.status);
-        if (shouldFallThrough(response.status, message)) {
-          lastError = describeFailure(response.status, message, model);
+      const calls = [];
+      const spoken = [];
+
+      for await (const frame of streamRound({
+        requestBody,
+        models,
+        apiKey,
+        fetchImpl,
+        deadline,
+        requestTimeoutMs,
+        idleTimeoutMs,
+      })) {
+        if (frame.type === "function_call") {
+          calls.push(frame.call);
           continue;
         }
-        throw describeFailure(response.status, message, model);
-      }
-
-      if (!response.body) {
-        throw new GeminiError("Gemini returned an empty response body.", { status: 502, model });
-      }
-
-      yield { type: "model", model };
-
-      // The stall clock starts here and is pushed back by every chunk that arrives, so
-      // a long answer is fine and a dead connection is not.
-      deadline.arm(idleTimeoutMs);
-      try {
-        yield* parseSSE(response.body, deadline, idleTimeoutMs);
-      } catch (error) {
-        if (deadline.callerAborted) return;
-        if (deadline.timedOut) {
-          throw new GeminiError(
-            `Gemini stopped sending data for ${Math.round(idleTimeoutMs / 1000)}s. Try again shortly.`,
-            { status: 504, model, retryable: true },
-          );
+        if (frame.type === "model") {
+          // The chain is walked afresh each round, but the consumer only cares when the
+          // answer changes hands — re-announcing the same model every round would make
+          // the UI badge flicker for no reason.
+          if (frame.model === announced) continue;
+          announced = frame.model;
         }
-        throw error;
+        if (frame.type === "delta") spoken.push(frame.text);
+        yield frame;
       }
-      return;
-    }
 
-    throw (
-      lastError ??
-      new GeminiError("No model in the chain was available for this API key.", { status: 502 })
-    );
+      // A call with nothing to run it is not answerable — treat the turn as finished
+      // rather than crashing on a runner that isn't there.
+      if (calls.length === 0 || !useTools) return;
+      if (deadline.callerAborted) return;
+
+      // The model's own turn has to go back verbatim — text first, then the calls it made.
+      // Dropping the text would lose the reasoning the calls were made in service of.
+      const modelParts = [];
+      const said = spoken.join("");
+      if (said.trim()) modelParts.push({ text: said });
+      for (const call of calls) modelParts.push({ functionCall: { name: call.name, args: call.args } });
+      contents.push({ role: "model", parts: modelParts });
+
+      const responseParts = [];
+      for (const call of calls) {
+        const { response, frame } = await toolRunner(call, { signal });
+        if (frame) yield frame;
+        responseParts.push({ functionResponse: { name: call.name, response } });
+      }
+      // Function results go back under `user`. Gemini's `Content.role` only accepts
+      // `user` and `model`; the results are an input to the next turn, so they are the
+      // user's side of it.
+      contents.push({ role: "user", parts: responseParts });
+    }
   } finally {
     deadline.dispose();
     // Runs on every exit — including the consumer abandoning the generator, which calls
@@ -677,4 +690,98 @@ export async function* streamChat({
     // out, whether or not the answer arrived.
     await tikTok?.cleanup();
   }
+}
+
+/**
+ * One request/response round: walk the model chain until one accepts, then stream it.
+ *
+ * Split out of `streamChat` when tool calling arrived, because a round is now something
+ * that happens several times per message and the fall-through logic has to be identical
+ * on each. The `deadline` is shared and owned by the caller — it spans the whole message.
+ */
+async function* streamRound({
+  requestBody,
+  models,
+  apiKey,
+  fetchImpl,
+  deadline,
+  requestTimeoutMs,
+  idleTimeoutMs,
+}) {
+  let lastError = null;
+
+  for (const model of models) {
+    if (deadline.callerAborted) return;
+    const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+
+    let response;
+    deadline.arm(requestTimeoutMs);
+    try {
+      response = await fetchImpl(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          // Header rather than a `?key=` query param: query strings land in proxy and
+          // server access logs, headers generally don't.
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify(requestBody),
+        signal: deadline.signal,
+      });
+    } catch (error) {
+      // The caller giving up is not a failure to report — it's what they asked for.
+      if (deadline.callerAborted) return;
+      if (deadline.timedOut) {
+        throw new GeminiError(
+          `Gemini did not respond within ${Math.round(requestTimeoutMs / 1000)}s. Try again shortly.`,
+          { status: 504, model, retryable: true },
+        );
+      }
+      throw new GeminiError(`Could not reach Gemini: ${error.message}`, {
+        status: 502,
+        model,
+        retryable: true,
+      });
+    } finally {
+      deadline.clear();
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      const message = errorMessage(text, response.status);
+      if (shouldFallThrough(response.status, message)) {
+        lastError = describeFailure(response.status, message, model);
+        continue;
+      }
+      throw describeFailure(response.status, message, model);
+    }
+
+    if (!response.body) {
+      throw new GeminiError("Gemini returned an empty response body.", { status: 502, model });
+    }
+
+    yield { type: "model", model };
+
+    // The stall clock starts here and is pushed back by every chunk that arrives, so
+    // a long answer is fine and a dead connection is not.
+    deadline.arm(idleTimeoutMs);
+    try {
+      yield* parseSSE(response.body, deadline, idleTimeoutMs);
+    } catch (error) {
+      if (deadline.callerAborted) return;
+      if (deadline.timedOut) {
+        throw new GeminiError(
+          `Gemini stopped sending data for ${Math.round(idleTimeoutMs / 1000)}s. Try again shortly.`,
+          { status: 504, model, retryable: true },
+        );
+      }
+      throw error;
+    }
+    return;
+  }
+
+  throw (
+    lastError ??
+    new GeminiError("No model in the chain was available for this API key.", { status: 502 })
+  );
 }
