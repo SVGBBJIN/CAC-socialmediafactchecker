@@ -10,9 +10,12 @@ import { authorize, config, validateMessages, GuardError } from "../lib/guard.js
 const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT ||
   "You are a helpful assistant. Be direct and concise. Use markdown for structure when it helps. " +
-    "When the user shares a YouTube link, it is attached as video for you to watch directly — " +
-    "don't say you can't access it. Transcribe or quote the specific claims made before " +
-    "evaluating them.";
+    "When the user shares a YouTube or TikTok link, the video is attached for you to watch " +
+    "directly — don't say you can't access it. Transcribe or quote the specific claims made " +
+    "before evaluating them, and read any text shown on screen, which on short-form video is " +
+    "often where the claim actually lives. A bracketed note in the user's turn saying a video " +
+    "could not be attached is from the app, not the user: say what went wrong and answer from " +
+    "the link alone.";
 
 // How long the stream may go without writing before we send an SSE comment to keep it
 // open. Proxies — Vercel's included — close a connection that has been silent too long,

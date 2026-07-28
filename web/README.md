@@ -74,6 +74,16 @@ Directory → `web`** in project settings instead also works — then Vercel see
 the project root, zero-config detection applies, and the root `vercel.json` is ignored.
 Either path deploys correctly; neither one requires the other.
 
+**Check the function timeout before trusting video on a deployment.** A TikTok link is the
+slowest request this app makes: resolve the embed, download the clip, possibly upload it,
+*then* wait for Gemini to watch it. That runs well past Vercel's default max duration
+(10s on Hobby), and a function killed mid-flight looks to the user like the answer simply
+stopped. Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on
+Pro. It is deliberately not set in `vercel.json`, because that file uses the legacy
+`builds` key, which `functions` cannot be combined with; the project setting is the one
+that always applies. YouTube has the same exposure and always has — Gemini watching a
+video takes tens of seconds — which is what the 15s keep-alive below is for.
+
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function
 instance and resets on a cold start, so on Vercel the real ceiling is looser than the
 numbers suggest — fine as a guard against accidents and casual over-use, not against
@@ -89,7 +99,9 @@ web/
   public/          Front end — index.html, app.js, style.css. No key, ever.
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
-  lib/gemini.js    Gemini client + the model fallback chain.
+  lib/gemini.js    Gemini client + the model fallback chain + video attachment.
+  lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
+  lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
   server.js        Local dev server. Mounts the same handlers Vercel runs.
@@ -121,7 +133,19 @@ field. See the comments in the Swift file for the full reasoning.
 - **Video attachments are sent once each.** A YouTube link becomes a `file_data` part at
   its first mention only. Re-attaching it — which happens on every turn of a long thread
   about one clip — makes Gemini ingest the same video repeatedly in a single request and
-  bill for each. Assistant turns never carry one.
+  bill for each. Assistant turns never carry one. For TikTok the bill is larger still,
+  because the bytes are in the request body rather than a URL Gemini fetches itself.
+- **At most two TikTok clips per request.** Ten pasted links would otherwise be ten
+  downloads, ten base64 copies and possibly ten uploads. Links past the cap get a note in
+  the prompt rather than silence, so the model can say why it isn't discussing them.
+- **A 48 MB ceiling on a clip, checked as it downloads.** Refused from `content-length`
+  where the CDN declares one, and abandoned mid-stream where it doesn't — a serverless
+  function buffers the whole file and then base64-encodes a copy, so the real cost is
+  about double.
+- **Media is fetched only from TikTok's own CDN.** The media URL comes out of a third
+  party's JSON blob; without the host allowlist in `lib/tiktok.js` the endpoint would
+  fetch whatever that blob named, which is a request proxy pointed at our own network and
+  reachable by anyone who can paste a link.
 - **Two timeouts.** 30s for response headers, and a 120s stall timeout that is reset by
   every chunk received. Without them a connection that opens and then goes quiet holds
   the request, and the function instance behind it, indefinitely.

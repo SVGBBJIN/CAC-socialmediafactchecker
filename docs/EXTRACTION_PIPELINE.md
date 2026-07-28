@@ -350,15 +350,44 @@ That is the troubleshooting payoff of staging. "Stuck on analysing for 90s" and 
 left resolving" are different bugs, and this is what makes the difference legible in a bug
 report after the fact.
 
+### Watching it
+
+```bash
+swift run SeerUIDemo      # macOS; or open Package.swift in Xcode → SeerUIDemo scheme
+```
+
+An animation that has never been rendered is a description of an animation. `SeerUIDemo`
+drives `AnalysisProgressView` with `ScriptedExtractor`, which walks the stage sequence on
+a timer and returns a canned `ClaimContext` — no key, no network, no share extension. The
+same file holds the SwiftUI previews.
+
+The scripts come from `ExtractionStage.expected(for:)` rather than being written out, so a
+demo cannot drift from the sequence a real run produces; `ScriptedExtractorTests` asserts
+that derivation. Two properties of the demo are deliberate and tested:
+
+- The TikTok script includes `uploading`, the one stage inserted mid-run rather than laid
+  out up front — so it exercises the stage list's insertion path, which is the part most
+  likely to be wrong.
+- Its `analysing` beat runs 16s against a 12s `patienceThreshold`, so a run actually
+  reaches the state the explanation text exists for. An animation that never crosses that
+  threshold can't be judged.
+
 ## Building
 
 `SeerCore` is pure Foundation and builds anywhere, including Linux CI. `SeerCapture` holds
 the iOS-only ReplayKit/WebKit code guarded by `#if os(iOS)`; `SeerUI` holds the SwiftUI
 guarded by `#if canImport(SwiftUI)`.
 
-**`SeerCapture` and `SeerUI` have never been compiled** — they need the iOS SDK, which
-wasn't available where this was written. Because the guards compile them to nothing
-elsewhere, `swift build` passing on Linux says nothing about them; a syntax error would
-not surface until Xcode. Expect to fix small things on first build. `SeerCore`, which is
-everything else including the whole stage sequence and its ordering guarantee, is compiled
-and tested.
+`SeerUI` now has a consumer — `SeerUIDemo` imports it — so a Mac build compiles it rather
+than leaving it as source nothing references. On Linux the guards still compile it to
+nothing and the demo falls back to a stub that says where to run it, so `swift build` and
+`swift test` keep working there.
+
+**But a green Linux build still says nothing about the SwiftUI itself.** `canImport(SwiftUI)`
+is false there, so those files compile to nothing; the guarantee stops at "the package
+builds and the demo's non-SwiftUI path runs". The SwiftUI has been checked for syntax with
+`swiftc -parse` against the guards stripped, which catches malformed code but does no type
+checking — SwiftUI API misuse would still surface first on a Mac. Expect to fix small
+things on first build there. `SeerCapture` has no consumer at all and still needs a device.
+`SeerCore`, which is everything else including the whole stage sequence, its ordering
+guarantee and the scripted extractor the demo animates, is compiled and tested.

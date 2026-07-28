@@ -14,8 +14,20 @@ import {
   youTubeVideoID,
   findYouTubeVideoIDs,
   isInvalidKeyFailure,
+  resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from "./lib/gemini.js";
+import {
+  tikTokVideoID,
+  isTikTokShortLink,
+  findTikTokLinks,
+  extractStateBlob,
+  parseEmbedPage,
+  resolveTikTokVideo,
+  downloadTikTokMedia,
+  TikTokError,
+} from "./lib/tiktok.js";
+import { parseFile, uploadFile } from "./lib/gemini-files.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
 import {
   passwordMatches,
@@ -648,4 +660,480 @@ test("content types are served for the assets the app actually ships", () => {
   assert.equal(contentType("/x/app.js"), "text/javascript; charset=utf-8");
   assert.equal(contentType("/x/style.CSS"), "text/css; charset=utf-8");
   assert.equal(contentType("/x/unknown.bin"), "application/octet-stream");
+});
+
+/* ---------------- TikTok ---------------- */
+
+// The embed payload below is **real**. It was captured from
+// `https://www.tiktok.com/embed/v2/6718335390845095173` with an anonymous request; only
+// the signed query strings on the media and cover URLs are shortened, because they
+// expire. It is the same fixture Tests/SeerCoreTests/TikTokDirectFetchTests.swift uses,
+// so the two parsers are held to the same payload.
+//
+// Testing against what TikTok actually serves rather than against a hand-written idea of
+// it is the point: this is an undocumented internal payload, and a fixture invented from
+// the docs would prove nothing about whether the parser works.
+const LIVE_STATE_BLOB =
+  `{"source":{"data":{"/embed/v2/6718335390845095173":{"code":200,"isError":false,` +
+  `"videoData":{"itemInfos":{"id":"6718335390845095173","text":"Scramble up ur name & ` +
+  `I’ll try to guess it\u{1F60D}❤️ #foryoupage #petsoftiktok #aesthetic",` +
+  `"createTime":"1564234358","covers":["https://p16-common-sign.tiktokcdn-us.com/tos-maliva-p-0068/2367c7d45cf54a1397abd0e72bf22eac~tplv-tiktokx-origin.image"],` +
+  `"video":{"urls":["https://v16m.tiktokcdn-us.com/d838b2be25adb61a68f7fbe5d74e9f63/6a6ab84a/video/tos/useast5/tos-useast5-ve-0068c002-tx/15fbafb086324317bf77a649580b1f95/?a=1233&mime_type=video_mp4"],` +
+  `"videoMeta":{"width":576,"height":1024,"ratio":10,"duration":10}}},` +
+  `"authorInfos":{"nickName":"Scout, Suki & Stella","uniqueId":"scout2015"}}}}}}`;
+
+const VIDEO_ID = "6718335390845095173";
+const SOURCE_URL = `https://www.tiktok.com/@scout2015/video/${VIDEO_ID}`;
+const MEDIA_URL =
+  "https://v16m.tiktokcdn-us.com/d838b2be25adb61a68f7fbe5d74e9f63/6a6ab84a/video/tos/" +
+  "useast5/tos-useast5-ve-0068c002-tx/15fbafb086324317bf77a649580b1f95/?a=1233&mime_type=video_mp4";
+
+/** The page wraps the blob in the same script tag the live one does. */
+function tikTokPage(blob = LIVE_STATE_BLOB) {
+  return (
+    `<!DOCTYPE html><html><head><title>TikTok</title></head><body><div id="main"></div>` +
+    `<script id="__FRONTITY_CONNECT_STATE__" type="application/json">${blob}</script>` +
+    `<script src="/embed.js"></script></body></html>`
+  );
+}
+
+function htmlResponse(body, { status = 200, url = SOURCE_URL } = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    url,
+    text: async () => body,
+    body: null,
+  };
+}
+
+function mediaResponse(bytes, { status = 200, headers = {} } = {}) {
+  const lower = Object.fromEntries(
+    Object.entries({ "content-type": "video/mp4", ...headers }).map(([k, v]) => [
+      k.toLowerCase(),
+      v,
+    ]),
+  );
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (name) => lower[String(name).toLowerCase()] ?? null },
+    body: (async function* () {
+      for (const chunk of Array.isArray(bytes) ? bytes : [bytes]) yield chunk;
+    })(),
+  };
+}
+
+/** The shape `resolveTikTokVideo` hands to the downloader, without doing the fetch. */
+function resolvedClip(overrides = {}) {
+  return {
+    sourceURL: SOURCE_URL,
+    videoID: VIDEO_ID,
+    mediaURL: MEDIA_URL,
+    mimeType: "video/mp4",
+    referer: "https://www.tiktok.com/",
+    duration: 10,
+    authorName: "Scout, Suki & Stella",
+    caption: "Scramble up ur name",
+    ...overrides,
+  };
+}
+
+test("recognizes TikTok URLs in every share format", () => {
+  assert.equal(tikTokVideoID(SOURCE_URL), VIDEO_ID);
+  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed/v2/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokVideoID(`https://m.tiktok.com/v/${VIDEO_ID}.html`), VIDEO_ID);
+  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed?item_id=${VIDEO_ID}`), VIDEO_ID);
+});
+
+test("rejects photo carousels, non-video links and lookalike hosts", () => {
+  // A real post, but a slideshow of stills — there is no video to fetch.
+  assert.equal(tikTokVideoID(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), null);
+  assert.equal(tikTokVideoID("https://www.tiktok.com/@scout2015"), null);
+  assert.equal(tikTokVideoID("https://www.tiktok.com/video/12"), null, "too short to be an ID");
+  assert.equal(tikTokVideoID(`https://tiktok.com.evil.test/video/${VIDEO_ID}`), null);
+  assert.equal(tikTokVideoID("https://youtube.com/watch?v=dQw4w9WgXcQ"), null);
+  assert.equal(tikTokVideoID("not a url"), null);
+});
+
+test("short links are recognised but carry no ID of their own", () => {
+  for (const link of [
+    "https://vm.tiktok.com/ZMabcdef/",
+    "https://vt.tiktok.com/ZSabcdef/",
+    "https://www.tiktok.com/t/ZTabcdef/",
+  ]) {
+    assert.equal(isTikTokShortLink(link), true, link);
+    assert.equal(tikTokVideoID(link), null, link);
+  }
+  assert.equal(isTikTokShortLink(SOURCE_URL), false);
+  assert.equal(isTikTokShortLink("https://vm.tiktok.com.evil.test/ZM1"), false);
+});
+
+test("finds distinct TikTok links in prose, without trailing punctuation", () => {
+  const text = `look at ${SOURCE_URL}, then ${SOURCE_URL} again, and https://vm.tiktok.com/ZMabc/.`;
+  assert.deepEqual(findTikTokLinks(text), [SOURCE_URL, "https://vm.tiktok.com/ZMabc/"]);
+});
+
+test("parses the real embed payload", () => {
+  const clip = parseEmbedPage(tikTokPage(), { videoID: VIDEO_ID, sourceURL: SOURCE_URL });
+
+  assert.equal(new URL(clip.mediaURL).hostname, "v16m.tiktokcdn-us.com");
+  assert.equal(clip.mimeType, "video/mp4");
+  assert.equal(clip.duration, 10);
+  assert.equal(clip.width, 576);
+  assert.equal(clip.height, 1024);
+  assert.equal(clip.authorName, "Scout, Suki & Stella");
+  assert.match(clip.caption, /^Scramble up ur name/);
+});
+
+test("the state blob is found even when a bootstrap reference comes first", () => {
+  // The marker appears more than once on the live page: the JSON blob is accompanied by
+  // script that refers to `window.__FRONTITY_CONNECT_STATE__` by name. Taking the first
+  // occurrence on faith would parse the wrong thing.
+  const page =
+    `<script>window.__FRONTITY_CONNECT_STATE__ = null;</script>` +
+    `<script id="__FRONTITY_CONNECT_STATE__" type="application/json">${LIVE_STATE_BLOB}</script>`;
+  assert.equal(extractStateBlob(page), LIVE_STATE_BLOB);
+});
+
+test("each parse failure names the step that stopped finding what it expected", () => {
+  const cases = [
+    ["<html><body>nothing here</body></html>", /__FRONTITY_CONNECT_STATE__/],
+    [tikTokPage("{not json"), /not the expected JSON/],
+    [tikTokPage(`{"source":{"data":{}}}`), /no entry for \/embed\/v2\//],
+  ];
+  for (const [page, expected] of cases) {
+    assert.throws(() => parseEmbedPage(page, { videoID: VIDEO_ID, sourceURL: SOURCE_URL }), expected);
+  }
+});
+
+test("a private, removed or photo-only post is reported as such, not as a parse bug", () => {
+  const page = tikTokPage(`{"source":{"data":{"/embed/v2/${VIDEO_ID}":{"code":200}}}}`);
+  assert.throws(
+    () => parseEmbedPage(page, { videoID: VIDEO_ID, sourceURL: SOURCE_URL }),
+    (error) => error instanceof TikTokError && error.kind === "unavailable",
+  );
+});
+
+test("a short link is followed, and the ID read off where it landed", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(url);
+    if (url.includes("vm.tiktok.com")) return htmlResponse("", { url: SOURCE_URL });
+    return htmlResponse(tikTokPage());
+  };
+
+  const clip = await resolveTikTokVideo("https://vm.tiktok.com/ZMabc/", { fetchImpl });
+  assert.equal(clip.videoID, VIDEO_ID);
+  assert.equal(seen[0], "https://vm.tiktok.com/ZMabc/");
+  assert.equal(seen[1], `https://www.tiktok.com/embed/v2/${VIDEO_ID}`);
+});
+
+test("an unknown ID comes back from the embed endpoint as a 400, and reads as removed", async () => {
+  // Not a 404 — translating it is what keeps the user from being told TikTok rejected us.
+  const fetchImpl = async () => htmlResponse("", { status: 400 });
+  await assert.rejects(
+    resolveTikTokVideo(SOURCE_URL, { fetchImpl }),
+    (error) => error.kind === "unavailable" && /removed/.test(error.message),
+  );
+});
+
+test("media is fetched only from TikTok's own CDN", async () => {
+  // The media URL comes out of a third party's JSON blob. Without the allowlist the
+  // endpoint would fetch whatever that blob named.
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    return mediaResponse(Buffer.from("nope"));
+  };
+
+  await assert.rejects(
+    downloadTikTokMedia(resolvedClip({ mediaURL: "https://evil.test/payload.mp4" }), { fetchImpl }),
+    /unexpected host \(evil\.test\)/,
+  );
+  await assert.rejects(
+    downloadTikTokMedia(resolvedClip({ mediaURL: "https://tiktokcdn.com.evil.test/x.mp4" }), {
+      fetchImpl,
+    }),
+    /unexpected host/,
+  );
+  assert.equal(called, false, "no request should leave the process");
+});
+
+test("an oversized clip is refused from its content-length, before a byte is buffered", async () => {
+  let pulled = false;
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (n) => (n === "content-length" ? String(200 * 1024 * 1024) : null) },
+    body: (async function* () {
+      pulled = true;
+      yield Buffer.alloc(10);
+    })(),
+  });
+
+  await assert.rejects(
+    downloadTikTokMedia(resolvedClip(), { fetchImpl, maxBytes: 1024 }),
+    (error) => error.kind === "tooLarge" && /200 MB/.test(error.message),
+  );
+  assert.equal(pulled, false, "the declared size is enough — don't start the transfer");
+});
+
+test("a clip that lies about its size is abandoned mid-stream", async () => {
+  let chunksPulled = 0;
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    body: (async function* () {
+      for (;;) {
+        chunksPulled += 1;
+        yield Buffer.alloc(512);
+      }
+    })(),
+  });
+
+  await assert.rejects(
+    downloadTikTokMedia(resolvedClip(), { fetchImpl, maxBytes: 2048 }),
+    (error) => error.kind === "tooLarge",
+  );
+  assert.ok(chunksPulled < 20, `stream should stop promptly, pulled ${chunksPulled} chunks`);
+});
+
+test("the CDN's content type wins over the resolver's guess", async () => {
+  const fetchImpl = async () =>
+    mediaResponse(Buffer.from("bytes"), { headers: { "content-type": "video/webm; codecs=vp9" } });
+  const media = await downloadTikTokMedia(resolvedClip(), { fetchImpl });
+  assert.equal(media.mimeType, "video/webm");
+
+  // ...but a uselessly generic type does not.
+  const generic = async () =>
+    mediaResponse(Buffer.from("bytes"), { headers: { "content-type": "application/octet-stream" } });
+  assert.equal((await downloadTikTokMedia(resolvedClip(), { fetchImpl: generic })).mimeType, "video/mp4");
+});
+
+test("a small clip rides inline, as base64 next to the text", async () => {
+  const bytes = Buffer.from("fake mp4 bytes");
+  const tikTok = await resolveTikTokParts([{ role: "user", content: `check ${SOURCE_URL}` }], {
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
+  });
+
+  const contents = toGeminiContents([{ role: "user", content: `check ${SOURCE_URL}` }], { tikTok });
+  assert.deepEqual(contents[0].parts[0], {
+    inline_data: { mime_type: "video/mp4", data: bytes.toString("base64") },
+  });
+  // The caption is frequently the claim itself, so it travels with the video.
+  assert.match(contents[0].parts[1].text, /Its caption reads: Scramble up ur name/);
+  assert.match(contents[0].parts[1].text, /posted by Scout, Suki & Stella/);
+});
+
+test("a clip past the inline ceiling goes through the Files API and is deleted after", async () => {
+  const deleted = [];
+  const messages = [{ role: "user", content: SOURCE_URL }];
+
+  const tikTok = await resolveTikTokParts(messages, {
+    apiKey: "k",
+    inlineByteLimit: 8,
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => ({ bytes: Buffer.alloc(64), mimeType: "video/mp4" }),
+    uploadImpl: async () => ({ name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" }),
+    deleteImpl: async (file) => deleted.push(file.name),
+  });
+
+  const contents = toGeminiContents(messages, { tikTok });
+  assert.deepEqual(contents[0].parts[0], {
+    file_data: { file_uri: "https://files/abc", mime_type: "video/mp4" },
+  });
+
+  assert.deepEqual(deleted, [], "nothing is cleaned up until the caller says so");
+  await tikTok.cleanup();
+  assert.deepEqual(deleted, ["files/abc"], "an uploaded clip does not stay in the Files quota");
+});
+
+test("a video that can't be fetched becomes a note, not a failed conversation", async () => {
+  const messages = [{ role: "user", content: `is this true? ${SOURCE_URL}` }];
+  const tikTok = await resolveTikTokParts(messages, {
+    resolveImpl: async () => {
+      throw new TikTokError("TikTok returned no video for this link — it may be private", {
+        kind: "unavailable",
+      });
+    },
+  });
+
+  const contents = toGeminiContents(messages, { tikTok });
+  assert.equal(contents[0].parts.length, 1, "no media part");
+  assert.match(contents[0].parts[0].text, /could not be attached: TikTok returned no video/);
+  assert.match(contents[0].parts[0].text, /is this true\?/, "the user's own words survive");
+});
+
+test("a short link and the URL it redirects to are one video, attached once", async () => {
+  const short = "https://vm.tiktok.com/ZMabc/";
+  const messages = [{ role: "user", content: `${short} and ${SOURCE_URL}` }];
+  let downloads = 0;
+
+  const tikTok = await resolveTikTokParts(messages, {
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => {
+      downloads += 1;
+      return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+    },
+  });
+
+  assert.equal(downloads, 1, "the second link resolves to a video already in hand");
+  const parts = toGeminiContents(messages, { tikTok })[0].parts;
+  assert.equal(parts.filter((p) => p.inline_data).length, 1);
+});
+
+test("a video is attached at its first mention, not on every turn that quotes it", async () => {
+  const messages = [
+    { role: "user", content: `look at ${SOURCE_URL}` },
+    { role: "assistant", content: `About ${SOURCE_URL}: it claims...` },
+    { role: "user", content: `but ${SOURCE_URL} also says...` },
+  ];
+  const tikTok = await resolveTikTokParts(messages, {
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => ({ bytes: Buffer.from("x"), mimeType: "video/mp4" }),
+  });
+
+  const contents = toGeminiContents(messages, { tikTok });
+  assert.equal(contents[0].parts.filter((p) => p.inline_data).length, 1);
+  assert.equal(contents[1].parts.length, 1, "an assistant turn never carries media");
+  assert.equal(contents[2].parts.length, 1, "re-quoting does not re-send the clip");
+});
+
+test("only the first few clips in one message are fetched", async () => {
+  const links = [1, 2, 3].map((n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`);
+  const messages = [{ role: "user", content: links.join(" ") }];
+  let downloads = 0;
+
+  const tikTok = await resolveTikTokParts(messages, {
+    maxAttachments: 2,
+    resolveImpl: async (link) => resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link }),
+    downloadImpl: async () => {
+      downloads += 1;
+      return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+    },
+  });
+
+  assert.equal(downloads, 2);
+  const parts = toGeminiContents(messages, { tikTok })[0].parts;
+  assert.equal(parts.filter((p) => p.inline_data).length, 2);
+  assert.match(parts.at(-1).text, /only the first 2 TikTok videos/);
+});
+
+test("with no TikTok link, contents are byte-for-byte what they were before", async () => {
+  const messages = [{ role: "user", content: "hi" }];
+  const tikTok = await resolveTikTokParts(messages, {
+    resolveImpl: async () => assert.fail("must not resolve anything"),
+  });
+  assert.deepEqual(toGeminiContents(messages, { tikTok }), toGeminiContents(messages));
+});
+
+test("streamChat attaches the clip and cleans up its upload when the answer is done", async () => {
+  const deleted = [];
+  let sentBody;
+  const fetchImpl = async (url, init) => {
+    sentBody = JSON.parse(init.body);
+    return sseResponse([frame("watched it")]);
+  };
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: SOURCE_URL }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl,
+      tikTokOptions: {
+        inlineByteLimit: 1,
+        resolveImpl: async () => resolvedClip(),
+        downloadImpl: async () => ({ bytes: Buffer.alloc(32), mimeType: "video/mp4" }),
+        uploadImpl: async () => ({ name: "files/xyz", uri: "https://files/xyz", mimeType: "video/mp4", state: "ACTIVE" }),
+        deleteImpl: async (file) => deleted.push(file.name),
+      },
+    }),
+  );
+
+  assert.deepEqual(sentBody.contents[0].parts[0], {
+    file_data: { file_uri: "https://files/xyz", mime_type: "video/mp4" },
+  });
+  assert.deepEqual(frames.at(-1), { type: "delta", text: "watched it" });
+  assert.deepEqual(deleted, ["files/xyz"]);
+});
+
+test("attachTikTok: false leaves a link as plain text and fetches nothing", async () => {
+  let sentBody;
+  const fetchImpl = async (url, init) => {
+    sentBody = JSON.parse(init.body);
+    return sseResponse([frame("ok")]);
+  };
+
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: SOURCE_URL }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl,
+      attachTikTok: false,
+    }),
+  );
+
+  assert.equal(sentBody.contents[0].parts.length, 1);
+  assert.equal(sentBody.contents[0].parts[0].text, SOURCE_URL);
+});
+
+/* ---------------- Gemini Files ---------------- */
+
+test("the upload response's file object is read whether nested or bare", () => {
+  const nested = parseFile({ file: { name: "files/a", uri: "u", state: "PROCESSING" } });
+  assert.deepEqual(nested, { name: "files/a", uri: "u", mimeType: "video/mp4", state: "PROCESSING" });
+
+  // A poll returns it bare, and an absent state means ready — only video reports PROCESSING.
+  const bare = parseFile({ name: "files/a", uri: "u", mimeType: "video/webm" });
+  assert.equal(bare.state, "ACTIVE");
+  assert.equal(bare.mimeType, "video/webm");
+
+  assert.throws(() => parseFile({ file: { name: "files/a" } }), /no file name or URI/);
+});
+
+test("an upload waits for PROCESSING to finish before the URI is handed out", async () => {
+  // Referencing a file before it turns ACTIVE fails the generate call, so this poll is
+  // not optional for video.
+  const calls = [];
+  let polls = 0;
+  const fetchImpl = async (url, init) => {
+    calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url.endsWith("/upload/v1beta/files")) {
+      return { ok: true, status: 200, headers: { get: () => "https://session/upload" } };
+    }
+    if (url === "https://session/upload") {
+      return { ok: true, status: 200, json: async () => ({ file: { name: "files/a", uri: "u", state: "PROCESSING" } }) };
+    }
+    polls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ name: "files/a", uri: "u", state: polls >= 2 ? "ACTIVE" : "PROCESSING" }),
+    };
+  };
+
+  const file = await uploadFile(Buffer.alloc(4), "video/mp4", {
+    apiKey: "k",
+    fetchImpl,
+    sleep: async () => {},
+  });
+
+  assert.equal(file.state, "ACTIVE");
+  assert.equal(polls, 2, "polled until it went active");
+  assert.equal(calls[0], "POST https://generativelanguage.googleapis.com/upload/v1beta/files");
+  assert.equal(calls[1], "POST https://session/upload");
+});
+
+test("an upload that never returns a session URL fails loudly", async () => {
+  const fetchImpl = async () => ({ ok: true, status: 200, headers: { get: () => null } });
+  await assert.rejects(
+    uploadFile(Buffer.alloc(4), "video/mp4", { apiKey: "k", fetchImpl, sleep: async () => {} }),
+    /did not return an upload URL/,
+  );
 });

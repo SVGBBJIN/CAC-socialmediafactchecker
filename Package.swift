@@ -13,6 +13,10 @@ let package = Package(
         // SwiftUI progress presentation. Compiles to nothing where SwiftUI is absent,
         // so the package still builds and tests on Linux.
         .library(name: "SeerUI", targets: ["SeerUI"]),
+        // Runnable harness for SeerUI, driven by ScriptedExtractor — no key, no network.
+        // Exists so the SwiftUI has a consumer and therefore gets compiled at all; on
+        // Linux it builds to a stub that says where to run it.
+        .executable(name: "SeerUIDemo", targets: ["SeerUIDemo"]),
         // Dev-machine tool that produces the encrypted secrets blob.
         .executable(name: "seer-secrets", targets: ["SeerSecretsTool"]),
     ],
@@ -30,6 +34,7 @@ let package = Package(
         ),
         .target(name: "SeerCapture", dependencies: ["SeerCore"]),
         .target(name: "SeerUI", dependencies: ["SeerCore"]),
+        .executableTarget(name: "SeerUIDemo", dependencies: ["SeerUI", "SeerCore"]),
         .executableTarget(name: "SeerSecretsTool", dependencies: ["SeerCore"]),
         .testTarget(name: "SeerCoreTests", dependencies: ["SeerCore"]),
     ]
