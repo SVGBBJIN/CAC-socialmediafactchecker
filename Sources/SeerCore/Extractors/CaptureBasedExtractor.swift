@@ -37,16 +37,21 @@ public struct CaptureBasedExtractor: ClaimExtractor {
         Platform.detect(from: url) == platform
     }
 
-    public func extract(from url: URL) async throws -> ClaimContext {
+    public func extract(from url: URL, progress: ProgressSink) async throws -> ClaimContext {
         // 1. Metadata + embed HTML. No media and no transcript here — oEmbed offers
         //    neither, on any platform.
+        progress.send(.resolving)
         let embed = try await resolver.resolve(url)
 
-        // 2. Render and record.
+        // 2. Render and record. Unlike every other stage this one runs in real time —
+        //    a 60s clip takes 60s — so announcing it with the duration matters more
+        //    here than elsewhere.
         try Task.checkCancellation()
+        let duration = embed.duration ?? captureDuration
+        progress.send(.fetchingMedia, detail: "recording \(Int(duration))s")
         let captured = try await captureSource.capture(
             embed: embed,
-            duration: embed.duration ?? captureDuration
+            duration: duration
         )
 
         // 3. Fail loudly on a silent recording rather than passing it on.
@@ -61,6 +66,7 @@ public struct CaptureBasedExtractor: ClaimExtractor {
 
         // 4. Transcribe.
         try Task.checkCancellation()
+        progress.send(.analysing)
         let transcription = try await transcriber.transcribe(captured)
 
         return ClaimContext(

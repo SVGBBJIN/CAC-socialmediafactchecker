@@ -19,11 +19,19 @@ public protocol ClaimExtractor: Sendable {
     func canHandle(_ url: URL) -> Bool
 
     /// Produce the shared context. Long-running; honours task cancellation.
-    func extract(from url: URL) async throws -> ClaimContext
+    ///
+    /// - Parameter progress: where to report stage changes. Pass
+    ///   ``ProgressSink/ignored`` to discard them.
+    func extract(from url: URL, progress: ProgressSink) async throws -> ClaimContext
 }
 
 extension ClaimExtractor {
     public var strategy: IngestionStrategy { platform.ingestionStrategy }
+
+    /// Extract without reporting progress.
+    public func extract(from url: URL) async throws -> ClaimContext {
+        try await extract(from: url, progress: .ignored)
+    }
 }
 
 /// Failures the extraction layer surfaces. Deliberately small — callers need to know

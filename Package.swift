@@ -10,6 +10,9 @@ let package = Package(
         .library(name: "SeerCore", targets: ["SeerCore"]),
         // iOS-only capture implementations (WKWebView + RPScreenRecorder).
         .library(name: "SeerCapture", targets: ["SeerCapture"]),
+        // SwiftUI progress presentation. Compiles to nothing where SwiftUI is absent,
+        // so the package still builds and tests on Linux.
+        .library(name: "SeerUI", targets: ["SeerUI"]),
         // Dev-machine tool that produces the encrypted secrets blob.
         .executable(name: "seer-secrets", targets: ["SeerSecretsTool"]),
     ],
@@ -26,6 +29,7 @@ let package = Package(
             ]
         ),
         .target(name: "SeerCapture", dependencies: ["SeerCore"]),
+        .target(name: "SeerUI", dependencies: ["SeerCore"]),
         .executableTarget(name: "SeerSecretsTool", dependencies: ["SeerCore"]),
         .testTarget(name: "SeerCoreTests", dependencies: ["SeerCore"]),
     ]

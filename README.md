@@ -57,7 +57,7 @@ credential, 3.2 MB `video/mp4` with a valid `ftyp` box.
 ```
 Sources/SeerCore/          Pure Foundation — builds and tests anywhere
   Model/                   ClaimContext, Platform + the ingestion fork
-  Pipeline/                ClaimExtractor protocol, routing, assembly
+  Pipeline/                ClaimExtractor protocol, routing, assembly, progress
   Gemini/                  Video client, model fallback chain, Files API upload
   Extractors/              YouTubeExtractor, DirectMediaExtractor, CaptureBasedExtractor
   Media/                   TikTok embed → CDN URL resolver, downloader
@@ -65,8 +65,39 @@ Sources/SeerCore/          Pure Foundation — builds and tests anywhere
   Transcription/           Groq/Whisper
   Secrets/                 Keychain, AES-GCM bundle, store chaining
 Sources/SeerCapture/       iOS-only: WKWebView + RPScreenRecorder + diagnostic
+Sources/SeerUI/            SwiftUI progress animation + its observable model
 Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
 ```
+
+## Progress
+
+Extraction is slow in a way users read as broken — the YouTube path is a single HTTPS call
+that can sit for half a minute while Gemini watches a video, returning nothing until it is
+done. So the pipeline reports stages:
+
+```swift
+let context = try await pipeline.extract(from: url) { progress in
+    print(progress.label)   // "Analyzing your YouTube video"
+}
+```
+
+| Platform | Stages |
+|---|---|
+| YouTube | `resolving` → `analysing` → `done` |
+| TikTok | `resolving` → `fetchingMedia` → `analysing` → `done` |
+| TikTok (large clip) | …with `uploading` before `analysing` |
+
+`SeerUI` renders these as an indeterminate scanning animation plus a stage checklist with
+per-stage timings. Indeterminate deliberately: none of the underlying work reports a
+percentage, and a bar filling at an invented rate is a lie — a worse one once it stalls at
+90%. `AnalysisModel.timingReport` prints the same breakdown as text, which is what makes a
+slow run diagnosable rather than just annoying.
+
+**Ordering matters and the obvious bridge gets it wrong.** The handler is called
+synchronously off the main actor; forwarding each event with its own
+`Task { @MainActor in … }` spawns unordered tasks and the stage list jumps backwards.
+Yield into an `AsyncStream` and consume it with `for await`, or compare
+`ExtractionProgress.sequence`. `AnalysisModel` does both.
 
 ## The architectural line
 
@@ -90,7 +121,7 @@ platform sitting on arm 3 before investing in capture.
 ## Tests
 
 ```bash
-swift test    # 102 tests, no network
+swift test    # 116 tests, no network
 ```
 
 Parsers are tested against **live** captured responses from Gemini and TikTok, not against
@@ -98,8 +129,12 @@ what the docs claim. That caught a field the documented shape doesn't mention, a
 the only way to test the TikTok embed blob at all — that payload has no documentation to
 write a fixture from.
 
-`SeerCapture` requires the iOS SDK and has not been compiled — see the note at the end of
-[docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md).
+`SeerCapture` and `SeerUI` require the iOS SDK and **have not been compiled** — see the
+note at the end of [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md). Both are
+wrapped in `#if canImport(…)`, so they build to nothing elsewhere and the package still
+tests on Linux; that also means a syntax error in them wouldn't surface there. Everything
+they depend on — the stage sequence, the labels, the ordering guarantee — is in `SeerCore`
+and is tested.
 
 ## Docs
 

@@ -77,8 +77,10 @@ final class PipelineRoutingTests: XCTestCase {
         let platform: Platform
         var transcript: String = "stub"
         func canHandle(_ url: URL) -> Bool { Platform.detect(from: url) == platform }
-        func extract(from url: URL) async throws -> ClaimContext {
-            ClaimContext(
+        func extract(from url: URL, progress: ProgressSink) async throws -> ClaimContext {
+            progress.send(.resolving)
+            progress.send(.analysing)
+            return ClaimContext(
                 transcript: transcript,
                 provenance: ProvenanceMetadata(
                     platform: platform, sourceURL: url, strategy: platform.ingestionStrategy

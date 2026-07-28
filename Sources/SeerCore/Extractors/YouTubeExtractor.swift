@@ -29,7 +29,8 @@ public struct YouTubeExtractor: ClaimExtractor {
         return YouTubeExtractor.videoID(from: url) != nil
     }
 
-    public func extract(from url: URL) async throws -> ClaimContext {
+    public func extract(from url: URL, progress: ProgressSink) async throws -> ClaimContext {
+        progress.send(.resolving)
         guard let videoID = YouTubeExtractor.videoID(from: url) else {
             throw ExtractionError.notAMediaURL(url)
         }
@@ -38,6 +39,10 @@ public struct YouTubeExtractor: ClaimExtractor {
         let canonical = YouTubeExtractor.canonicalURL(for: videoID)
         let clip = maxDuration.map { GeminiClip(start: 0, end: $0) }
 
+        // Everything from here is one HTTPS call that returns only when Gemini has
+        // finished watching. There is no interim signal to forward, which is exactly
+        // why the stage needs announcing before it starts.
+        progress.send(.analysing)
         let result = try await client.analyzeVideo(at: canonical, clip: clip)
         let analysis = result.analysis
 

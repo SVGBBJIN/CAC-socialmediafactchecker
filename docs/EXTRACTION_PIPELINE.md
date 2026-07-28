@@ -233,7 +233,7 @@ budget; metadata calls get 20s.
 **Credentials** — never in source. See [SECRETS.md](SECRETS.md). The Gemini key shared
 during handoff should be rotated.
 
-**Testing** — 102 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource`,
+**Testing** — 116 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource`,
 `MediaURLResolver`, `MediaDownloading` and `Transcriber` are all injectable. Live responses
 from Gemini and TikTok are checked in as fixtures, so the parsers are tested against what
 the APIs actually return rather than what the docs say they return — the live Gemini
@@ -245,11 +245,65 @@ no documentation to write a fixture from.
 swift test
 ```
 
+## Progress reporting
+
+Every extractor takes a `ProgressSink` and announces its stage before entering it. The
+stages are listed under [the animation](#the-animation) below; `ExtractionStage.expected(for:)`
+gives the sequence a platform will follow, so a UI can lay the whole list out up front
+instead of growing it a row at a time.
+
+Two details that are easy to get wrong and are pinned by tests:
+
+- **`done` is emitted by the pipeline, not the extractors.** An extraction that returns an
+  empty `ClaimContext` has not finished successfully however far it got, and the pipeline
+  is where that judgement is made.
+- **Events are emitted in order, and the obvious consumer breaks that.** The handler is
+  called synchronously off the main actor. Forwarding each event with its own
+  `Task { @MainActor in … }` spawns unordered tasks, and stages arrive backwards — this
+  actually happened while writing `AnalysisModel`, and the test recorder caught it. Yield
+  into an `AsyncStream` and consume with `for await`, or compare
+  `ExtractionProgress.sequence`, which increments monotonically per run.
+
+## The animation
+
+`SeerUI.AnalysisProgressView` shows three things, because a waiting user has three
+questions:
+
+| | Answers | How |
+|---|---|---|
+| Scanning filmstrip | "Is this alive?" | Indeterminate sweep, 1.5s loop |
+| Stage checklist | "What is it doing?" | Full sequence up front, filled in as stages close |
+| Elapsed + explanation | "Should I be worried?" | Explanation appears once a stage passes its `patienceThreshold` |
+
+**Nothing is determinate, on purpose.** None of the underlying work reports a percentage:
+Gemini's `generateContent` is one request that returns when it returns, and the download
+is buffered whole by `HTTPTransport` rather than streamed. A bar filling at an invented
+rate would be a lie, and a worse one the moment it stalls at 90%.
+
+`patienceThreshold` is not a timeout — nothing is cancelled when it passes. It is the
+point at which silence stops being normal and the interface should say something.
+
+`AnalysisModel.timingReport` prints the same breakdown as text:
+
+```
+YouTube — 14.6s
+  resolving: 0.4s
+  analysing: 14.2s
+```
+
+That is the troubleshooting payoff of staging. "Stuck on analysing for 90s" and "never
+left resolving" are different bugs, and this is what makes the difference legible in a bug
+report after the fact.
+
 ## Building
 
 `SeerCore` is pure Foundation and builds anywhere, including Linux CI. `SeerCapture` holds
-the iOS-only ReplayKit/WebKit code, guarded by `#if os(iOS)`.
+the iOS-only ReplayKit/WebKit code guarded by `#if os(iOS)`; `SeerUI` holds the SwiftUI
+guarded by `#if canImport(SwiftUI)`.
 
-**`SeerCapture` has never been compiled** — it needs the iOS SDK, which wasn't available
-where this was written. Expect to fix small things on first build in Xcode. `SeerCore`,
-which is everything else, is compiled and tested.
+**`SeerCapture` and `SeerUI` have never been compiled** — they need the iOS SDK, which
+wasn't available where this was written. Because the guards compile them to nothing
+elsewhere, `swift build` passing on Linux says nothing about them; a syntax error would
+not surface until Xcode. Expect to fix small things on first build. `SeerCore`, which is
+everything else including the whole stage sequence and its ordering guarantee, is compiled
+and tested.

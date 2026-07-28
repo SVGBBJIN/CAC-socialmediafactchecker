@@ -53,17 +53,24 @@ public struct DirectMediaExtractor: ClaimExtractor {
         Platform.detect(from: url) == platform
     }
 
-    public func extract(from url: URL) async throws -> ClaimContext {
+    public func extract(from url: URL, progress: ProgressSink) async throws -> ClaimContext {
         // 1. Shared URL → direct media URL, plus whatever metadata the embed carried.
+        progress.send(.resolving)
         let resolved = try await resolver.resolve(url)
 
         // 2. Fetch the file. Signed CDN URLs expire, so this follows immediately.
         try Task.checkCancellation()
+        progress.send(
+            .fetchingMedia,
+            detail: resolved.duration.map { "\(Int($0))s clip" }
+        )
         let media = try await downloader.download(resolved)
 
         // 3. Hand it to the model, inline or via Files depending on size.
         try Task.checkCancellation()
-        let (result, route) = try await analyse(media, caption: resolved.caption)
+        let (result, route) = try await analyse(
+            media, caption: resolved.caption, progress: progress
+        )
         let analysis = result.analysis
 
         var extra = resolved.extra
@@ -93,9 +100,12 @@ public struct DirectMediaExtractor: ClaimExtractor {
     }
 
     private func analyse(
-        _ media: DownloadedMedia, caption: String?
+        _ media: DownloadedMedia, caption: String?, progress: ProgressSink
     ) async throws -> (GeminiVideoClient.Result, String) {
+        let megabytes = String(format: "%.1f MB", Double(media.byteCount) / 1_048_576)
+
         guard media.byteCount > inlineByteLimit else {
+            progress.send(.analysing, detail: megabytes)
             let result = try await client.analyzeInlineMedia(
                 media.data, mimeType: media.mimeType, context: caption
             )
@@ -109,7 +119,9 @@ public struct DirectMediaExtractor: ClaimExtractor {
             )
         }
 
+        progress.send(.uploading, detail: megabytes)
         let file = try await filesClient.upload(media.data, mimeType: media.mimeType)
+        progress.send(.analysing, detail: megabytes)
         // Files are billed as storage and expire on their own after 48 hours, but a
         // fact-check run has no reason to leave a stranger's video sitting in the
         // project's file quota once it has been read.
