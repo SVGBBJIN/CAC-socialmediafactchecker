@@ -168,3 +168,8 @@ field. See the comments in the Swift file for the full reasoning.
   Nothing is stored server-side.
 - Streaming uses SSE over `fetch`, not `EventSource`, because the request is a POST.
 - Stop cancels the upstream request, so a stopped answer stops costing tokens.
+- A pasted video adds `status` frames (`resolving`, `fetchingMedia`, `uploading`,
+  `analysing`) ahead of the first `delta`, so the UI has something to show during the
+  stretch — sometimes tens of seconds — before Gemini has watched the clip and has
+  anything to stream. `app.js` renders these as the animated line above the answer;
+  the first `delta` clears it.

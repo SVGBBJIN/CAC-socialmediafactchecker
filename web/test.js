@@ -1062,6 +1062,43 @@ test("streamChat attaches the clip and cleans up its upload when the answer is d
   assert.deepEqual(deleted, ["files/xyz"]);
 });
 
+test("streamChat reports resolving/fetchingMedia/uploading/analysing before it has anything else to say", async () => {
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: SOURCE_URL }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl: async () => sseResponse([frame("watched it")]),
+      tikTokOptions: {
+        inlineByteLimit: 1,
+        resolveImpl: async () => resolvedClip(),
+        downloadImpl: async () => ({ bytes: Buffer.alloc(32), mimeType: "video/mp4" }),
+        uploadImpl: async () => ({ name: "files/xyz", uri: "https://files/xyz", mimeType: "video/mp4", state: "ACTIVE" }),
+        deleteImpl: async () => {},
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    frames.filter((f) => f.type === "status").map((f) => f.stage),
+    ["resolving", "fetchingMedia", "uploading", "analysing"],
+  );
+  assert.deepEqual(frames.at(-1), { type: "delta", text: "watched it" });
+});
+
+test("streamChat does not claim to be analysing a video when there isn't one", async () => {
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl: async () => sseResponse([frame("hello")]),
+    }),
+  );
+
+  assert.equal(frames.some((f) => f.type === "status"), false);
+});
+
 test("attachTikTok: false leaves a link as plain text and fetches nothing", async () => {
   let sentBody;
   const fetchImpl = async (url, init) => {

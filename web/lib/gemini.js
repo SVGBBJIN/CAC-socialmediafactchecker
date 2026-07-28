@@ -270,6 +270,11 @@ export async function resolveTikTokParts(
     downloadImpl = downloadTikTokMedia,
     uploadImpl = uploadFile,
     deleteImpl = deleteFile,
+    // Fired as each clip moves through resolve → fetch → (maybe) upload, so a caller
+    // streaming to a browser has something to show while this function is still
+    // awaiting network calls. Optional and synchronous — this function's own
+    // return shape is unchanged, so every existing caller is unaffected.
+    onStage,
   } = {},
 ) {
   const attachments = new Map();
@@ -307,6 +312,7 @@ export async function resolveTikTokParts(
     }
 
     try {
+      onStage?.({ stage: "resolving", link });
       const resolved = await resolveImpl(link, { fetchImpl, signal });
 
       // A short link and the canonical URL it redirects to are the same video. Caught
@@ -318,12 +324,14 @@ export async function resolveTikTokParts(
         continue;
       }
 
+      onStage?.({ stage: "fetchingMedia", link });
       const { bytes, mimeType } = await downloadImpl(resolved, { fetchImpl, signal });
 
       let part;
       if (bytes.length <= inlineByteLimit) {
         part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
       } else {
+        onStage?.({ stage: "uploading", link });
         const file = await uploadImpl(bytes, mimeType, { apiKey, fetchImpl, signal });
         uploads.push(file);
         part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
@@ -362,6 +370,17 @@ function describeClip(resolved) {
 
   const caption = resolved.caption.slice(0, MAX_CAPTION_CHARS);
   return `${header}\n[Its caption reads: ${caption}]`;
+}
+
+/** Whether any user turn mentions a video Gemini or `resolveTikTokParts` will look at. */
+function hasVideoLink(messages) {
+  for (const message of messages) {
+    if (message?.role === "assistant") continue;
+    const text = String(message?.content ?? "");
+    if (findYouTubeVideoIDs(text).length > 0) return true;
+    if (findTikTokLinks(text).length > 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -573,14 +592,67 @@ export async function* streamChat({
     // the same whichever model answers, and re-downloading them on each fall-through
     // would turn one slow link into four.
     if (attachTikTok) {
-      tikTok = await resolveTikTokParts(messages, {
+      // resolveTikTokParts is a plain async function, not a generator, so its `onStage`
+      // calls can't `yield` directly — they land on this queue instead, and whichever
+      // is ready first (a new stage, or the whole call settling) wakes the loop below.
+      // That's what lets a caller see "fetchingMedia" the moment it happens rather than
+      // getting every stage in a batch once the fetch is already done.
+      const pending = [];
+      let wake = null;
+      const wakeUp = () => {
+        if (wake) {
+          const resolve = wake;
+          wake = null;
+          resolve();
+        }
+      };
+      const onStage = (info) => {
+        pending.push({ type: "status", stage: info.stage });
+        wakeUp();
+      };
+
+      const tikTokPromise = resolveTikTokParts(messages, {
         apiKey,
         fetchImpl,
         signal,
+        onStage,
         ...tikTokOptions,
       });
+      let settled = false;
+      // Swallowed here on purpose: a real rejection still surfaces below, from the
+      // `await tikTokPromise` that follows the loop. This handler exists only so an
+      // early rejection doesn't first hit Node as an unhandled one.
+      tikTokPromise.then(
+        () => {
+          settled = true;
+          wakeUp();
+        },
+        () => {
+          settled = true;
+          wakeUp();
+        },
+      );
+
+      while (!settled || pending.length) {
+        if (pending.length) {
+          yield pending.shift();
+          continue;
+        }
+        await new Promise((resolve) => {
+          wake = resolve;
+        });
+      }
+      tikTok = await tikTokPromise;
     }
     if (deadline.callerAborted) return;
+
+    // Nothing between here and the first delta reports progress on its own — YouTube is
+    // one opaque HTTPS call, and even a resolved TikTok clip is now just bytes in a
+    // request Gemini hasn't answered yet. Emitted once, not per model in the chain: a
+    // fall-through to the next model is not the video being re-watched.
+    if (hasVideoLink(messages)) {
+      yield { type: "status", stage: "analysing" };
+    }
 
     const requestBody = {
       contents: toGeminiContents(messages, { tikTok }),

@@ -33,6 +33,14 @@ let activeId = localStorage.getItem(ACTIVE_KEY);
 let inFlight = null;
 let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000 };
 
+// Mirrors the stage names `resolveTikTokParts` and `streamChat` emit in web/lib/gemini.js.
+const STAGE_LABELS = {
+  resolving: "Resolving the video link…",
+  fetchingMedia: "Fetching the video…",
+  uploading: "Uploading the video for analysis…",
+  analysing: "Watching the video…",
+};
+
 /* ---------------- storage ---------------- */
 
 function load() {
@@ -341,6 +349,15 @@ async function streamAnswer(conversationId) {
   const bubble = messageElement({ role: "assistant", content: "" });
   const body = bubble.querySelector(".body");
   body.classList.add("caret");
+
+  // Shown while a pasted video is still being resolved/fetched/watched — the one part
+  // of a turn that can go tens of seconds with nothing to stream, and so the one part
+  // that reads as broken without something on screen saying otherwise.
+  const stage = document.createElement("div");
+  stage.className = "stage";
+  stage.hidden = true;
+  bubble.insertBefore(stage, body);
+
   el.messages.append(bubble);
   scrollToBottom();
 
@@ -428,10 +445,14 @@ async function streamAnswer(conversationId) {
           continue;
         }
 
-        if (frame.type === "model") {
+        if (frame.type === "status") {
+          stage.textContent = STAGE_LABELS[frame.stage] ?? frame.stage;
+          stage.hidden = false;
+        } else if (frame.type === "model") {
           el.modelBadge.textContent = frame.model;
           el.modelBadge.hidden = false;
         } else if (frame.type === "delta") {
+          stage.hidden = true;
           answer += frame.text;
           scheduleRender();
         } else if (frame.type === "error") {
@@ -449,6 +470,7 @@ async function streamAnswer(conversationId) {
     // the final `answer` the instant streaming stops, not up to one frame late.
     body.innerHTML = renderMarkdown(answer);
     body.classList.remove("caret");
+    stage.hidden = true;
     inFlight = null;
     setBusy(false);
   }

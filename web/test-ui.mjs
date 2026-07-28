@@ -59,7 +59,15 @@ const server = createServer(async (req, res) => {
     }
 
     res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
-    for (const frame of step.frames) res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    for (const frame of step.frames) {
+      // A real delay, not just write-ordering: without it every frame lands in the same
+      // browser task and a test asserting on a mid-stream frame (e.g. a status label
+      // that a later delta hides) can never observe it — the client processes the whole
+      // burst before Playwright's next poll. Defaults to 0, so every other script here
+      // that doesn't set it behaves exactly as before.
+      if (frame.delayMs) await new Promise((resolve) => setTimeout(resolve, frame.delayMs));
+      res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    }
     return res.end();
   }
 
@@ -247,6 +255,27 @@ await withPage(async (page) => {
     html.includes("<strong>bold</strong>") && html.includes("<code>code</code>"),
     html,
   );
+});
+
+scriptedAs([
+  {
+    frames: [
+      { type: "status", stage: "resolving" },
+      { type: "status", stage: "fetchingMedia", delayMs: 150 },
+      { type: "status", stage: "analysing", delayMs: 150 },
+      { type: "delta", text: "it's about a cat", delayMs: 150 },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "https://www.tiktok.com/@u/video/1234567890123456789");
+  await page.waitForSelector(".stage:not([hidden]):has-text('Fetching the video')");
+  check("a status frame shows a stage label before any text arrives", true);
+
+  await page.waitForSelector(".message.assistant .body:has-text(\"it's about a cat\")");
+  const stageHidden = await page.locator(".stage").last().isHidden();
+  check("the stage indicator hides once the answer starts streaming", stageHidden);
 });
 
 // Renders are batched per animation frame rather than per token. Without that, a long

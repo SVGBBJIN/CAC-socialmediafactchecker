@@ -361,9 +361,46 @@ body {
   }
 }
 
+/* Shown while a pasted video is being resolved, fetched or watched — the stretch of a
+   turn where nothing is streaming yet and a static bubble reads as stalled. */
+.stage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.stage::before {
+  content: "";
+  flex: none;
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  background-image: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 50% 100%;
+  background-repeat: no-repeat;
+  animation: scan 1.3s ease-in-out infinite;
+}
+
+@keyframes scan {
+  0% {
+    background-position: -50% 0;
+  }
+  100% {
+    background-position: 150% 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .caret::after {
     animation: none;
+  }
+  .stage::before {
+    animation: none;
+    background-image: none;
+    background-color: var(--accent);
   }
   .messages {
     scroll-behavior: auto;
