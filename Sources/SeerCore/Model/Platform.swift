@@ -20,9 +20,14 @@ public enum Platform: String, Sendable, Equatable, Codable, CaseIterable {
             // Gemini accepts a YouTube URL directly as a file part. No download, no
             // frame extraction, no capture pipeline.
             return .nativeVideoIngestion
-        case .tikTok, .instagram:
-            // No public API hands us the media or a transcript, so the only route is to
-            // render the embed and record what plays.
+        case .tikTok:
+            // TikTok's embed page hands out a direct CDN URL for the MP4, so we can
+            // fetch the media ourselves and give the bytes to the model. No player, no
+            // recording, no screen-capture permission.
+            return .directMediaFetch
+        case .instagram:
+            // Login-walled: no route to the media without a Meta token, so the embed
+            // still has to be rendered and recorded. See docs/SPIKE-instagram.md.
             return .screenCapture
         case .unknown:
             return .screenCapture
@@ -55,16 +60,35 @@ public enum Platform: String, Sendable, Equatable, Codable, CaseIterable {
 
 /// The fork every platform lands on, made explicit in the type system.
 ///
-/// Both sides produce a ``ClaimContext``; they differ only in cost, latency and
-/// failure modes. See ``ClaimExtractor`` for the protocol both conform to.
+/// Every arm produces a ``ClaimContext``; they differ only in cost, latency and
+/// failure modes. See ``ClaimExtractor`` for the protocol they all conform to.
+///
+/// The question to ask when adding a platform, in order — each arm is strictly
+/// cheaper and less fragile than the one below it:
+///
+/// 1. Will the model fetch the URL itself? → ``nativeVideoIngestion``
+/// 2. Can *we* get at the media file? → ``directMediaFetch``
+/// 3. Neither → ``screenCapture``
 public enum IngestionStrategy: String, Sendable, Equatable, Codable {
     /// The model ingests the URL itself. Cheap, fast, no on-device media handling.
     /// Available only where a provider has struck a deal with the platform —
     /// today that means Gemini and YouTube.
     case nativeVideoIngestion
 
+    /// We resolve the platform's own embed to a direct media URL, fetch the bytes, and
+    /// hand them to the model. More work than ``nativeVideoIngestion`` — the media does
+    /// travel through the device — but it needs no player, no recording permission and
+    /// no separate transcription service, and it runs at network speed rather than in
+    /// real time.
+    ///
+    /// The tradeoff is that it leans on an undocumented shape in a page the platform
+    /// serves to its own embed iframe. That can change without notice, so a resolver on
+    /// this arm has to fail loudly when the shape moves rather than quietly return
+    /// nothing.
+    case directMediaFetch
+
     /// Render the platform's embed in a web view, record the screen, transcribe the
-    /// audio. Slow, fragile, requires user-facing recording permission — the fallback
-    /// for platforms that expose neither media nor transcript.
+    /// audio. Slow, fragile, requires user-facing recording permission — the last
+    /// resort for platforms that expose neither media nor transcript.
     case screenCapture
 }

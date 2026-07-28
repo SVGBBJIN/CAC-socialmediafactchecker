@@ -40,6 +40,12 @@ struct GeminiRequest: Encodable {
         static func inline(_ data: Data, mimeType: String) -> Part {
             Part(inlineData: InlineData(mimeType: mimeType, data: data.base64EncodedString()))
         }
+
+        /// A file already uploaded through the Files API. Same `file_data` shape as a
+        /// YouTube URL, but the URI points at Google's own storage.
+        static func file(uri: String, mimeType: String) -> Part {
+            Part(fileData: FileData(mimeType: mimeType, fileUri: uri))
+        }
     }
 
     struct FileData: Encodable {

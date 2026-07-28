@@ -20,19 +20,36 @@ Nothing downstream of `ClaimContext` knows which platform a claim came from.
 | Platform | Path | Status |
 |---|---|---|
 | **YouTube** | Gemini native URL ingestion | **Working** — verified against the live API |
-| **TikTok** | oEmbed → WKWebView → ReplayKit → Whisper | Pipeline complete and tested; **blocked on ReplayKit audio** |
-| **Instagram** | same as TikTok | **Blocked twice** — same audio issue, plus Meta App Review |
+| **TikTok** | embed page → CDN MP4 → Gemini Flash | **Working** — resolve + download verified live; Gemini leg needs a key to confirm |
+| **Instagram** | oEmbed → WKWebView → ReplayKit → Whisper | **Blocked twice** — ReplayKit audio, plus Meta App Review |
 
-Only platforms that can actually be served are registered, so a user sharing a TikTok today
-gets an honest "not supported yet" instead of an empty result.
+Only platforms that can actually be served are registered, so a user sharing an Instagram
+link today gets an honest "not supported yet" instead of an empty result.
+
+### TikTok no longer needs screen capture
+
+The capture path was blocked on ReplayKit returning silent audio from a `WKWebView`. That
+turned out to be avoidable rather than fixable: the iframe TikTok's embed script builds
+points at `tiktok.com/embed/v2/<id>`, that page is served to anonymous requests, and its
+`__FRONTITY_CONNECT_STATE__` blob carries **a direct CDN URL for the MP4** along with the
+duration, caption and author.
+
+So Seer fetches the file and hands the bytes to Gemini Flash. No web view, no player, no
+recording permission, no Whisper, and no waiting on a physical device. It also runs at
+network speed instead of in real time — a 60-second clip no longer takes 60 seconds — and
+because a video model watches rather than only listens, a clip whose claim is text over
+silent B-roll now yields on-screen text where the capture path yielded nothing.
+
+Verified live on 2026-07-28 through the compiled resolver: anonymous request, no
+credential, 3.2 MB `video/mp4` with a valid `ftyp` box.
 
 ## Two things to action
 
 1. **Rotate the Gemini API key.** It was shared in a chat message during handoff — assume
    it's compromised. [docs/SECRETS.md](docs/SECRETS.md)
-2. **Run `AudioCaptureDiagnostic` on a device.** It answers, in one run, whether the
-   TikTok/Instagram capture path is viable at all. Everything else on that path is written
-   and tested; this is the only open question.
+2. **Run one TikTok link end to end with a real key.** Everything up to the Gemini call is
+   verified against live TikTok; the analysis leg reuses the same `generateContent` client
+   the working YouTube path uses, but has not been run with a key.
    [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md)
 
 ## Layout
@@ -41,8 +58,9 @@ gets an honest "not supported yet" instead of an empty result.
 Sources/SeerCore/          Pure Foundation — builds and tests anywhere
   Model/                   ClaimContext, Platform + the ingestion fork
   Pipeline/                ClaimExtractor protocol, routing, assembly
-  Gemini/                  Video client + model fallback chain
-  Extractors/              YouTubeExtractor, CaptureBasedExtractor
+  Gemini/                  Video client, model fallback chain, Files API upload
+  Extractors/              YouTubeExtractor, DirectMediaExtractor, CaptureBasedExtractor
+  Media/                   TikTok embed → CDN URL resolver, downloader
   Capture/                 MediaCaptureSource seam, oEmbed resolvers
   Transcription/           Groq/Whisper
   Secrets/                 Keychain, AES-GCM bundle, store chaining
@@ -52,22 +70,33 @@ Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
 
 ## The architectural line
 
-Any future platform lands on one of two paths, decided once in `Platform.ingestionStrategy`:
+Any future platform lands on one of three paths, decided once in
+`Platform.ingestionStrategy`. Ask the questions in order and stop at the first yes — each
+arm is strictly cheaper and less fragile than the one below it:
 
-- **Has a native video-ingestion API** (YouTube/Gemini) → skip capture entirely.
-- **Doesn't** (TikTok/Instagram) → WKWebView + RPScreenRecorder + transcription.
+1. **Will the model fetch the URL itself?** (YouTube/Gemini) → `nativeVideoIngestion`.
+   One HTTPS call, no media on the device.
+2. **Can we get at the media file?** (TikTok, via its embed page) → `directMediaFetch`.
+   Resolve, download, hand the bytes over.
+3. **Neither** (Instagram — login-walled) → `screenCapture`. Render the embed, record the
+   screen, transcribe. Slow, needs a recording permission, and still blocked.
 
-Both conform to `ClaimExtractor` and produce the same `ClaimContext`. Adding X or Facebook
-means answering that one question, not rediscovering the fork.
+All three conform to `ClaimExtractor` and produce the same `ClaimContext`. Adding X or
+Facebook means answering those questions, not rediscovering the fork.
+
+TikTok moved from arm 3 to arm 2, which is what unblocked it. Worth checking arm 2 for any
+platform sitting on arm 3 before investing in capture.
 
 ## Tests
 
 ```bash
-swift test    # 67 tests, no network
+swift test    # 102 tests, no network
 ```
 
 Parsers are tested against **live** captured responses from Gemini and TikTok, not against
-what the docs claim. That caught a field the documented shape doesn't mention.
+what the docs claim. That caught a field the documented shape doesn't mention, and it is
+the only way to test the TikTok embed blob at all — that payload has no documentation to
+write a fixture from.
 
 `SeerCapture` requires the iOS SDK and has not been compiled — see the note at the end of
 [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md).

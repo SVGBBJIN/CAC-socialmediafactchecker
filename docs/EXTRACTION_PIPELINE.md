@@ -5,26 +5,31 @@ the fact-check layer consumes without knowing or caring which platform it came f
 
 ## The fork
 
-Every platform lands on one of two paths. The distinction is stated once, in
-`Platform.ingestionStrategy`, and both paths conform to `ClaimExtractor`:
+Every platform lands on one of three paths. The distinction is stated once, in
+`Platform.ingestionStrategy`, and all three conform to `ClaimExtractor`:
 
 ```
-                       ┌─ has a native video-ingestion API? ─┐
-                     yes                                     no
-                      │                                       │
-        .nativeVideoIngestion                          .screenCapture
-                      │                                       │
-         Gemini reads the URL                  oEmbed → WKWebView → RPScreenRecorder
-              directly                                → Whisper
-                      │                                       │
-              YouTubeExtractor                     CaptureBasedExtractor
-                      │                                       │
-                      └──────────► ClaimContext ◄─────────────┘
+            ┌─ will the model fetch the URL itself? ─┐
+          yes                                        no
+           │                                          │
+ .nativeVideoIngestion              ┌─ can we get the media file? ─┐
+           │                      yes                              no
+ Gemini reads the URL               │                               │
+      directly                .directMediaFetch              .screenCapture
+           │                        │                               │
+           │            embed page → CDN URL → download    oEmbed → WKWebView
+           │                → Gemini (inline or Files)      → RPScreenRecorder
+           │                        │                          → Whisper
+           │                        │                               │
+    YouTubeExtractor        DirectMediaExtractor          CaptureBasedExtractor
+           │                        │                               │
+           └────────────────► ClaimContext ◄───────────────────────┘
 ```
 
-Adding a platform means answering one question and adding a `Platform` case — not
-rediscovering the fork. If it has a native ingestion API, it needs no capture code at all;
-if it doesn't, it reuses `CaptureBasedExtractor` with a different `EmbedResolver`.
+Ask the questions in order and stop at the first yes; each arm is strictly cheaper and
+less fragile than the one below it. Adding a platform means answering them and adding a
+`Platform` case — not rediscovering the fork. Arm 2 is a `MediaURLResolver` conformance,
+arm 3 is an `EmbedResolver` conformance; the rest of each path is shared.
 
 `ExtractionPipeline` asserts in debug builds that an extractor's declared strategy matches
 its platform's, so the two can't drift apart.
@@ -34,13 +39,14 @@ its platform's, so the two can't drift apart.
 | Platform | Path | Status |
 |---|---|---|
 | YouTube | native ingestion | **Working.** Verified against the live API. |
-| TikTok | screen capture | **Pipeline complete and tested; blocked on capture audio.** |
-| Instagram | screen capture | **Blocked twice over** — same audio issue, plus Meta app review. See [SPIKE-instagram.md](SPIKE-instagram.md). |
+| TikTok | direct media fetch | **Working.** Resolve + download verified live 2026-07-28; the Gemini leg needs a key to confirm. |
+| Instagram | screen capture | **Blocked twice over** — ReplayKit audio, plus Meta app review. See [SPIKE-instagram.md](SPIKE-instagram.md). |
 
-Only platforms that can actually be served get registered. `SeerPipelineBuilder` leaves
-TikTok and Instagram out unless a capture source is supplied, so a user sharing a TikTok
-gets a clear "not supported yet" rather than silence. `SeerPipelineBuilder.supportStatus`
-returns the reason for each gap, for the UI to show up front.
+Only platforms that can actually be served get registered. TikTok and YouTube need nothing
+but the Gemini key. `SeerPipelineBuilder` leaves Instagram out unless a capture source and
+a Meta token are supplied, so a user sharing one gets a clear "not supported yet" rather
+than silence. `SeerPipelineBuilder.supportStatus` returns the reason for each gap, for the
+UI to show up front.
 
 ## 1. YouTube — working
 
@@ -68,72 +74,134 @@ move. The free tier caps daily YouTube intake (8 hours/day at time of writing). 
 be public or unlisted. `maxAnalysedDuration` (default 30 min) caps how much of a long video
 is billed.
 
-## 2. TikTok — complete except for capture
+## 2. TikTok — working, without capture
 
-`oEmbed → WKWebView → RPScreenRecorder → Groq/Whisper`.
+`URL → embed page → CDN MP4 → Gemini Flash`. `TikTokMediaResolver` + `MediaDownloader` +
+`DirectMediaExtractor`.
 
-The oEmbed leg is verified: the endpoint is public, needs no credential, and returns embed
-HTML plus author metadata. The live response is a test fixture. It returns **no transcript**
-— which is the entire reason this path exists.
+### How the blocker got removed
 
-### The blocker
-
+The previous design was `oEmbed → WKWebView → RPScreenRecorder → Whisper`, and it was stuck:
 `RPScreenRecorder`'s `.audioApp` stream frequently arrives **silent** when the sound comes
-from a `WKWebView`. The web view plays on its own `AVAudioSession`, and ReplayKit's
+from a `WKWebView`, because the web view plays on its own `AVAudioSession` and ReplayKit's
 app-audio tap does not reliably capture it. The recording succeeds, the file is well-formed,
 and it contains nothing.
 
-This was not resolved here — it needs a physical device, and this work was done without
-one. What was done instead:
+That problem was not solved. It was **made irrelevant for TikTok**, by going one level down
+from oEmbed.
 
-**1. Everything downstream of capture is finished and tested.** `MediaCaptureSource` is the
-seam. `MockCaptureSource` drives the full TikTok pipeline in tests today; the real recorder
-drops in behind the same protocol with no downstream change. This is also what lets
-Instagram reuse the path — the platforms differ in embed markup, not in how a recording is
-taken.
+oEmbed returns a `blockquote` plus `<script src="tiktok.com/embed.js">`. What that script
+does is inject an **iframe pointed at `tiktok.com/embed/v2/<id>`** — and that page is served
+to anonymous requests with no credential. It carries its own server-rendered state blob,
+`__FRONTITY_CONNECT_STATE__`, and inside it:
 
-**2. Silence is detected rather than assumed.** `ScreenRecorderCaptureSource` measures peak
-amplitude across the captured buffers and reports `CapturedMedia.containsAudio` honestly.
-A silent capture fails with a clear error instead of producing an empty transcript — which
-matters more here than in most apps, because an empty transcript reads downstream as
-*"this video makes no claims"*, and a fact-checker silently reporting nothing to check is
-worse than one reporting an error. Two layers enforce it: `CaptureBasedExtractor` refuses
-to transcribe, and `GroqWhisperTranscriber` refuses to upload. (Whisper hallucinates
-plausible text from silence, so this is a real risk, not a theoretical one.)
+```
+source.data["/embed/v2/<id>"].videoData.itemInfos
+  ├─ video.urls[0]        ← a direct CDN URL for the MP4
+  ├─ video.videoMeta      ← width, height, duration
+  ├─ text                 ← the caption
+  └─ …plus author, covers, counts
+```
 
-**3. There's a diagnostic to answer the question.** `AudioCaptureDiagnostic` runs the
-capture leg in isolation on a device and reports which layer failed — embed didn't resolve,
-didn't render, never played, ReplayKit sent zero buffers, or buffers arrived silent. Run it
-before writing or trusting anything else on this path:
+So the whole capture apparatus is skippable: resolve the embed the iframe would have
+loaded, read the media URL out of it, fetch the file, hand the bytes to Gemini.
+
+**Verified live on 2026-07-28** through the compiled resolver, not by hand: anonymous
+request → HTTP 200, blob parsed, extracted URL served **3,224,978 bytes of `video/mp4`**
+with a valid `ftyp` box and no credential or `Referer` required. The captured payload is
+checked in as the fixture in `Tests/SeerCoreTests/TikTokDirectFetchTests.swift`.
+
+### What this buys beyond unblocking
+
+- **No recording permission.** The capture path needed the user to grant screen recording
+  in a share extension, which is a conversion cliff.
+- **Faster than real time.** Recording a 60-second clip took 60 seconds. Downloading it
+  takes as long as 5 MB takes.
+- **No Whisper, so no second vendor and no second failure mode** — one call instead of
+  record-then-upload-then-transcribe.
+- **On-screen text is recoverable.** This is the substantive one. Whisper hears; it cannot
+  read. A clip whose claim is a caption over silent B-roll — a large share of short-form
+  political content — produced an *empty transcript* on the capture path, which reads
+  downstream as "this video makes no claims". A video model watches, so the same clip now
+  yields `onScreenText` and candidate claims.
+
+### What it costs
+
+`__FRONTITY_CONNECT_STATE__` is **not a documented API**. It is the internal state of a
+page TikTok serves to its own iframe, and it can change shape without notice. Two things
+follow, both implemented:
+
+- **Every parse failure names what went missing** rather than returning an empty result.
+  When TikTok moves this, the error says which step stopped finding what it expected.
+  Tested — see `testMissingStateBlobFailsWithADiagnosticMessage`.
+- **The decoder is permissive about fields it doesn't read and strict about the ones it
+  does**, so an added key can't break extraction but a removed `urls` array fails loudly.
+
+Distinguishing *"the page shape changed"* (`malformedResponse`) from *"this video isn't
+available"* (`emptyResult`) matters: the first is a bug report, the second is a user
+message. A private, deleted or region-blocked post renders a valid page with no
+`videoData`, and is reported as the latter.
+
+### Edge cases handled
+
+- **Short links.** `vm.tiktok.com/…`, `vt.tiktok.com/…` and `/t/…` carry no ID; the
+  resolver follows the redirect and reads the canonical URL.
+- **Photo carousels.** `/@user/photo/<id>` is a real post with no video. Declined up front
+  as `notAMediaURL`, so the user is told it isn't a video rather than getting a confusing
+  upstream error.
+- **Unknown IDs return HTTP 400 from the embed endpoint, not 404** (verified live).
+  Translated to `notAMediaURL`.
+- **Size.** `generateContent` caps a request at 20 MB and base64 costs a third on top, so
+  clips over ~14 MB route through the Files API instead of going inline. See below.
+- **A hard byte ceiling on the download** (96 MB), because a share extension has a memory
+  budget it cannot negotiate and being killed mid-download looks like the app doing nothing.
+
+### The Gemini leg
+
+Small clips go inline as base64 in one call. Larger ones go through `GeminiFilesClient`:
+a resumable `X-Goog-Upload-*` handshake, then polling until the file leaves `PROCESSING`
+— not optional for video, since referencing a file before it turns `ACTIVE` fails the
+generate call. The file is deleted after analysis rather than left in the project's quota.
+
+**This leg has not been run against the live API**, because no Gemini key was available
+where this was written. It reuses the same `GeminiVideoClient` and `generateContent`
+endpoint as the working YouTube path — the difference is an `inline_data` or `file_data`
+part instead of a YouTube URL — and both request shapes are asserted in tests. Run one
+TikTok link with a real key before trusting it.
+
+### The caption is untrusted input
+
+The poster's caption is passed to the model as context, because on short-form video the
+claim is often typed rather than spoken. It is also attacker-controlled text being pasted
+into a prompt. It is fenced in a `<caption>` delimiter, explicitly labelled as data, and
+the task is re-stated after it. That is mitigation, not a guarantee — the real protection
+is structural: nothing downstream acts on model output except to fact-check it.
+
+## 2a. The capture path — still there, still blocked
+
+`CaptureBasedExtractor`, `MediaCaptureSource`, `ScreenRecorderCaptureSource` and
+`AudioCaptureDiagnostic` are unchanged and still wired up. Instagram needs them, and the
+ReplayKit audio question is unresolved.
+
+If Instagram ever gets a Meta token, **check whether it has an equivalent of TikTok's embed
+blob before investing anything further in capture.** The TikTok result is a reason to
+suspect the capture path is avoidable rather than fixable.
+
+Two properties of that path worth preserving if it is revisited:
+
+- **Silence is detected rather than assumed.** `ScreenRecorderCaptureSource` measures peak
+  amplitude and reports `CapturedMedia.containsAudio` honestly; `CaptureBasedExtractor`
+  refuses to transcribe and `GroqWhisperTranscriber` refuses to upload. Whisper
+  hallucinates plausible text from silence, so this is a real risk, not a theoretical one.
+- **`AudioCaptureDiagnostic` still answers the open question in one run on a device** —
+  whether the video never played (a fixable autoplay problem) or played and ReplayKit heard
+  nothing (the audio-session issue).
 
 ```swift
 let report = try await AudioCaptureDiagnostic(hostContainer: { self.view })
-    .run(on: URL(string: "https://www.tiktok.com/@user/video/123")!)
+    .run(on: URL(string: "https://www.instagram.com/reel/ABC/")!)
 print(report.summary)
 ```
-
-It distinguishes the two failure modes that look identical from the outside: *the video
-never played* (a WKWebView autoplay problem, fixable) versus *the video played and
-ReplayKit heard nothing* (the audio-session issue, possibly fatal to this approach).
-
-If it reports BLOCKED, the capture path is not viable as designed and the alternatives are
-worth pricing before spending more on it: `AVAudioEngine` tapping the session directly, an
-`RPBroadcast` extension, or asking the user to screen-record themselves.
-
-### The web view leg
-
-Two things the naive version gets wrong, handled in `WebViewEmbedRenderer`:
-
-- **The web view must be on screen and unobscured** for the whole capture. ReplayKit
-  records the display; an off-screen or transparent view records as nothing. Hence the API
-  takes a container view rather than returning a detached one.
-- **Embeds autoplay muted.** A muted player is a silent recording — the same symptom as the
-  audio-session bug, from a completely different cause. The renderer explicitly unmutes and
-  sets volume before playing, and `isPlayingAudibly()` verifies a `<video>` is actually
-  playing, unmuted, past 0s before the recording is trusted.
-
-The embed document is loaded against a real platform origin, not `about:blank`; platform
-embed scripts check the origin and refuse to hydrate otherwise.
 
 ## 3. Instagram — spiked, blocked
 
@@ -142,9 +210,15 @@ dead (HTTP 500), the Graph replacement requires a Meta app token gated behind Ap
 and anonymous instagram.com is login-walled. Full findings and what unblocks it:
 [SPIKE-instagram.md](SPIKE-instagram.md).
 
-The code is written and tested — `CaptureBasedExtractor.instagram` reuses the TikTok
-pipeline verbatim, which is the reuse story working as intended. It stays unregistered
-until someone obtains a token.
+The code is written and tested — `CaptureBasedExtractor.instagram` reuses the capture
+pipeline verbatim. It stays unregistered until someone obtains a token.
+
+Note that TikTok moving to `directMediaFetch` changed what "reuses the TikTok pipeline"
+means: Instagram is now the *only* platform on the capture arm, so that arm is carried
+entirely for a platform that is itself blocked on someone else's review queue. Before
+spending anything more on capture, re-run the spike and check whether Instagram's embed
+iframe exposes a media URL the way TikTok's does. If it does, the capture path can be
+retired outright rather than fixed.
 
 ## Cross-cutting
 
@@ -159,11 +233,13 @@ budget; metadata calls get 20s.
 **Credentials** — never in source. See [SECRETS.md](SECRETS.md). The Gemini key shared
 during handoff should be rotated.
 
-**Testing** — 67 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource` and
-`Transcriber` are all injectable. Live responses from Gemini and TikTok are checked in as
-fixtures, so the parsers are tested against what the APIs actually return rather than what
-the docs say they return — the live Gemini response included a `thoughtSignature` field
-alongside `text` that a stricter parser would have thrown on.
+**Testing** — 102 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource`,
+`MediaURLResolver`, `MediaDownloading` and `Transcriber` are all injectable. Live responses
+from Gemini and TikTok are checked in as fixtures, so the parsers are tested against what
+the APIs actually return rather than what the docs say they return — the live Gemini
+response included a `thoughtSignature` field alongside `text` that a stricter parser would
+have thrown on. For the TikTok embed blob it is the only option available: that payload has
+no documentation to write a fixture from.
 
 ```bash
 swift test
