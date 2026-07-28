@@ -114,7 +114,12 @@ function renderMarkdown(text) {
     .join("");
 }
 
-function messageElement(message) {
+/**
+ * @param conversationId - Passed only for the conversation's *final* message, which is
+ *   the only one a retry can safely rebuild. Omitted for the in-progress bubble
+ *   streamAnswer builds before the answer has a home to retry into.
+ */
+function messageElement(message, conversationId) {
   const wrap = document.createElement("div");
   wrap.className = `message ${message.role}`;
 
@@ -132,6 +137,19 @@ function messageElement(message) {
   }
 
   wrap.append(who, body);
+
+  // `retryable` distinguishes "Gemini is overloaded, try again" from "that request was
+  // malformed and will fail identically" — retrying the latter just burns another round
+  // trip to reproduce the same error.
+  if (message.role === "error" && message.retryable && conversationId) {
+    const retryButton = document.createElement("button");
+    retryButton.type = "button";
+    retryButton.className = "retry-button";
+    retryButton.textContent = "Try again";
+    retryButton.addEventListener("click", () => retry(conversationId, message.restorePoint));
+    wrap.append(retryButton);
+  }
+
   return wrap;
 }
 
@@ -145,9 +163,14 @@ function renderMessages() {
     el.modelBadge.hidden = true;
   } else {
     el.emptyState.hidden = true;
-    for (const message of conversation.messages) {
-      el.messages.append(messageElement(message));
-    }
+    conversation.messages.forEach((message, index) => {
+      // Only the last message gets a retry button. Retrying rebuilds the conversation
+      // from the failed turn onwards, so offering it on an error further up would
+      // discard every exchange that came after it — the user asked to re-run one turn,
+      // not to delete the rest of the thread.
+      const isLast = index === conversation.messages.length - 1;
+      el.messages.append(messageElement(message, isLast ? conversation.id : undefined));
+    });
   }
 
   el.title.textContent = conversation?.title ?? "New chat";
@@ -201,6 +224,12 @@ function setBusy(busy) {
   el.send.hidden = busy;
   el.stop.hidden = !busy;
   el.input.disabled = false; // Stay typeable — the next message can be queued mentally.
+  // A retry from an earlier failed turn while a new one is already streaming would
+  // truncate the conversation out from under it — `retry()` guards against that too,
+  // but disabling the button is what stops the click from looking like it did nothing.
+  for (const button of el.messages.querySelectorAll(".retry-button")) {
+    button.disabled = busy;
+  }
 }
 
 /* ---------------- actions ---------------- */
@@ -285,19 +314,24 @@ function requestHeaders() {
   return headers;
 }
 
-async function send(text) {
-  const conversation = activeConversation() ?? newConversation();
-  // Remembered so the result can be filed against the conversation it belongs to even
-  // if the user switches away — or deletes it — while the answer is still streaming.
-  const conversationId = conversation.id;
+/**
+ * Streams one assistant reply into `conversationId`'s existing history and appends the
+ * result — an `assistant` message, an `error` message, or both if a partial answer
+ * arrived before the failure.
+ *
+ * Shared by `send()` (a fresh user turn) and `retry()` (re-attempting one already in
+ * history), so a retry replays the same history rather than appending a duplicate user
+ * turn.
+ */
+async function streamAnswer(conversationId) {
+  const conversation = conversations.find((c) => c.id === conversationId);
+  if (!conversation) return;
 
-  conversation.messages.push({ role: "user", content: text });
-  if (conversation.messages.filter((m) => m.role === "user").length === 1) {
-    conversation.title = titleFrom(text);
-  }
-  persist();
-  renderSidebar();
-  renderMessages();
+  // Whatever this call appends from here on is exactly what `retry()` undoes before
+  // its own attempt — recorded now, before anything is added, so a retry truncates
+  // back to precisely "just the user's turn" and never eats history from an earlier
+  // exchange.
+  const restorePoint = conversation.messages.length;
 
   // Only real turns go upstream — a previous error bubble is UI, not context.
   const history = conversation.messages
@@ -317,14 +351,41 @@ async function send(text) {
 
   let answer = "";
   let failed = null;
+  let retryable = false;
+
+  // Re-parsing and re-rendering the whole answer on every delta is O(n) per token and
+  // O(n^2) over a long reply, and it also blows away any text selection the reader had
+  // mid-stream. Batched to at most one render per animation frame instead: `answer`
+  // keeps accumulating at whatever rate deltas arrive, but the DOM only actually
+  // updates as fast as the screen can show it — a fast model emitting many small
+  // chunks between two frames costs one render, not many.
+  let renderScheduled = false;
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => {
+      renderScheduled = false;
+      body.innerHTML = renderMarkdown(answer);
+      scrollToBottom();
+    });
+  }
 
   try {
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: requestHeaders(),
-      body: JSON.stringify({ messages: history }),
-      signal: controller.signal,
-    });
+    let response;
+    try {
+      response = await fetch("/api/chat", {
+        method: "POST",
+        headers: requestHeaders(),
+        body: JSON.stringify({ messages: history }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      // Couldn't even reach the server — a network blip, not a request Gemini itself
+      // rejected. Worth another try once the network recovers.
+      retryable = true;
+      throw new Error(`Could not reach the server: ${error.message}`);
+    }
 
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
@@ -332,6 +393,11 @@ async function send(text) {
         sessionStorage.removeItem(PASSPHRASE_KEY);
         el.passDialog.showModal();
       }
+      // 429 is the one pre-stream failure that resolves on its own by waiting. The rest
+      // — a malformed request, the wrong passphrase, no key configured server-side —
+      // fail identically on a retry, so offering one would just spend a round trip to
+      // reproduce the same error.
+      retryable = response.status === 429;
       throw new Error(payload.error ?? `Request failed (HTTP ${response.status}).`);
     }
 
@@ -367,9 +433,11 @@ async function send(text) {
           el.modelBadge.hidden = false;
         } else if (frame.type === "delta") {
           answer += frame.text;
-          body.innerHTML = renderMarkdown(answer);
-          scrollToBottom();
+          scheduleRender();
         } else if (frame.type === "error") {
+          // The server already classified this — a quota/5xx/timeout failure sets it,
+          // a policy refusal or a malformed request doesn't.
+          retryable = Boolean(frame.retryable);
           throw new Error(frame.message);
         }
       }
@@ -377,23 +445,65 @@ async function send(text) {
   } catch (error) {
     if (error.name !== "AbortError") failed = error.message;
   } finally {
+    // Flushed synchronously rather than left to a pending rAF: the bubble has to show
+    // the final `answer` the instant streaming stops, not up to one frame late.
+    body.innerHTML = renderMarkdown(answer);
     body.classList.remove("caret");
     inFlight = null;
     setBusy(false);
   }
 
-  // Re-look up rather than reusing the captured object: if the conversation was deleted
-  // mid-stream it is no longer in `conversations`, and appending to the detached object
-  // would persist nothing while leaving the message on screen until the next render.
+  // Re-look up rather than reusing the conversation found at the top: if it was
+  // deleted mid-stream it is no longer in `conversations`, and appending to the
+  // detached object would persist nothing while leaving the message on screen until
+  // the next render.
   const target = conversations.find((c) => c.id === conversationId);
   if (target) {
     if (answer) target.messages.push({ role: "assistant", content: answer });
-    if (failed) target.messages.push({ role: "error", content: failed });
+    if (failed) target.messages.push({ role: "error", content: failed, retryable, restorePoint });
     persist();
   }
 
   renderMessages();
   el.input.focus();
+}
+
+async function send(text) {
+  const conversation = activeConversation() ?? newConversation();
+  const conversationId = conversation.id;
+
+  conversation.messages.push({ role: "user", content: text });
+  if (conversation.messages.filter((m) => m.role === "user").length === 1) {
+    conversation.title = titleFrom(text);
+  }
+  persist();
+  renderSidebar();
+  renderMessages();
+
+  await streamAnswer(conversationId);
+}
+
+/**
+ * Re-attempts the turn that failed at `restorePoint`, replaying the same history
+ * rather than appending a duplicate user message.
+ */
+function retry(conversationId, restorePoint) {
+  if (inFlight) return; // A stream from a different turn is already in flight.
+  const conversation = conversations.find((c) => c.id === conversationId);
+  if (!conversation || restorePoint === undefined) return;
+
+  // Everything from `restorePoint` on must be the failed attempt's own output — a
+  // partial assistant reply, the error, or both. If anything else is there, this button
+  // outlived the turn it belonged to and truncating would destroy a later exchange.
+  const tail = conversation.messages.slice(restorePoint);
+  if (tail.some((m) => m.role === "user")) return;
+
+  // Drops exactly what that attempt appended, and nothing from before it —
+  // `restorePoint` was recorded at its start, so the user's turn is left intact.
+  conversation.messages.length = restorePoint;
+  persist();
+  renderMessages();
+  streamAnswer(conversationId);
 }
 
 /* ---------------- wiring ---------------- */

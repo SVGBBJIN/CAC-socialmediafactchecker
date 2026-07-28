@@ -23,6 +23,10 @@ export function config(env = process.env) {
     perDay: positiveInt(env.RATE_LIMIT_PER_DAY, 300),
     maxInputChars: positiveInt(env.MAX_INPUT_CHARS, 8000),
     maxTurns: positiveInt(env.MAX_TURNS, 20),
+    // Every other cap here bounds *input*. Nothing bounded output — a single reply
+    // could run until the model stopped on its own, and output tokens are the
+    // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`.
+    maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 4096),
   };
 }
 

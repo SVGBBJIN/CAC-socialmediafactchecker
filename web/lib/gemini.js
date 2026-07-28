@@ -21,6 +21,13 @@ const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 export const REQUEST_TIMEOUT_MS = 30_000;
 export const STREAM_IDLE_TIMEOUT_MS = 120_000;
 
+/**
+ * Default ceiling on a single reply, in tokens. Applied even when the caller doesn't
+ * pass one explicitly — a spend cap that has to be opted out of is a spend cap that
+ * eventually gets forgotten. `web/api/chat.js` overrides this from `MAX_OUTPUT_TOKENS`.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+
 /** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
 export const DEFAULT_MODEL_CHAIN = [
   "gemini-3.6-flash",
@@ -377,6 +384,7 @@ export async function* streamChat({
   system,
   models = DEFAULT_MODEL_CHAIN,
   temperature = 0.7,
+  maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
   signal,
   fetchImpl = fetch,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
@@ -384,7 +392,13 @@ export async function* streamChat({
 }) {
   const requestBody = {
     contents: toGeminiContents(messages),
-    generationConfig: { temperature },
+    // camelCase per the REST reference. Checked against the live endpoint on
+    // 2026-07-28: it accepts `maxOutputTokens` and `max_output_tokens` alike — the
+    // protobuf JSON parser takes both the proto field name and its JSON name, which is
+    // why the snake_case spelling in GeminiWire.swift is equally valid. A name it
+    // genuinely doesn't know is rejected outright ("Unknown name ..."), not ignored, so
+    // a typo here fails loudly rather than quietly dropping the cap.
+    generationConfig: { temperature, maxOutputTokens },
   };
   if (system) {
     requestBody.systemInstruction = { parts: [{ text: system }] };

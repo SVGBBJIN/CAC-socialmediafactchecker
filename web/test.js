@@ -14,6 +14,7 @@ import {
   youTubeVideoID,
   findYouTubeVideoIDs,
   isInvalidKeyFailure,
+  DEFAULT_MAX_OUTPUT_TOKENS,
 } from "./lib/gemini.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
 import {
@@ -22,6 +23,7 @@ import {
   validateMessages,
   resetRateLimits,
   GuardError,
+  config as guardConfig,
 } from "./lib/guard.js";
 
 const limits = { perMinute: 3, perDay: 5, maxInputChars: 100, maxTurns: 4, password: "" };
@@ -298,6 +300,55 @@ test("a YouTube link becomes a file_data part alongside the text", () => {
       ],
     },
   ]);
+});
+
+test("a reply is capped in tokens by default, under the documented field name", async () => {
+  // camelCase per the REST reference. Gemini accepts the snake_case spelling too, so
+  // this pins the documented name rather than guarding against a silent failure — an
+  // unrecognised name is rejected with a 400, not ignored.
+  let seenBody;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl: async (url, init) => {
+        seenBody = JSON.parse(init.body);
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  assert.equal(seenBody.generationConfig.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+  // Exactly one spelling goes on the wire — sending both would be two names for one
+  // field in a single object.
+  assert.equal(seenBody.generationConfig.max_output_tokens, undefined);
+});
+
+test("the token cap can be overridden per call", async () => {
+  let seenBody;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      maxOutputTokens: 128,
+      fetchImpl: async (url, init) => {
+        seenBody = JSON.parse(init.body);
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  assert.equal(seenBody.generationConfig.maxOutputTokens, 128);
+});
+
+test("MAX_OUTPUT_TOKENS from the environment feeds the guard config", () => {
+  assert.equal(guardConfig({}).maxOutputTokens, 4096);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "256" }).maxOutputTokens, 256);
+  // Garbage falls back to the default rather than producing NaN and disabling the cap.
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 4096);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 4096);
 });
 
 test("a video is attached once, at its first mention, not on every turn", () => {

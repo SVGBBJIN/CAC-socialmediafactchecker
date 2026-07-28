@@ -117,6 +117,7 @@ export default async function handler(req, res) {
       messages,
       system: SYSTEM_PROMPT,
       models: modelChainFromEnv(),
+      maxOutputTokens: limits.maxOutputTokens,
       signal: controller.signal,
     })) {
       send(frame);

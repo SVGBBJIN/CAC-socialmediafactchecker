@@ -305,6 +305,28 @@ body {
   white-space: pre-wrap;
 }
 
+.retry-button {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 13px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.retry-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.retry-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .message .body pre {
   background: var(--bg-sunken);
   border: 1px solid var(--border);

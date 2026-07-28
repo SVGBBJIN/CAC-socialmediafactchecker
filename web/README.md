@@ -93,7 +93,23 @@ web/
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
   server.js        Local dev server. Mounts the same handlers Vercel runs.
+  test.js          Unit tests. No network, no dependencies.
+  test-ui.mjs      Browser tests for app.js. Opt-in — see below.
 ```
+
+## Tests
+
+```bash
+npm test                              # unit tests, no network, no dependencies
+npm install --no-save playwright      # only needed for the browser tests
+npm run test:ui                       # drives the real UI in Chromium
+```
+
+`app.js` only runs in a browser, so retry behaviour, streaming and render batching can't
+be reached from `test.js` — `test-ui.mjs` drives a real page against a stubbed chat
+endpoint instead. Playwright is deliberately *not* a dependency of this package, so the
+default `npm test` path stays dependency-free; `test:ui` exits with instructions if it
+isn't installed.
 
 `lib/gemini.js` mirrors the model chain in `Sources/SeerCore/Gemini/GeminiModel.swift` —
 Flash 3.6, then 3.5, 3-preview, 2.5, 2.0 — and falls through on availability errors
@@ -115,6 +131,12 @@ field. See the comments in the Swift file for the full reasoning.
 - **An invalid key is terminal.** Gemini reports it as HTTP 400 / `API_KEY_INVALID`, not
   401 — so it is matched on the message, not the status, and never falls through to the
   next model with the same dead credential.
+- **Replies are capped in tokens, not just requests in messages.** Every other cap in
+  `guard.js` bounds input; `MAX_OUTPUT_TOKENS` (default 4096) bounds the one thing that
+  wasn't bounded at all — a single reply could otherwise run until the model stopped on
+  its own, and output tokens are the expensive side of the meter. Sent as Gemini's
+  `maxOutputTokens`, which arrives as `finishReason: "MAX_TOKENS"` if hit — the same
+  finish reason `parseSSE` already treats as a clean stream end, not an error.
 
 ## Notes
 
