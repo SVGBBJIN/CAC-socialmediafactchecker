@@ -60,6 +60,8 @@ public final class ScreenRecorderCaptureSource: NSObject, MediaCaptureSource {
         guard let container = await hostContainer() else {
             throw ExtractionError.captureUnavailable(reason: "no on-screen container to render the embed into")
         }
+        // Loads and hydrates the embed but does not play it: everything that sounds
+        // before `startCapture` returns is audio the file will never contain.
         try await renderer.present(embed, in: container)
 
         let writer = try AudioSampleWriter(silenceThreshold: silenceThreshold)
@@ -82,10 +84,13 @@ public final class ScreenRecorderCaptureSource: NSObject, MediaCaptureSource {
             }
         }
 
-        // Confirm the embed is genuinely playing rather than sitting on a poster frame.
-        let playing = await renderer.isPlayingAudibly()
+        // Only now start the video — the tap is live, so the opening words land in the
+        // recording. `startCapture` can also sit on a permission prompt for several
+        // seconds, and a 15s clip started beforehand could be over before it returns.
+        await renderer.startPlayback()
 
-        try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+        // Spans the capture window, latching if playback is seen at any point in it.
+        let playing = await renderer.observePlayback(for: duration)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             recorder.stopCapture { error in
@@ -107,7 +112,9 @@ public final class ScreenRecorderCaptureSource: NSObject, MediaCaptureSource {
             duration: result.duration,
             frames: [],
             // Both signals must agree. `didCaptureAudibleAudio` is the authoritative
-            // one; `playing` catches the case where the embed never hydrated at all.
+            // one; `playing` catches the case where the embed never hydrated at all —
+            // and, because it latches across the window rather than sampling once, a
+            // slow start or a clip that ends early no longer reads as "never played".
             containsAudio: result.didCaptureAudibleAudio && playing
         )
     }
@@ -150,6 +157,11 @@ final class AudioSampleWriter: @unchecked Sendable {
     private var sampleCount: Int = 0
     private var firstTimestamp: CMTime?
     private var lastTimestamp: CMTime?
+    private var lastDuration: CMTime = .zero
+    /// Set when the writer could not be configured at all. Reported rather than
+    /// swallowed: without it, a setup failure is indistinguishable from "the video was
+    /// silent", which is the one diagnosis this whole path is trying to pin down.
+    private var setupFailure: String?
 
     private let silenceThreshold: Float
 
@@ -169,9 +181,11 @@ final class AudioSampleWriter: @unchecked Sendable {
 
     func append(_ buffer: CMSampleBuffer) {
         queue.sync {
-            guard CMSampleBufferDataIsReady(buffer) else { return }
+            guard setupFailure == nil, CMSampleBufferDataIsReady(buffer) else { return }
 
             if !started {
+                // A buffer without a format description is skipped rather than fatal —
+                // the next one usually carries it.
                 guard let formatDescription = CMSampleBufferGetFormatDescription(buffer),
                       let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
                 else { return }
@@ -184,24 +198,33 @@ final class AudioSampleWriter: @unchecked Sendable {
                 ]
                 let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
                 input.expectsMediaDataInRealTime = true
-                guard writer.canAdd(input) else { return }
+                guard writer.canAdd(input) else {
+                    setupFailure = "AVAssetWriter rejected the audio input for the captured format"
+                    return
+                }
                 writer.add(input)
                 self.input = input
-                writer.startWriting()
+                guard writer.startWriting() else {
+                    setupFailure = writer.error?.localizedDescription ?? "AVAssetWriter would not start"
+                    return
+                }
                 writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(buffer))
                 started = true
             }
 
+            guard let input, input.isReadyForMoreMediaData else { return }
+            input.append(buffer)
+            sampleCount += 1
+
+            // Measured only for buffers that actually reached the file. Counting a
+            // dropped buffer here would report audio the m4a does not contain — the
+            // same misdiagnosis as reporting silence, in the opposite direction.
             measurePeak(in: buffer)
 
             let timestamp = CMSampleBufferGetPresentationTimeStamp(buffer)
             if firstTimestamp == nil { firstTimestamp = timestamp }
             lastTimestamp = timestamp
-
-            if let input, input.isReadyForMoreMediaData {
-                input.append(buffer)
-                sampleCount += 1
-            }
+            lastDuration = CMSampleBufferGetDuration(buffer)
         }
     }
 
@@ -244,6 +267,11 @@ final class AudioSampleWriter: @unchecked Sendable {
 
     func finish() throws -> Output {
         try queue.sync {
+            if let setupFailure {
+                throw ExtractionError.upstreamFailure(
+                    service: "AVAssetWriter", status: nil, message: setupFailure
+                )
+            }
             guard started, let input else {
                 // No audio buffers arrived at all — the clearest form of the failure.
                 return Output(data: Data(), duration: 0, didCaptureAudibleAudio: false, peakAmplitude: 0)
@@ -265,9 +293,12 @@ final class AudioSampleWriter: @unchecked Sendable {
             let data = try Data(contentsOf: outputURL)
             try? FileManager.default.removeItem(at: outputURL)
 
+            // Timestamps mark where each buffer *starts*, so the last one's own length
+            // has to be added back or every capture reads short by one buffer.
             let duration: TimeInterval
             if let first = firstTimestamp, let last = lastTimestamp {
-                duration = CMTimeGetSeconds(CMTimeSubtract(last, first))
+                let end = lastDuration.isNumeric ? CMTimeAdd(last, lastDuration) : last
+                duration = max(0, CMTimeGetSeconds(CMTimeSubtract(end, first)))
             } else {
                 duration = 0
             }

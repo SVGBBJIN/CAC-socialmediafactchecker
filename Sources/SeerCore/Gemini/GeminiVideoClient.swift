@@ -147,8 +147,10 @@ public struct GeminiVideoClient: Sendable {
         }
 
         // MAX_TOKENS still leaves usable, if truncated, output — keep it rather than
-        // discarding a mostly-complete transcript.
-        let analysis = try GeminiVideoAnalysis.decode(from: text)
+        // discarding a mostly-complete transcript. Output stopped mid-write is never
+        // valid JSON, so this is the case that needs the salvage path, not strict decode.
+        let truncated = response.finishReason == "MAX_TOKENS"
+        let analysis = try GeminiVideoAnalysis.decode(from: text, mayBeTruncated: truncated)
         return GeminiVideoAnalysisPublic(
             transcript: analysis.transcript ?? "",
             onScreenText: analysis.onScreenText?.isEmpty == true ? nil : analysis.onScreenText,
@@ -159,7 +161,7 @@ public struct GeminiVideoClient: Sendable {
                     text: text, timestamp: claim.timestampSeconds, sourceQuote: claim.quote
                 )
             },
-            truncated: response.finishReason == "MAX_TOKENS"
+            truncated: truncated
         )
     }
 

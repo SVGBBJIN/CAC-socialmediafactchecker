@@ -198,11 +198,16 @@ final class SecretStoreTests: XCTestCase {
 
         while let url = enumerator?.nextObject() as? URL {
             let path = url.path
-            if path.contains("/.build/") || path.contains("/.git/") {
+            if path.contains("/.build/") || path.contains("/.git/")
+                || path.contains("/node_modules/") || path.contains("/.vercel/") {
                 enumerator?.skipDescendants()
                 continue
             }
-            guard ["swift", "plist", "json", "md", "xcconfig", "yml", "yaml", "sh"]
+            // `js`/`html` cover web/, where a key would otherwise be one careless paste
+            // away from the client bundle. Note what is deliberately absent: `.env` and
+            // `.env.local` are gitignored and are *meant* to hold the plaintext key —
+            // scanning them would fail the build for the one file doing its job.
+            guard ["swift", "plist", "json", "md", "xcconfig", "yml", "yaml", "sh", "js", "mjs", "html"]
                 .contains(url.pathExtension) else { continue }
             guard let contents = try? String(contentsOf: url, encoding: .utf8) else { continue }
 

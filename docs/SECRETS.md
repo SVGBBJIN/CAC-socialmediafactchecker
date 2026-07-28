@@ -29,6 +29,10 @@ What the scheme here actually buys, which is worth having:
   leaks are actually found at scale.
 - Rotating a key is a resource swap, not a code change and release.
 
+This applies to the iOS app. It does **not** apply to `web/`, which has a server: there
+the key sits in `web/.env.local`, is read only by `web/api/chat.js`, and never enters the
+browser. Same key, categorically different exposure — see [web/README.md](../web/README.md).
+
 **The real fix is to not ship provider keys at all.** Put a thin backend in front of
 Gemini and Groq that holds the provider keys and authenticates the app. The device then
 carries a revocable per-install token, and a compromise costs one user's access rather
@@ -114,4 +118,9 @@ let pipeline = SeerPipelineBuilder.makePipeline(.init(secrets: secrets))
 
 `SecretStoreTests.testNoCredentialsAreCommittedToSource` walks the committed tree and
 fails the build if anything shaped like a Google (`AIza…`), Groq (`gsk_…`) or OpenAI
-(`sk-…`) key appears in a source, config or docs file. It runs with the normal test suite.
+(`sk-…`) key appears in a source, config or docs file — including `web/`'s JavaScript and HTML, so
+a key pasted into the front end fails the build rather than shipping. It runs with the
+normal test suite.
+
+`.env` and `.env.local` are deliberately *not* scanned: they are gitignored and are the
+one place the plaintext key is supposed to live.
