@@ -84,6 +84,15 @@ public struct RetryingHTTPClient: Sendable {
     /// thrown as ``ExtractionError/upstreamFailure``, so callers can inspect `status`
     /// — the Gemini client uses a 404 to fall through to the next model.
     public func send(_ request: URLRequest) async throws -> Data {
+        try await sendReturningResponse(request).0
+    }
+
+    /// As ``send(_:)``, but hands back the response too.
+    ///
+    /// Needed by the callers that read something other than the body: Gemini's resumable
+    /// upload returns its session URL in a header, and short-link resolution reads the
+    /// post-redirect `URLResponse.url`.
+    public func sendReturningResponse(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let deadline = Date().addingTimeInterval(policy.overallTimeout)
         var lastError: Error?
 
@@ -97,7 +106,7 @@ public struct RetryingHTTPClient: Sendable {
             do {
                 let (data, response) = try await transport.send(request)
                 if (200..<300).contains(response.statusCode) {
-                    return data
+                    return (data, response)
                 }
 
                 let message = Self.errorMessage(from: data, status: response.statusCode)

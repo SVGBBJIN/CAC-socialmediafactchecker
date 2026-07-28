@@ -239,15 +239,27 @@ final class WhisperRequestTests: XCTestCase {
 }
 
 final class PipelineBuilderTests: XCTestCase {
-    /// Without a working recorder, TikTok and Instagram must not be registered. A user
-    /// sharing a TikTok gets a clear "not supported yet" rather than silence.
-    func testCapturePlatformsAreNotRegisteredWithoutARecorder() async {
+    /// TikTok needs no recorder — it fetches the media directly — but Instagram still
+    /// does, and must stay unregistered until there is one. A user sharing an Instagram
+    /// link gets a clear "not supported yet" rather than silence.
+    func testOnlyInstagramWaitsOnARecorder() async {
         let pipeline = SeerPipelineBuilder.makePipeline(
             .init(secrets: InMemorySecretStore([.geminiAPIKey: "k"]))
         )
         XCTAssertNotNil(pipeline.extractor(for: URL(string: "https://youtu.be/jNQXAC9IVRw")!))
-        XCTAssertNil(pipeline.extractor(for: URL(string: "https://www.tiktok.com/@u/video/1")!))
+        XCTAssertNotNil(pipeline.extractor(for: URL(string: "https://www.tiktok.com/@u/video/1")!))
         XCTAssertNil(pipeline.extractor(for: URL(string: "https://www.instagram.com/reel/ABC/")!))
+    }
+
+    /// The registered TikTok extractor is the direct-fetch one, not a capture extractor
+    /// that happens to answer for the same platform.
+    func testTikTokRegistersOnTheDirectFetchPath() {
+        let pipeline = SeerPipelineBuilder.makePipeline(
+            .init(secrets: InMemorySecretStore([.geminiAPIKey: "k"]))
+        )
+        let extractor = pipeline.extractor(for: URL(string: "https://www.tiktok.com/@u/video/1")!)
+        XCTAssertEqual(extractor?.strategy, .directMediaFetch)
+        XCTAssertTrue(extractor is DirectMediaExtractor)
     }
 
     func testCapturePlatformsRegisterOnceASourceExists() {
@@ -279,12 +291,11 @@ final class PipelineBuilderTests: XCTestCase {
             .init(secrets: InMemorySecretStore([.geminiAPIKey: "k"]))
         )
         XCTAssertEqual(status[.youTube], .supported)
-        guard case .unavailable(let tikTokReason)? = status[.tikTok] else {
-            return XCTFail("expected TikTok unavailable")
-        }
-        XCTAssertTrue(tikTokReason.contains("capture"))
-        guard case .unavailable? = status[.instagram] else {
+        // TikTok needs only the Gemini key now, which this configuration has.
+        XCTAssertEqual(status[.tikTok], .supported)
+        guard case .unavailable(let instagramReason)? = status[.instagram] else {
             return XCTFail("expected Instagram unavailable")
         }
+        XCTAssertTrue(instagramReason.contains("capture"))
     }
 }

@@ -25,7 +25,9 @@ final class PlatformDetectionTests: XCTestCase {
     /// deliberate architectural decision rather than a drive-by edit.
     func testIngestionStrategyFork() {
         XCTAssertEqual(Platform.youTube.ingestionStrategy, .nativeVideoIngestion)
-        XCTAssertEqual(Platform.tikTok.ingestionStrategy, .screenCapture)
+        // TikTok's embed page yields a direct CDN URL, so it fetches rather than records.
+        XCTAssertEqual(Platform.tikTok.ingestionStrategy, .directMediaFetch)
+        // Instagram is login-walled, so it is the only platform left on capture.
         XCTAssertEqual(Platform.instagram.ingestionStrategy, .screenCapture)
     }
 }
@@ -75,8 +77,10 @@ final class PipelineRoutingTests: XCTestCase {
         let platform: Platform
         var transcript: String = "stub"
         func canHandle(_ url: URL) -> Bool { Platform.detect(from: url) == platform }
-        func extract(from url: URL) async throws -> ClaimContext {
-            ClaimContext(
+        func extract(from url: URL, progress: ProgressSink) async throws -> ClaimContext {
+            progress.send(.resolving)
+            progress.send(.analysing)
+            return ClaimContext(
                 transcript: transcript,
                 provenance: ProvenanceMetadata(
                     platform: platform, sourceURL: url, strategy: platform.ingestionStrategy
@@ -99,7 +103,7 @@ final class PipelineRoutingTests: XCTestCase {
             from: URL(string: "https://www.tiktok.com/@user/video/123")!
         )
         XCTAssertEqual(tikTok.transcript, "from tiktok")
-        XCTAssertEqual(tikTok.provenance.strategy, .screenCapture)
+        XCTAssertEqual(tikTok.provenance.strategy, .directMediaFetch)
     }
 
     /// An unregistered platform must fail clearly rather than falling through to

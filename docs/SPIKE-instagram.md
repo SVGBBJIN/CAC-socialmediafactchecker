@@ -91,7 +91,22 @@ Until step 4 passes, `SeerPipelineBuilder` leaves Instagram unregistered and
 
 ## Recommendation
 
-Instagram is the lowest-value of the three right now: it is blocked on someone else's
-review queue *and* on the same audio problem as TikTok, and it is second in line behind
-TikTok for both. Resolve the ReplayKit audio question first — if that fails, the capture
-path dies for both platforms and the Meta app review would have been wasted effort.
+Instagram is the lowest-value of the three: it is blocked on someone else's review queue
+*and* on the ReplayKit audio problem.
+
+**Updated 2026-07-28.** TikTok no longer shares that second blocker. Its embed iframe
+(`tiktok.com/embed/v2/<id>`) turned out to serve a state blob containing a direct CDN URL
+for the MP4, so TikTok skips capture entirely — see
+[EXTRACTION_PIPELINE.md](EXTRACTION_PIPELINE.md#2-tiktok--working-without-capture).
+
+That changes what to do here. The capture path is now carried *solely* for Instagram, so
+"fix ReplayKit" is no longer a fix that pays for itself across two platforms — it is
+Instagram-only work, for a platform that is also gated on App Review.
+
+So when a token arrives, add one question to step 4 below, and ask it first:
+
+> Does Instagram's embed iframe expose a media URL the way TikTok's does?
+
+If yes, Instagram takes the `directMediaFetch` arm, both blockers evaporate together, and
+the capture path can be deleted rather than debugged. That is a much better outcome than
+the one this spike originally recommended, and it costs one HTTP request to find out.
