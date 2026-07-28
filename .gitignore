@@ -12,4 +12,13 @@ xcuserdata/
 Secrets.xcconfig
 *.enc
 secrets.json
+
+# `.env` alone does not match `.env.local`, which is where the web chat's key lives.
+# Match every variant, then re-admit the committed template.
 .env
+.env.*
+!.env.example
+
+# Web chat
+node_modules/
+.vercel/

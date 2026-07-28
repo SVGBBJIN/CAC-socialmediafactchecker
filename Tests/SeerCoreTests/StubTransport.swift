@@ -13,8 +13,17 @@ actor StubTransport: HTTPTransport {
         var status: Int
         var body: Data
         var headers: [String: String] = [:]
+        /// Where the request ended up, when it isn't where it was sent. `URLSession`
+        /// follows redirects itself and reports the destination on the response, which
+        /// is how short links get expanded.
+        var finalURL: URL?
 
         static func ok(_ json: String) -> Response { Response(status: 200, body: Data(json.utf8)) }
+
+        /// A response standing in for a followed redirect.
+        static func redirected(to destination: String) -> Response {
+            Response(status: 200, body: Data(), finalURL: URL(string: destination))
+        }
         static func error(_ status: Int, message: String = "nope", headers: [String: String] = [:]) -> Response {
             Response(
                 status: status,
@@ -48,7 +57,10 @@ actor StubTransport: HTTPTransport {
         }
         let next = queue.removeFirst()
         let response = HTTPURLResponse(
-            url: request.url!, statusCode: next.status, httpVersion: "HTTP/1.1", headerFields: next.headers
+            url: next.finalURL ?? request.url!,
+            statusCode: next.status,
+            httpVersion: "HTTP/1.1",
+            headerFields: next.headers
         )!
         return (next.body, response)
     }

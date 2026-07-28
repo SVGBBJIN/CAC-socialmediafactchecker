@@ -36,6 +36,13 @@ its platform's, so the two can't drift apart.
 
 ## Status
 
+> **Note on the capture path's test coverage.** `SeerCoreTests` depends on `SeerCore`
+> only, and every file in `SeerCapture` is behind `#if os(iOS)`, so on Linux CI those
+> files compile to nothing and no test touches them. Everything in `SeerCapture` —
+> `ScreenRecorderCaptureSource`, `WebViewEmbedRenderer`, `AudioCaptureDiagnostic` — is
+> therefore unverified by the test suite and needs a device or an iOS-SDK type-check.
+> Treat changes there with more suspicion than the green build implies.
+
 | Platform | Path | Status |
 |---|---|---|
 | YouTube | native ingestion | **Working.** Verified against the live API. |
@@ -203,6 +210,40 @@ let report = try await AudioCaptureDiagnostic(hostContainer: { self.view })
 print(report.summary)
 ```
 
+It distinguishes the two failure modes that look identical from the outside: *the video
+never played* (a WKWebView autoplay problem, fixable) versus *the video played and
+ReplayKit heard nothing* (the audio-session issue, possibly fatal to this approach).
+
+If it reports BLOCKED, the capture path is not viable as designed and the alternatives are
+worth pricing before spending more on it: `AVAudioEngine` tapping the session directly, an
+`RPBroadcast` extension, or asking the user to screen-record themselves.
+
+### The web view leg
+
+Two things the naive version gets wrong, handled in `WebViewEmbedRenderer`:
+
+- **The web view must be on screen and unobscured** for the whole capture. ReplayKit
+  records the display; an off-screen or transparent view records as nothing. Hence the API
+  takes a container view rather than returning a detached one.
+- **Embeds autoplay muted.** A muted player is a silent recording — the same symptom as the
+  audio-session bug, from a completely different cause. The renderer explicitly unmutes and
+  sets volume before playing, and `isPlayingAudibly()` verifies a `<video>` is actually
+  playing, unmuted, past 0s before the recording is trusted.
+- **The recorder starts before playback, not after.** `present()` loads and hydrates the
+  embed but deliberately leaves it paused; the caller starts the recorder and only then
+  calls `startPlayback()`. Anything that sounds before the tap is live is audio the file
+  will never contain, and `startCapture` can sit on a permission prompt long enough for a
+  short clip to finish entirely.
+- **Playback is polled, not sampled.** `observePlayback(for:)` watches across the whole
+  window and latches on the first sighting. A single check cannot answer the question in
+  either direction: too early and `currentTime` is still 0 because `play()` has only just
+  been issued, too late and a short clip has already ended and gone `paused`. Both read as
+  "never played" — which discards a good capture *and* imitates the ReplayKit defect this
+  path exists to diagnose.
+
+The embed document is loaded against a real platform origin, not `about:blank`; platform
+embed scripts check the origin and refuse to hydrate otherwise.
+
 ## 3. Instagram — spiked, blocked
 
 Short version: **it does not behave like TikTok.** The legacy token-free oEmbed endpoint is
@@ -230,10 +271,24 @@ doesn't; cancellation never does.
 **Timeouts** — per-request and overall. Video calls get a 120s request / 300s overall
 budget; metadata calls get 20s.
 
+**Truncated output** — a long video can exhaust the model's output budget mid-sentence,
+and `MAX_TOKENS` output is by definition not valid JSON. Rather than fail the extraction
+and lose a nearly complete transcript, `GeminiVideoAnalysis.decode` falls back to
+recovering the transcript string directly from the partial JSON, and flags the result
+`truncated`. Only the transcript is recovered: a half-written `claims` entry reads as a
+different, shorter assertion than the one that was made, and the fact-check layer would
+report it against the speaker.
+
+**Invalid credentials** — Gemini answers a bad key with **HTTP 400 / `API_KEY_INVALID`**,
+not 401. That matters twice over: it must not be treated as a model-availability failure
+(the chain would re-send the same dead credential to every remaining model), and it is
+worth naming explicitly so the operator gets a message pointing at the key rather than a
+bare relay of the upstream text.
+
 **Credentials** — never in source. See [SECRETS.md](SECRETS.md). The Gemini key shared
 during handoff should be rotated.
 
-**Testing** — 116 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource`,
+**Testing** — no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource`,
 `MediaURLResolver`, `MediaDownloading` and `Transcriber` are all injectable. Live responses
 from Gemini and TikTok are checked in as fixtures, so the parsers are tested against what
 the APIs actually return rather than what the docs say they return — the live Gemini

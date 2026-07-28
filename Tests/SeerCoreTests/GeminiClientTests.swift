@@ -63,6 +63,70 @@ final class GeminiResponseParsingTests: XCTestCase {
         XCTAssertTrue(analysis.truncated)
     }
 
+    /// What a real MAX_TOKENS response looks like: the JSON stops mid-string, because the
+    /// model ran out of output budget partway through writing it.
+    ///
+    /// The test above hands `parse` *complete* JSON and only sets the finish reason, which
+    /// is why this case went unnoticed — a strict decode of genuinely truncated output
+    /// always fails, so a long video lost its entire transcript to a parse error.
+    func testSalvagesTranscriptFromGenuinelyTruncatedJSON() throws {
+        let cutOff = #"{"transcript": "The study found that sea levels rose by"#
+        let json = """
+        {"candidates":[{"content":{"parts":[{"text":\(Self.jsonQuoted(cutOff))}]},
+        "finishReason":"MAX_TOKENS"}]}
+        """
+
+        let analysis = try GeminiVideoClient.parse(Data(json.utf8))
+        XCTAssertEqual(analysis.transcript, "The study found that sea levels rose by")
+        XCTAssertTrue(analysis.truncated)
+        XCTAssertTrue(analysis.claims.isEmpty, "a half-written claim must never be reported")
+    }
+
+    /// Escapes have to survive the salvage, or the recovered transcript misquotes the
+    /// speaker — quoted speech is exactly what a fact-checker works from.
+    func testSalvagePreservesEscapedCharacters() throws {
+        let cutOff = #"{"transcript": "He said \"it doubled\",\nthen paused"#
+        let json = """
+        {"candidates":[{"content":{"parts":[{"text":\(Self.jsonQuoted(cutOff))}]},
+        "finishReason":"MAX_TOKENS"}]}
+        """
+
+        let analysis = try GeminiVideoClient.parse(Data(json.utf8))
+        XCTAssertEqual(analysis.transcript, "He said \"it doubled\",\nthen paused")
+    }
+
+    /// Salvage is only for truncation. Genuinely malformed output still has to fail —
+    /// silently inventing an empty result would read downstream as "makes no claims".
+    func testMalformedOutputStillFailsWhenNotTruncated() {
+        let json = """
+        {"candidates":[{"content":{"parts":[{"text":"this is not json at all"}]},
+        "finishReason":"STOP"}]}
+        """
+        XCTAssertThrowsError(try GeminiVideoClient.parse(Data(json.utf8))) { error in
+            guard case ExtractionError.malformedResponse = error else {
+                return XCTFail("expected malformedResponse, got \(error)")
+            }
+        }
+    }
+
+    /// Truncated *before* the transcript key: there is nothing to recover, so this must
+    /// fail rather than hand back an empty transcript.
+    func testTruncationWithNothingToSalvageStillFails() {
+        let json = """
+        {"candidates":[{"content":{"parts":[{"text":"{\\"tit"}]},
+        "finishReason":"MAX_TOKENS"}]}
+        """
+        XCTAssertThrowsError(try GeminiVideoClient.parse(Data(json.utf8))) { error in
+            guard case ExtractionError.malformedResponse = error else {
+                return XCTFail("expected malformedResponse, got \(error)")
+            }
+        }
+    }
+
+    private static func jsonQuoted(_ value: String) -> String {
+        String(data: try! JSONEncoder().encode(value), encoding: .utf8)!
+    }
+
     func testSurfacesSafetyBlockAsEmptyResult() {
         let json = #"{"promptFeedback":{"blockReason":"SAFETY"}}"#
         XCTAssertThrowsError(try GeminiVideoClient.parse(Data(json.utf8))) { error in
@@ -127,6 +191,28 @@ final class GeminiModelChainTests: XCTestCase {
         XCTAssertFalse(shouldFallThrough(on: ExtractionError.upstreamFailure(
             service: "Gemini", status: 400, message: "request payload is malformed"
         )))
+    }
+
+    /// Gemini reports an invalid key as 400, not 401 — captured from the live endpoint
+    /// on 2026-07-27. It reads like an ordinary bad request, and the 400 branch above
+    /// would otherwise have to be trusted not to match it; assert that directly, because
+    /// falling through means re-sending a credential that cannot work to every model
+    /// left in the chain.
+    func testDoesNotFallThroughOnAnInvalidKey() {
+        let liveMessage = "API key not valid. Please pass a valid API key."
+        XCTAssertTrue(isInvalidKeyFailure(status: 400, message: liveMessage))
+        XCTAssertFalse(shouldFallThrough(on: ExtractionError.upstreamFailure(
+            service: "Gemini", status: 400, message: liveMessage
+        )))
+    }
+
+    func testInvalidKeyDetectionDoesNotFireOnUnrelatedFailures() {
+        XCTAssertTrue(isInvalidKeyFailure(status: 401, message: "unauthorized"))
+        XCTAssertTrue(isInvalidKeyFailure(status: 400, message: "reason: API_KEY_INVALID"))
+        XCTAssertFalse(isInvalidKeyFailure(status: 400, message: "Invalid JSON payload received"))
+        XCTAssertFalse(isInvalidKeyFailure(status: 400, message: "models/x is not supported"))
+        XCTAssertFalse(isInvalidKeyFailure(status: 429, message: "quota exceeded"))
+        XCTAssertFalse(isInvalidKeyFailure(status: 500, message: "internal error"))
     }
 }
 
