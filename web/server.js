@@ -7,11 +7,12 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { extname, join, normalize, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import chatHandler from "./api/chat.js";
 import configHandler from "./api/config.js";
+import { resolveStaticPath, contentType } from "./lib/static.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -40,31 +41,20 @@ function loadEnvFile(path) {
 
 const loadedEnv = [".env.local", ".env"].filter((name) => loadEnvFile(join(ROOT, name)));
 
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".json": "application/json; charset=utf-8",
-};
-
 async function serveStatic(req, res) {
   const requested = new URL(req.url, "http://localhost").pathname;
-  const relative = normalize(requested === "/" ? "/index.html" : requested);
+  const path = resolveStaticPath(requested, PUBLIC_DIR);
 
-  // normalize() collapses `..`, but a leading `../` survives it — reject those rather
-  // than serving anything outside public/.
-  if (relative.includes("..")) {
-    res.writeHead(403).end("Forbidden");
+  if (path === null) {
+    res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Forbidden");
     return;
   }
 
-  const path = join(PUBLIC_DIR, relative);
   try {
     const body = await readFile(path);
     res.writeHead(200, {
-      "content-type": MIME[extname(path)] ?? "application/octet-stream",
+      "content-type": contentType(path),
       "cache-control": "no-store",
     });
     res.end(body);

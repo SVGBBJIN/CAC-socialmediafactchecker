@@ -14,10 +14,20 @@ const SYSTEM_PROMPT =
     "don't say you can't access it. Transcribe or quote the specific claims made before " +
     "evaluating them.";
 
+// How long the stream may go without writing before we send an SSE comment to keep it
+// open. Proxies — Vercel's included — close a connection that has been silent too long,
+// and the gap before Gemini's first token on a video it has to watch is easily a minute.
+const HEARTBEAT_MS = 15_000;
+
 async function readBody(req) {
   // Vercel parses JSON bodies for you; a bare Node server does not.
   if (req.body !== undefined && req.body !== null) {
-    return typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    if (typeof req.body !== "string") return req.body;
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      throw new GuardError("Request body is not valid JSON.", 400);
+    }
   }
 
   const chunks = [];
@@ -84,9 +94,22 @@ export default async function handler(req, res) {
   // If the user hits Stop or closes the tab, stop paying for tokens nobody will read.
   res.on("close", () => controller.abort());
 
+  let lastWrite = Date.now();
   const send = (frame) => {
-    if (!res.writableEnded) res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    if (res.writableEnded) return;
+    res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    lastWrite = Date.now();
   };
+
+  // A `:` line is an SSE comment: it keeps the connection warm and is ignored by the
+  // client's frame parser, so it can't be mistaken for content.
+  const heartbeat = setInterval(() => {
+    if (res.writableEnded) return;
+    if (Date.now() - lastWrite < HEARTBEAT_MS) return;
+    res.write(": keep-alive\n\n");
+    lastWrite = Date.now();
+  }, HEARTBEAT_MS);
+  heartbeat.unref?.();
 
   try {
     for await (const frame of streamChat({
@@ -94,6 +117,7 @@ export default async function handler(req, res) {
       messages,
       system: SYSTEM_PROMPT,
       models: modelChainFromEnv(),
+      maxOutputTokens: limits.maxOutputTokens,
       signal: controller.signal,
     })) {
       send(frame);
@@ -101,11 +125,16 @@ export default async function handler(req, res) {
     send({ type: "done" });
   } catch (error) {
     if (controller.signal.aborted) return;
-    const message =
-      error instanceof GeminiError ? error.message : "Something went wrong talking to Gemini.";
-    if (!(error instanceof GeminiError)) console.error("[chat]", error);
-    send({ type: "error", message });
+    const isGemini = error instanceof GeminiError;
+    if (!isGemini) console.error("[chat]", error);
+    send({
+      type: "error",
+      message: isGemini ? error.message : "Something went wrong talking to Gemini.",
+      // Lets the UI distinguish "this will fail again" from "worth another go".
+      retryable: isGemini ? Boolean(error.retryable) : false,
+    });
   } finally {
+    clearInterval(heartbeat);
     if (!res.writableEnded) res.end();
   }
 }

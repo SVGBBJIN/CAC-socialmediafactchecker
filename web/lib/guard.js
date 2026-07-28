@@ -23,6 +23,10 @@ export function config(env = process.env) {
     perDay: positiveInt(env.RATE_LIMIT_PER_DAY, 300),
     maxInputChars: positiveInt(env.MAX_INPUT_CHARS, 8000),
     maxTurns: positiveInt(env.MAX_TURNS, 20),
+    // Every other cap here bounds *input*. Nothing bounded output — a single reply
+    // could run until the model stopped on its own, and output tokens are the
+    // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`.
+    maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 4096),
   };
 }
 
@@ -67,9 +71,23 @@ const windows = new Map();
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * 60 * 1000;
+const MAX_TRACKED_CLIENTS = 5000;
 
 export function checkRateLimit(key, limits, now = Date.now()) {
   const hits = (windows.get(key) ?? []).filter((t) => now - t < DAY);
+  // Store the pruned list before any early exit. A client that keeps hitting the limit
+  // takes the throwing path every time, and if that path never wrote back, its expired
+  // timestamps would be re-filtered on every request and never actually dropped.
+  windows.set(key, hits);
+
+  // Bound the map so a long-running server doesn't accumulate dead keys. Swept here
+  // rather than after the limit checks below, because the case that grows the map
+  // fastest — many distinct clients, each being refused — never reaches them.
+  if (windows.size > MAX_TRACKED_CLIENTS) {
+    for (const [k, v] of windows) {
+      if (k !== key && v.every((t) => now - t >= DAY)) windows.delete(k);
+    }
+  }
 
   const inLastMinute = hits.filter((t) => now - t < MINUTE).length;
   if (inLastMinute >= limits.perMinute) {
@@ -86,15 +104,6 @@ export function checkRateLimit(key, limits, now = Date.now()) {
   }
 
   hits.push(now);
-  windows.set(key, hits);
-
-  // Bound the map so a long-running local server doesn't accumulate dead keys.
-  if (windows.size > 5000) {
-    for (const [k, v] of windows) {
-      if (v.every((t) => now - t >= DAY)) windows.delete(k);
-    }
-  }
-
   return { remainingToday: limits.perDay - hits.length };
 }
 

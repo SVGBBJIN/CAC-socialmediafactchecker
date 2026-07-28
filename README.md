@@ -59,7 +59,7 @@ key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 19 tests, no network
+npm test                               # 37 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to
@@ -79,7 +79,7 @@ means answering that one question, not rediscovering the fork.
 ## Tests
 
 ```bash
-swift test    # 67 tests, no network
+swift test    # 79 tests, no network
 ```
 
 Parsers are tested against **live** captured responses from Gemini and TikTok, not against

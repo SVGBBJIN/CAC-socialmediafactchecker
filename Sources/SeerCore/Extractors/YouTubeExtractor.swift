@@ -81,7 +81,11 @@ public struct YouTubeExtractor: ClaimExtractor {
 
         let pathSegments: [String] = Array(url.pathComponents.dropFirst())
 
-        if host.contains("youtu.be") {
+        // Matched as a domain, not a substring. `canHandle` gates on `Platform.detect`
+        // first, but this is `public static` and documented for standalone use, so it
+        // can't lean on that: `contains` would treat `youtu.be.example.com` as a short
+        // link and read a video ID off an unrelated host's path.
+        if host == "youtu.be" || host.hasSuffix(".youtu.be") {
             guard let candidate = pathSegments.first, isValidVideoID(candidate) else { return nil }
             return candidate
         }

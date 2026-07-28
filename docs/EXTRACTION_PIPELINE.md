@@ -174,10 +174,24 @@ doesn't; cancellation never does.
 **Timeouts** — per-request and overall. Video calls get a 120s request / 300s overall
 budget; metadata calls get 20s.
 
+**Truncated output** — a long video can exhaust the model's output budget mid-sentence,
+and `MAX_TOKENS` output is by definition not valid JSON. Rather than fail the extraction
+and lose a nearly complete transcript, `GeminiVideoAnalysis.decode` falls back to
+recovering the transcript string directly from the partial JSON, and flags the result
+`truncated`. Only the transcript is recovered: a half-written `claims` entry reads as a
+different, shorter assertion than the one that was made, and the fact-check layer would
+report it against the speaker.
+
+**Invalid credentials** — Gemini answers a bad key with **HTTP 400 / `API_KEY_INVALID`**,
+not 401. That matters twice over: it must not be treated as a model-availability failure
+(the chain would re-send the same dead credential to every remaining model), and it is
+worth naming explicitly so the operator gets a message pointing at the key rather than a
+bare relay of the upstream text.
+
 **Credentials** — never in source. See [SECRETS.md](SECRETS.md). The Gemini key shared
 during handoff should be rotated.
 
-**Testing** — 67 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource` and
+**Testing** — 79 tests, no network. `HTTPTransport`, `Sleeper`, `MediaCaptureSource` and
 `Transcriber` are all injectable. Live responses from Gemini and TikTok are checked in as
 fixtures, so the parsers are tested against what the APIs actually return rather than what
 the docs say they return — the live Gemini response included a `thoughtSignature` field
