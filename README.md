@@ -66,6 +66,7 @@ Sources/SeerCore/          Pure Foundation — builds and tests anywhere
   Secrets/                 Keychain, AES-GCM bundle, store chaining
 Sources/SeerCapture/       iOS-only: WKWebView + RPScreenRecorder + diagnostic
 Sources/SeerUI/            SwiftUI progress animation + its observable model
+Sources/SeerUIDemo/        Runnable harness for the above — no key, no network
 Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
 web/                       Chat UI — static front end, Gemini key held server-side
 ```
@@ -78,12 +79,19 @@ key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 40 tests, no network
+npm test                               # 66 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to
 put it behind. See [web/README.md](web/README.md) for how that works, the controls that
 keep strangers off your quota, and the Vercel deploy.
+
+It ingests video the same two ways the Swift pipeline does, for the same reasons. A
+**YouTube** link is handed to Gemini as a URL and Gemini watches it itself. A **TikTok**
+link can't be — Gemini won't fetch one — so `web/lib/tiktok.js` does what the model won't:
+resolves the embed page to a CDN URL, downloads the MP4 and puts the bytes in the request,
+inline or via the Files API depending on size. That is the same `directMediaFetch` shape as
+`TikTokMediaResolver.swift`, and the two parsers are held to the same captured payload.
 
 ## Progress
 
@@ -108,6 +116,19 @@ per-stage timings. Indeterminate deliberately: none of the underlying work repor
 percentage, and a bar filling at an invented rate is a lie — a worse one once it stalls at
 90%. `AnalysisModel.timingReport` prints the same breakdown as text, which is what makes a
 slow run diagnosable rather than just annoying.
+
+To actually watch it, on macOS:
+
+```bash
+swift run SeerUIDemo      # or open Package.swift in Xcode → SeerUIDemo scheme
+```
+
+`SeerUIDemo` drives the animation with `ScriptedExtractor`, which walks the real stage
+sequence on a timer and returns a canned `ClaimContext` — no Gemini key, no network, no
+share extension. Pick TikTok for the longest script, which is the only one that reaches
+`uploading` (the stage inserted mid-run rather than laid out up front) and the only one
+whose `analysing` beat runs long enough to trip the patience threshold and show the
+reassurance text. The same file carries the SwiftUI previews.
 
 **Ordering matters and the obvious bridge gets it wrong.** The handler is called
 synchronously off the main actor; forwarding each event with its own
@@ -145,12 +166,16 @@ what the docs claim. That caught a field the documented shape doesn't mention, a
 the only way to test the TikTok embed blob at all — that payload has no documentation to
 write a fixture from.
 
-`SeerCapture` and `SeerUI` require the iOS SDK and **have not been compiled** — see the
-note at the end of [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md). Both are
-wrapped in `#if canImport(…)`, so they build to nothing elsewhere and the package still
-tests on Linux; that also means a syntax error in them wouldn't surface there. Everything
-they depend on — the stage sequence, the labels, the ordering guarantee — is in `SeerCore`
-and is tested.
+`SeerCapture` and `SeerUI` need an Apple SDK — see the note at the end of
+[docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md). Both are wrapped in
+`#if canImport(…)`, so they build to nothing on Linux and the package still tests there;
+that also means a syntax error in them does not surface there. Everything they depend on —
+the stage sequence, the labels, the ordering guarantee — is in `SeerCore` and is tested,
+as is `ScriptedExtractor`, which is what the demo and the previews animate.
+
+`SeerUI` now has a consumer: `swift build` on macOS compiles it because `SeerUIDemo`
+imports it, and running that demo is how the animation gets looked at rather than merely
+described. `SeerCapture` still has none, and still needs a device.
 
 ## Docs
 
