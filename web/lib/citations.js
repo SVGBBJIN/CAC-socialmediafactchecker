@@ -298,9 +298,14 @@ function truncate(text, max) {
  *
  * Written as an instruction with the specific offending sentences in it, because "add
  * citations" produces a reshuffle and "this sentence has no source" produces a fix. It
- * offers the two legitimate ways out — cite it, or search again — plus the third that
- * matters most: if no source supports the sentence, delete the sentence. An answer that
- * says less is the correct outcome of a failed verification, not a worse one.
+ * offers two legitimate ways out, and the second matters most: if no source supports the
+ * sentence, delete the sentence. An answer that says less is the correct outcome of a
+ * failed verification, not a worse one.
+ *
+ * Searching is deliberately not among the options. This round has no tools — it is a
+ * rewrite of an answer the model can see, from sources quoted underneath it — and offering
+ * a way out that isn't there would produce a turn that asks for a search and never
+ * answers.
  */
 export function repairInstruction(violations, ledger) {
   const lines = [
@@ -320,12 +325,12 @@ export function repairInstruction(violations, ledger) {
       "marker for a source you actually retrieved.",
     ledger.size > 0
       ? `Valid markers this turn: [1]–[${ledger.size}]. Never write any other number, and never link to a URL that was not returned by a search.`
-      : "You have retrieved no sources at all. Call web_search before asserting anything.",
+      : "You have retrieved no sources at all, so there is nothing you may assert about the world. Say so.",
     "",
-    "If a sentence has no source behind it, you have three options and only three: call " +
-      "web_search again and cite what you find, attribute it explicitly to the video or " +
-      "post being checked (which is the subject, not evidence), or delete the sentence. " +
-      "Saying less is the right answer when the evidence is not there.",
+    "You cannot search again — searching is over for this turn. So if a sentence has no " +
+      "source behind it, you have two options and only two: attribute it explicitly to the " +
+      "video or post being checked (which is the subject, not evidence), or delete the " +
+      "sentence. Saying less is the right answer when the evidence is not there.",
     "",
     "Output only the rewritten answer. Do not mention this correction.",
   );

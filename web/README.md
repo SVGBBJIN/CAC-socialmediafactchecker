@@ -180,13 +180,43 @@ retrieved. Then the app checks, because a prompt is a request and this needs a g
    for a source that does not exist, and a URL no search returned.
 3. **A failed answer is withdrawn, not patched.** The model is told which sentences failed
    and made to write the whole thing again; the browser is told to clear what it has shown
-   so a rejected answer never sits above its replacement. The repair prompt offers three
-   ways out and no others — cite it, search again, or delete the sentence.
+   so a rejected answer never sits above its replacement. The rewrite round carries **no
+   tools** — searching is over by then, and a round that goes looking again resets the
+   answer under audit and can end the turn on a search instead of a verdict — so the
+   repair prompt offers two ways out and no others: cite it, or delete the sentence.
 4. **If the rewrite fails too, the answer is shown carrying a warning.** Suppressing it
-   entirely would hide a failure the reader is better off seeing labelled.
+   entirely would hide a failure the reader is better off seeing labelled. If the rewrite
+   comes back *empty*, the withdrawn answer goes back up under that same warning: the
+   screen was cleared for a replacement that never arrived, and sources over a blank space
+   look like a broken app rather than a failed check.
 5. **The bibliography is rendered by the app, from the ledger.** The model is told not to
    write one. A source list the model types is a source list it can invent; one built from
    retrieved results cannot contain a page that was never fetched.
+
+### Looking everything up at once
+
+A fact-check that searches one claim, reads the result, searches the next claim and reads
+that one spends the reader's time in series: every round is a fresh model call that
+re-sends the whole conversation — the video included — and waits for the model to read it
+again before it can say anything. Four claims that way is four waits for one answer.
+
+So the turn is shaped as two passes, and both the system prompt and the tool description
+say so: list every claim first and issue **all** the searches in one turn, then read the
+results and write the verdict. The runtime is what makes that pay off:
+
+- **The calls in a round are dispatched together** and awaited in call order, so four
+  searches cost one search's worth of waiting and the ledger still numbers them in the
+  order the model asked.
+- **A repeated query is served from the turn's cache.** Same query, no second round trip —
+  the results would be identical, so the only thing a repeat buys is the wait.
+- **The searches are announced before they return** (`{type: "searching"}`), so the browser
+  shows what is being looked up while it is being looked up, instead of a still bubble
+  followed by every chip at once.
+- **Three rounds of searching, then the tools are withdrawn.** A model that asks anyway is
+  told once, in the conversation, to answer from what it has; if it asks again the turn
+  ends. Withdrawing a declaration is a hint, and a hint is not a ceiling — without the hard
+  stop, a model that keeps calling is an unbounded number of model calls the reader is
+  sitting through.
 
 What is *not* audited, deliberately: connective tissue ("here's what I found"), quoted
 descriptions of the claim under review — the video is the subject, not evidence — code

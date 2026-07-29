@@ -544,6 +544,27 @@ body {
   color: var(--danger);
   border-color: var(--danger);
 }
+/* A search that has been sent and not yet answered. Pulsing rather than static because
+   the distinction it carries is "still happening", which a still chip cannot make. */
+.search-chip.pending {
+  border-style: dashed;
+  animation: chip-pulse 1.4s ease-in-out infinite;
+}
+@keyframes chip-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .search-chip.pending {
+    animation: none;
+    opacity: 0.7;
+  }
+}
 
 a.citation {
   color: var(--accent);

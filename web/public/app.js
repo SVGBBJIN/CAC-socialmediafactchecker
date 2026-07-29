@@ -179,8 +179,16 @@ function truncatedElement() {
   return wrap;
 }
 
-/** The searches that were run, as chips above the answer. */
-function searchListElement(searches) {
+/**
+ * The searches, as chips above the answer.
+ *
+ * `pending` are searches the server has dispatched but not yet heard back from. They are
+ * shown because they are the wait: a fact-check runs several searches at once and then
+ * spends seconds reading the results, and without them the reader watches an empty bubble
+ * and concludes the app has hung. A chip that says what is being looked up turns the same
+ * seconds into visible progress.
+ */
+function searchListElement(searches, pending = []) {
   const wrap = document.createElement("div");
   wrap.className = "searches";
   for (const item of searches) {
@@ -191,6 +199,13 @@ function searchListElement(searches) {
       : `Searched “${item.query}” · ${item.results.length} source${
           item.results.length === 1 ? "" : "s"
         }`;
+    if (item.claim) chip.title = `Checking: ${item.claim}`;
+    wrap.append(chip);
+  }
+  for (const item of pending) {
+    const chip = document.createElement("div");
+    chip.className = "search-chip pending";
+    chip.textContent = `Searching “${item.query}”…`;
     if (item.claim) chip.title = `Checking: ${item.claim}`;
     wrap.append(chip);
   }
@@ -497,6 +512,8 @@ async function streamAnswer(conversationId) {
   let failed = null;
   let retryable = false;
   const searches = [];
+  // Dispatched but not yet returned, in the order the server will report them.
+  let pendingSearches = [];
   let sources = [];
   let unverified = null;
   let truncated = false;
@@ -605,9 +622,16 @@ async function streamAnswer(conversationId) {
         } else if (frame.type === "delta") {
           answer += frame.text;
           scheduleRender();
+        } else if (frame.type === "searching") {
+          pendingSearches = frame.searches ?? [];
+          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches));
+          scrollToBottom();
         } else if (frame.type === "search") {
           searches.push(frame);
-          searchesEl = replace(searchesEl, searchListElement(searches));
+          // Results come back in the order the round dispatched them, so the oldest
+          // outstanding chip is the one this frame just resolved.
+          pendingSearches = pendingSearches.slice(1);
+          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches));
           scrollToBottom();
         } else if (frame.type === "reset") {
           // The server rejected what it had written and is starting again. Clearing the
@@ -634,6 +658,13 @@ async function streamAnswer(conversationId) {
   } catch (error) {
     if (error.name !== "AbortError") failed = error.message;
   } finally {
+    // Whatever was still in flight when the stream ended is not in flight any more —
+    // a "Searching…" chip left spinning under a finished answer says the app is still
+    // working when it has stopped, which is the one thing the chip exists to prevent.
+    if (pendingSearches.length > 0) {
+      pendingSearches = [];
+      searchesEl = replace(searchesEl, searchListElement(searches));
+    }
     // Flushed synchronously rather than left to a pending rAF: the bubble has to show
     // the final `answer` the instant streaming stops, not up to one frame late.
     body.innerHTML = renderMarkdown(answer, sources);

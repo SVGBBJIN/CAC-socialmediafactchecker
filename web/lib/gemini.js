@@ -680,13 +680,28 @@ async function* parseSSE(body, deadline, idleTimeoutMs) {
 /**
  * How many rounds of tool calls one message may take before the model is made to answer.
  *
- * Each round is a full model call plus however many searches it asked for, so this is a
- * latency and a spend ceiling at once. Four is enough for a multi-claim video — one search
- * per claim, plus a follow-up when the first query lands badly — and short of the loop a
- * model can otherwise fall into, re-searching the same claim because it doesn't like the
- * answer.
+ * A *round* is one model call plus every tool call it asked for in that call. The searches
+ * within a round run at once, so a round costs about one search, not one per claim — which
+ * is what makes three rounds enough for a multi-claim video: everything worth looking up in
+ * the first, a follow-up for the queries that landed badly in the second, the answer in the
+ * third. The ceiling is on rounds rather than searches because rounds are what costs time:
+ * each one re-sends the whole conversation, video included, and waits for a model that has
+ * to read it again before it can say anything.
  */
-export const MAX_TOOL_ROUNDS = 4;
+export const MAX_TOOL_ROUNDS = 3;
+
+/**
+ * What the model is told when its tool budget is spent and it asked to search anyway.
+ *
+ * Withdrawing the declaration is usually enough — see the note at the call site — but
+ * "usually" leaves a turn that ends with a tool call nobody will run and no answer in it,
+ * which reaches the reader as sources with nothing underneath them. So the request is made
+ * explicitly, in the conversation, where the model cannot miss it.
+ */
+const ANSWER_NOW =
+  "You have used your search budget for this turn and the web_search tool is no longer " +
+  "available. Do not ask for it again. Write your answer now, using only the sources " +
+  "already retrieved above, and say plainly which parts you could not check.";
 
 /**
  * The model's own turn, reassembled from the stream so it can be sent back verbatim.
@@ -737,6 +752,17 @@ class ModelTurn {
   parts() {
     return this._parts.filter((part) => part.functionCall || part.text || part.thoughtSignature);
   }
+
+  /**
+   * The same, minus the tool calls — what the turn *said*, without what it asked for.
+   *
+   * Used for the one round where the calls are deliberately not run: replaying a
+   * `functionCall` into a request that declares no tools invites a 400, and a call nobody
+   * answered would sit in the history as a question the model is still waiting on.
+   */
+  spokenParts() {
+    return this.parts().filter((part) => !part.functionCall);
+  }
 }
 
 /**
@@ -752,6 +778,10 @@ class ModelTurn {
  * `toolRunner(call, {signal})` returns `{response, frame}` — `response` goes back to the
  * model as the `functionResponse` payload, and `frame`, if present, is yielded to the
  * consumer so the UI can show what was searched.
+ *
+ * Every call a round asks for is dispatched at once and awaited in call order, and the
+ * round announces itself first with `{type: "tool_start", calls}` so the consumer can show
+ * what is in flight rather than only what has landed.
  */
 export async function* streamChat({
   apiKey,
@@ -792,6 +822,9 @@ export async function* streamChat({
     const contents = toGeminiContents(messages, { tikTok });
     const useTools = Boolean(tools?.length && toolRunner);
     let announced = null;
+    // Whether the model has already been told, in so many words, that its tools are gone.
+    // Once is a nudge; twice would be a loop, and a loop here is unbounded model calls.
+    let nudged = false;
 
     for (let round = 0; ; round += 1) {
       const requestBody = {
@@ -810,7 +843,8 @@ export async function* streamChat({
       // Past the budget the tools are withdrawn rather than merely refused. A model handed
       // a tool it is told not to use will often try anyway; a model with no tool declared
       // answers with what it has, which is the outcome the budget exists to force.
-      if (useTools && round < maxToolRounds) requestBody.tools = tools;
+      const toolsThisRound = useTools && round < maxToolRounds;
+      if (toolsThisRound) requestBody.tools = tools;
 
       const calls = [];
       const turn = new ModelTurn();
@@ -854,11 +888,43 @@ export async function* streamChat({
       if (calls.length === 0 || !useTools) return;
       if (deadline.callerAborted) return;
 
+      // The budget is spent, the declaration was withdrawn, and the model asked anyway.
+      // Running the call would restart a loop that has no ceiling of its own — every round
+      // past this one is a further model call the user is waiting through, and the turn
+      // ends with searches and no answer. So the calls are dropped, the request is put in
+      // words once, and if that round asks again the turn ends with whatever it has.
+      if (!toolsThisRound) {
+        if (nudged) return;
+        nudged = true;
+        const spoken = turn.spokenParts();
+        if (spoken.length > 0) contents.push({ role: "model", parts: spoken });
+        contents.push({ role: "user", parts: [{ text: ANSWER_NOW }] });
+        continue;
+      }
+
       contents.push({ role: "model", parts: turn.parts() });
 
+      // The searches a round asked for are announced before any of them has finished, so
+      // the UI can say what is being looked up while it is being looked up rather than
+      // after. Without this the reader watches a blank screen for the length of the
+      // slowest search and then sees every chip appear at once.
+      yield { type: "tool_start", calls: calls.map(({ name, args }) => ({ name, args })) };
+
+      // Dispatched together, not one after another. The model is told it may ask for every
+      // search it needs in a single round precisely so they can overlap here: four claims
+      // now cost one search's worth of waiting rather than four. Results are still consumed
+      // in call order, so the numbering in the ledger doesn't depend on which search won.
+      const running = calls.map((call) => {
+        const pending = Promise.resolve(toolRunner(call, { signal }));
+        // A sibling failing first must not turn the rest of the round into unhandled
+        // rejections; the real handling is the `await` below, which still throws.
+        pending.catch(() => {});
+        return pending;
+      });
+
       const responseParts = [];
-      for (const call of calls) {
-        const { response, frame } = await toolRunner(call, { signal });
+      for (const [index, call] of calls.entries()) {
+        const { response, frame } = await running[index];
         if (frame) yield frame;
         responseParts.push({ functionResponse: { name: call.name, response } });
       }
@@ -1012,6 +1078,12 @@ async function* streamRound({
       }
       throw error;
     }
+    // The stream is over, so the stall clock has nothing left to measure — and what comes
+    // next is the tool round, which is *meant* to take seconds with no bytes arriving.
+    // Left armed, the last chunk's deadline goes on running underneath the searches and
+    // aborts the shared controller mid-turn: the sources arrive, the answer never does,
+    // and nothing anywhere reports an error. Re-armed by the next round's own fetch.
+    deadline.clear();
     return;
   }
 
