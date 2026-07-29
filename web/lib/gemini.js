@@ -13,21 +13,39 @@ import {
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
 import { uploadFile, deleteFile } from "./gemini-files.js";
+import {
+  modelHealth,
+  planChain,
+  describeDegradation,
+  REASONS,
+  MAX_COOLDOWN_MS,
+} from "./degradation.js";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /**
- * How long to wait for response headers from one model before giving up on it, and how
- * long the stream may sit silent afterwards.
+ * How long the stream may sit silent before we give up on it.
  *
- * Both matter because there is no other ceiling: `fetch` without a signal waits
- * indefinitely, so a connection that opens and then stalls holds the request — and, on
- * Vercel, the function instance behind it — until the platform kills it. The two limits
- * are separate because they cover different things: headers come back in well under a
- * second, but the first token on a video Gemini has to watch legitimately takes a while.
+ * Reset by every chunk that arrives, so a long answer is fine and a dead connection is
+ * not. Generous because the first token on a video Gemini has to watch legitimately takes
+ * a while, and cutting that off looks identical to the model failing.
  */
-export const REQUEST_TIMEOUT_MS = 30_000;
 export const STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * How long to wait for response headers, or 0 for no limit — the default.
+ *
+ * There used to be a 30-second rule here. It is off by default now, which means the wait
+ * for headers is bounded by the caller and nothing else: `fetch` without a signal waits
+ * indefinitely, so a connection that opens and never answers holds the request, and on
+ * Vercel the function instance behind it, until the platform kills it. The browser
+ * disconnecting still ends it — `api/chat.js` aborts on `res.on("close")` — so the case
+ * this leaves unbounded is specifically a stalled upstream with a client still waiting.
+ *
+ * The mechanism is kept rather than deleted so a caller that wants a ceiling can pass
+ * `requestTimeoutMs` and get the same 504 as before.
+ */
+export const REQUEST_TIMEOUT_MS = 0;
 
 /**
  * Default ceiling on a single reply, in tokens. Applied even when the caller doesn't
@@ -70,11 +88,25 @@ export class GeminiError extends Error {
  * - 404: no such model for this API version. Fall through.
  * - 403: key isn't entitled to this model. Fall through.
  * - 400 mentioning an unknown/unsupported model: fall through.
- * - Everything else (401 bad key, 429 quota, 5xx) is terminal here — falling through
- *   would spend the same broken credential four more times.
+ * - 429, or anything else that means "out of quota": fall through. Quotas in Gemini are
+ *   **per model**, so `gemini-3.6-flash` being rate-limited says nothing at all about
+ *   whether `gemini-3.5-flash` will answer — and this is by far the most common way the
+ *   preferred model becomes unusable in normal operation. Treating it as terminal, as
+ *   this function used to, meant the chain protected against the rare failure (a retired
+ *   model ID) and not the frequent one: the whole request failed with a quota message
+ *   while four models that would have answered went untried.
+ * - A request too large for this model's context window: fall through, then give up on
+ *   the chain with a message that says so. See `isContextLimitFailure`.
+ * - Everything else (401/`API_KEY_INVALID`, 5xx) is terminal here — falling through would
+ *   spend the same broken credential four more times, or hammer an outage.
  */
 export function shouldFallThrough(status, message = "") {
+  // Checked before anything else: a bad key arrives as a 400 or 403 (see
+  // `isInvalidKeyFailure`), both of which the rules below would otherwise wave through.
+  if (isInvalidKeyFailure(status, message)) return false;
   if (status === 404 || status === 403) return true;
+  if (isQuotaFailure(status, message)) return true;
+  if (isContextLimitFailure(status, message)) return true;
   if (status !== 400) return false;
   const lowered = message.toLowerCase();
   return (
@@ -83,6 +115,62 @@ export function shouldFallThrough(status, message = "") {
     lowered.includes("unsupported") ||
     lowered.includes("invalid model")
   );
+}
+
+/**
+ * Whether a failure means "this model has no quota left right now".
+ *
+ * 429 is the documented status, but it is not the only way this arrives: a project whose
+ * generative-language quota is exhausted, or one whose billing has lapsed, can answer 403
+ * with `RESOURCE_EXHAUSTED` in the body. The distinction that matters is not the status —
+ * it is whether waiting would fix it, because that is what decides both whether to try
+ * another model now and whether to keep avoiding this one for the next few requests.
+ */
+export function isQuotaFailure(status, message = "") {
+  if (status === 429) return true;
+  if (status !== 400 && status !== 403) return false;
+  return /quota|rate[\s_-]?limit|resource[\s_-]?exhausted/i.test(message);
+}
+
+/**
+ * Whether a failure means "this request is too big for this model".
+ *
+ * Worth separating from an ordinary 400 for two reasons. The models in the chain do not
+ * all have the same context window, so the next one down genuinely might accept what this
+ * one refused — that is a real fall-through, not a hopeful one. And when none of them
+ * accept it, the user needs to be told something they can act on ("this conversation got
+ * too long") rather than handed Gemini's token arithmetic, which reads like a bug.
+ */
+export function isContextLimitFailure(status, message = "") {
+  if (status !== 400 && status !== 413) return false;
+  return /token count|too many tokens|context length|input is too long|exceeds? the maximum|request (?:payload|entity) (?:size|too large)/i.test(
+    message,
+  );
+}
+
+/**
+ * How long the server wants us to wait, in milliseconds, or null if it didn't say.
+ *
+ * Two places carry it and neither is guaranteed: the standard `Retry-After` header, and
+ * the `RetryInfo` detail Gemini puts in a 429 body as `"retryDelay": "27s"`. Both are read
+ * because which one shows up varies with where the limit was enforced — an edge rate limit
+ * sets the header, a project quota sets the body.
+ */
+export function retryAfterMs(response, body = "") {
+  const header = response?.headers?.get?.("retry-after");
+  if (header) {
+    const seconds = Number(String(header).trim());
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, MAX_COOLDOWN_MS);
+    const date = Date.parse(String(header).trim());
+    if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), MAX_COOLDOWN_MS);
+  }
+
+  // Matched against the raw body rather than a parsed one: `retryDelay` sits inside
+  // `error.details[]`, whose shape is a union we'd have to walk to reach one string.
+  const match = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(String(body ?? ""));
+  if (match) return Math.min(Number(match[1]) * 1000, MAX_COOLDOWN_MS);
+
+  return null;
 }
 
 /** Longest upstream error text we'll relay. Some of it reaches the browser verbatim. */
@@ -135,8 +223,17 @@ function describeFailure(status, message, model) {
       { status: 502, model },
     );
   }
-  if (status === 429) {
-    return new GeminiError("Gemini quota or rate limit reached. Try again shortly.", {
+  if (isContextLimitFailure(status, message)) {
+    return new GeminiError(
+      "This conversation is too long for the models available. Start a new chat to carry on.",
+      // Not retryable: the request that was refused is the one that would be sent again.
+      { status: 413, model },
+    );
+  }
+  // Reached only once *every* model in the chain has refused — a single model out of
+  // quota falls through to the next one, so the wording is about the chain, not the model.
+  if (isQuotaFailure(status, message)) {
+    return new GeminiError("Every available Gemini model is rate-limited. Try again shortly.", {
       status: 429,
       model,
       retryable: true,
@@ -539,7 +636,17 @@ function* framesFromLine(line) {
   }
 
   const finish = candidate?.finishReason;
-  if (finish && finish !== "STOP" && finish !== "MAX_TOKENS") {
+  // Hitting the output cap is not an error — the tokens that arrived are real and worth
+  // keeping — but it is not a finished answer either, and it used to pass through here
+  // indistinguishable from one. That silence is the expensive kind: a fact-check cut off
+  // mid-sentence reads as a completed verdict, and the sentence it was cut off in is
+  // frequently the one carrying the citation. Announced so the turn can be labelled
+  // instead of quietly shipped as whole.
+  if (finish === "MAX_TOKENS") {
+    yield { type: "truncated", reason: "max_output_tokens" };
+    return;
+  }
+  if (finish && finish !== "STOP") {
     throw new GeminiError(`Gemini stopped early (${finish}).`, { status: 502 });
   }
 }
@@ -662,6 +769,8 @@ export async function* streamChat({
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
+  health = modelHealth,
+  budgetPressure = 0,
 }) {
   const deadline = new StreamDeadline(signal);
   let tikTok = null;
@@ -714,6 +823,8 @@ export async function* streamChat({
         deadline,
         requestTimeoutMs,
         idleTimeoutMs,
+        health,
+        budgetPressure,
       })) {
         if (frame.type === "function_call") {
           calls.push(frame.call);
@@ -723,9 +834,12 @@ export async function* streamChat({
         if (frame.type === "model") {
           // The chain is walked afresh each round, but the consumer only cares when the
           // answer changes hands — re-announcing the same model every round would make
-          // the UI badge flicker for no reason.
-          if (frame.model === announced) continue;
-          announced = frame.model;
+          // the UI badge flicker for no reason. Keyed on the reason as well as the model,
+          // so a round that lands on the same model for a *different* reason — quota now
+          // rather than budget a moment ago — still updates what the badge says.
+          const key = `${frame.model} ${frame.reason ?? ""}`;
+          if (key === announced) continue;
+          announced = key;
         }
         if (frame.type === "delta") {
           turn.addText(frame.text, frame.signature, frame.thought);
@@ -768,6 +882,10 @@ export async function* streamChat({
  * Split out of `streamChat` when tool calling arrived, because a round is now something
  * that happens several times per message and the fall-through logic has to be identical
  * on each. The `deadline` is shared and owned by the caller — it spans the whole message.
+ *
+ * The chain is re-planned per round rather than once per message, on purpose: a round can
+ * exhaust a model's quota, and the next round of the same answer should not then walk into
+ * the 429 the previous one just learned about.
  */
 async function* streamRound({
   requestBody,
@@ -777,14 +895,25 @@ async function* streamRound({
   deadline,
   requestTimeoutMs,
   idleTimeoutMs,
+  health,
+  budgetPressure,
 }) {
   let lastError = null;
 
-  for (const model of models) {
+  const plan = planChain({ models, health, budgetPressure });
+  // Why we're not on the preferred model. Seeded from the plan — which knows about quota
+  // learned on earlier requests and about budget pressure — and overwritten by anything we
+  // learn the hard way while walking the chain below.
+  let reason = plan.reason;
+  let detail = plan.detail;
+  let remainingMs = plan.skipped.find((s) => s.model === plan.preferred)?.remainingMs;
+
+  for (const model of plan.models) {
     if (deadline.callerAborted) return;
     const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
 
     let response;
+    // No-ops unless a caller asked for a header deadline; there is no default one.
     deadline.arm(requestTimeoutMs);
     try {
       response = await fetchImpl(url, {
@@ -819,6 +948,23 @@ async function* streamRound({
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const message = errorMessage(text, response.status);
+
+      if (isQuotaFailure(response.status, message)) {
+        // Remembered, so the *next* request skips this model instead of re-buying this
+        // same 429. The cooldown is the server's own number where it gave one.
+        const cooldownMs = retryAfterMs(response, text);
+        const entry = health.markExhausted(model, { reason: REASONS.quota, detail: message, cooldownMs });
+        reason = REASONS.quota;
+        detail = message;
+        remainingMs = entry.until - Date.now();
+      } else if (isContextLimitFailure(response.status, message)) {
+        reason = REASONS.context;
+        detail = message;
+      } else if (response.status === 404 || response.status === 403) {
+        reason = REASONS.unavailable;
+        detail = message;
+      }
+
       if (shouldFallThrough(response.status, message)) {
         lastError = describeFailure(response.status, message, model);
         continue;
@@ -830,7 +976,26 @@ async function* streamRound({
       throw new GeminiError("Gemini returned an empty response body.", { status: 502, model });
     }
 
-    yield { type: "model", model };
+    // It answered, so whatever we believed about its quota is out of date.
+    health.markHealthy(model);
+
+    const degraded = model !== plan.preferred;
+    yield {
+      type: "model",
+      model,
+      preferred: plan.preferred,
+      degraded,
+      reason: degraded ? (reason ?? REASONS.unavailable) : null,
+      ...(degraded
+        ? describeDegradation({
+            reason: reason ?? REASONS.unavailable,
+            preferred: plan.preferred,
+            model,
+            remainingMs,
+            detail,
+          })
+        : { label: "", note: "" }),
+    };
 
     // The stall clock starts here and is pushed back by every chunk that arrives, so
     // a long answer is fine and a dead connection is not.

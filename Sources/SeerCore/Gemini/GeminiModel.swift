@@ -54,17 +54,26 @@ public struct GeminiModelChain: Sendable, Equatable {
 /// - 400 mentioning the model or an unsupported part: usually a newer/older model that
 ///   doesn't accept a YouTube file part. Fall through — this is the case that bites
 ///   when a preview ID changes its input contract.
-/// - Everything else (429, 5xx, policy refusals) is handled by the retry layer or is
-///   terminal; falling through would not help.
+/// - 429, or anything else meaning "out of quota": fall through. This one only reaches
+///   here *after* `HTTPTransport` has retried it with backoff and honoured any
+///   `Retry-After`, so it is not a blip — it is a quota that is genuinely spent. Gemini
+///   meters quota per model, so the next model in the chain has its own and frequently
+///   answers. Treating it as terminal, as this did, meant the chain covered the rare
+///   failure (a retired model ID) and not the common one.
+/// - Everything else (5xx, policy refusals, a bad key) is terminal; falling through would
+///   hammer an outage or re-spend a credential that cannot work.
 func shouldFallThrough(on error: Error) -> Bool {
     guard case let ExtractionError.upstreamFailure(_, status, message) = error else { return false }
+    // First, and unconditionally: a bad key arrives as a 400 or 403, both of which the
+    // rules below would otherwise wave through.
+    if isInvalidKeyFailure(status: status, message: message) { return false }
+    if isQuotaFailure(status: status, message: message) { return true }
     switch status {
     case 404, 403:
         return true
     case 400:
-        // A bad *key* also arrives as a 400 (see `isInvalidKeyFailure`). It must not
-        // fall through: the next model would be tried with the same broken credential.
-        if isInvalidKeyFailure(status: status, message: message) { return false }
+        // The bad-key case a 400 can also carry is caught by the guard above, before
+        // any of these run — otherwise the next model gets the same broken credential.
         let lowered = message.lowercased()
         return lowered.contains("not found")
             || lowered.contains("not supported")
@@ -73,6 +82,22 @@ func shouldFallThrough(on error: Error) -> Bool {
     default:
         return false
     }
+}
+
+/// Whether a failure means "this model has no quota left right now".
+///
+/// 429 is the documented status but not the only carrier: a project whose generative
+/// language quota is spent, or whose billing has lapsed, can answer 403 with
+/// `RESOURCE_EXHAUSTED` in the body. What matters is not the status but whether another
+/// model — with its own quota — would answer, and for all of these it would.
+func isQuotaFailure(status: Int?, message: String) -> Bool {
+    if status == 429 { return true }
+    guard status == 400 || status == 403 else { return false }
+    let lowered = message.lowercased()
+    return lowered.contains("quota")
+        || lowered.contains("rate limit")
+        || lowered.contains("resource_exhausted")
+        || lowered.contains("resource exhausted")
 }
 
 /// Whether a failure is really "that key is no good", whatever status it arrived under.

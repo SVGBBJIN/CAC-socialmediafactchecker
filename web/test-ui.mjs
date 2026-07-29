@@ -36,12 +36,19 @@ const PORT = Number(process.env.UI_TEST_PORT) || 3210;
 let script = [];
 let callIndex = 0;
 let requestBodies = [];
+/** What /api/config reports about the model chain, if anything. */
+let configHealth = null;
 
 const server = createServer(async (req, res) => {
   if (req.url === "/api/config") {
     res.writeHead(200, { "content-type": "application/json" });
     return res.end(
-      JSON.stringify({ requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000 }),
+      JSON.stringify({
+        requiresPassword: false,
+        apiKeyConfigured: true,
+        maxInputChars: 8000,
+        ...(configHealth ? { health: configHealth } : {}),
+      }),
     );
   }
 
@@ -403,6 +410,99 @@ await withPage(async (page) => {
   await page.waitForSelector(".search-chip.failed");
   const chip = await page.locator(".search-chip.failed").innerText();
   check("a failed search is shown as failed", /no parseable results/.test(chip), chip);
+});
+
+/* ---------------- the model pill ---------------- */
+
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash", preferred: "gemini-3.6-flash", degraded: false, reason: null, label: "", note: "" },
+      { type: "delta", text: "an answer" },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector("#model-badge:not([hidden])");
+  const text = (await page.locator("#model-badge").innerText()).trim();
+  const degraded = await page.locator("#model-badge.degraded").count();
+  check("the pill names the model that answered", text === "gemini-3.6-flash", text);
+  check("an undegraded answer is not flagged as one", degraded === 0, `count=${degraded}`);
+});
+
+scriptedAs([
+  {
+    frames: [
+      {
+        type: "model",
+        model: "gemini-3.5-flash",
+        preferred: "gemini-3.6-flash",
+        degraded: true,
+        reason: "quota",
+        label: "quota",
+        note: "gemini-3.6-flash is out of quota or rate-limited, so this answer came from gemini-3.5-flash. Retrying gemini-3.6-flash in about 45s.",
+      },
+      { type: "delta", text: "an answer from further down the chain" },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector("#model-badge.degraded");
+  const text = (await page.locator("#model-badge").innerText()).trim();
+  const title = await page.locator("#model-badge").getAttribute("title");
+  check("a degraded pill names the model that actually answered", text.startsWith("gemini-3.5-flash"), text);
+  check("…and why it wasn't the preferred one", /quota/.test(text), text);
+  // The pill has room for a word; the tooltip is where the reader finds out that this is
+  // temporary and roughly when it ends.
+  check("the tooltip names both models and the recovery", /gemini-3\.6-flash.*45s/s.test(String(title)), String(title));
+});
+
+// A reader arriving mid-outage should see it before spending a message to find out.
+configHealth = {
+  degraded: true,
+  model: "gemini-3.5-flash",
+  preferred: "gemini-3.6-flash",
+  reason: "quota",
+  label: "quota",
+  note: "gemini-3.6-flash is out of quota or rate-limited, so this answer came from gemini-3.5-flash.",
+};
+scriptedAs([{ frames: [{ type: "delta", text: "x" }, { type: "done" }] }]);
+await withPage(async (page) => {
+  await page.waitForSelector("#model-badge.degraded");
+  const text = (await page.locator("#model-badge").innerText()).trim();
+  check("a degradation shows on load, before any message is sent", /gemini-3\.5-flash/.test(text), text);
+});
+configHealth = null;
+
+/* ---------------- the output-token cap ---------------- */
+
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash", degraded: false },
+      { type: "delta", text: "The bridge cost $2.1 bil" },
+      { type: "truncated", reason: "max_output_tokens" },
+      { type: "unverified", message: "Unverified: 1 statement carries no citation.", violations: [] },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .truncated");
+  const notice = await page.locator(".truncated").innerText();
+  check("an answer cut off by the token cap says so", /reply-length limit/.test(notice), notice);
+  // Both notices are true at once and say different things; neither may overwrite the other.
+  const unverified = await page.locator(".unverified").count();
+  check("the truncation notice does not displace the citation warning", unverified === 1, `count=${unverified}`);
+
+  await page.reload();
+  await page.waitForSelector(".message.assistant .truncated");
+  check("the truncation label survives a reload", true);
 });
 
 await browser.close();

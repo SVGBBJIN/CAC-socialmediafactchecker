@@ -179,12 +179,25 @@ final class GeminiModelChainTests: XCTestCase {
         )))
     }
 
-    /// Rate limits and server errors are the retry layer's job. Falling through would
-    /// burn the whole chain on a transient blip and land on the weakest model.
-    func testDoesNotFallThroughOnTransientFailures() {
-        XCTAssertFalse(shouldFallThrough(on: ExtractionError.upstreamFailure(
+    /// A 429 only reaches `shouldFallThrough` after `HTTPTransport` has already retried it
+    /// with backoff and honoured any `Retry-After` — so by here it is a quota that is
+    /// genuinely spent, not a blip. Gemini meters quota per model, so the next model in
+    /// the chain has its own and frequently answers.
+    func testFallsThroughOnAnExhaustedQuota() {
+        XCTAssertTrue(shouldFallThrough(on: ExtractionError.upstreamFailure(
             service: "Gemini", status: 429, message: "rate limited"
         )))
+        XCTAssertTrue(shouldFallThrough(on: ExtractionError.upstreamFailure(
+            service: "Gemini", status: 403, message: "RESOURCE_EXHAUSTED"
+        )))
+        XCTAssertTrue(isQuotaFailure(status: 400, message: "Quota exceeded for quota metric"))
+        XCTAssertFalse(isQuotaFailure(status: 500, message: "quota"), "a 5xx is an outage")
+        XCTAssertFalse(isQuotaFailure(status: 400, message: "invalid argument"))
+    }
+
+    /// Server errors are the retry layer's job. Falling through would burn the whole chain
+    /// on a transient blip and land on the weakest model.
+    func testDoesNotFallThroughOnTransientFailures() {
         XCTAssertFalse(shouldFallThrough(on: ExtractionError.upstreamFailure(
             service: "Gemini", status: 503, message: "overloaded"
         )))
