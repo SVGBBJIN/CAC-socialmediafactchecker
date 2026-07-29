@@ -19,6 +19,7 @@ import {
   describeDegradation,
   REASONS,
   MAX_COOLDOWN_MS,
+  OVERLOAD_COOLDOWN_MS,
 } from "./degradation.js";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -97,8 +98,14 @@ export class GeminiError extends Error {
  *   while four models that would have answered went untried.
  * - A request too large for this model's context window: fall through, then give up on
  *   the chain with a message that says so. See `isContextLimitFailure`.
- * - Everything else (401/`API_KEY_INVALID`, 5xx) is terminal here — falling through would
- *   spend the same broken credential four more times, or hammer an outage.
+ * - 503, or a 500 that says the model is overloaded: fall through. Capacity in Gemini is
+ *   **per model**, the same way quota is — `gemini-3.6-flash` being full at this instant
+ *   says nothing about whether `gemini-3.5-flash` has room, and the newest and most
+ *   popular model in the chain is precisely the one most likely to be full. Treating it as
+ *   terminal, as this used to, meant the single most common transient upstream failure
+ *   killed the request outright while four models that would have answered went untried.
+ * - Everything else (401/`API_KEY_INVALID`, other 5xx) is terminal here — falling through
+ *   would spend the same broken credential four more times, or hammer a genuine outage.
  */
 export function shouldFallThrough(status, message = "") {
   // Checked before anything else: a bad key arrives as a 400 or 403 (see
@@ -106,6 +113,7 @@ export function shouldFallThrough(status, message = "") {
   if (isInvalidKeyFailure(status, message)) return false;
   if (status === 404 || status === 403) return true;
   if (isQuotaFailure(status, message)) return true;
+  if (isOverloadedFailure(status, message)) return true;
   if (isContextLimitFailure(status, message)) return true;
   if (status !== 400) return false;
   const lowered = message.toLowerCase();
@@ -130,6 +138,27 @@ export function isQuotaFailure(status, message = "") {
   if (status === 429) return true;
   if (status !== 400 && status !== 403) return false;
   return /quota|rate[\s_-]?limit|resource[\s_-]?exhausted/i.test(message);
+}
+
+/**
+ * Whether a failure means "this model has no capacity right this second".
+ *
+ * 503 is the documented status and the one that reaches users as *Gemini is having trouble
+ * (HTTP 503)*. A 500 counts too when the body says overloaded — Gemini's own guidance for
+ * `INTERNAL` is to retry or try a different model, which is the same remedy.
+ *
+ * Kept separate from `isQuotaFailure` even though both fall through the chain, because the
+ * two want different cooldowns and say different things to the user. Quota is an allowance
+ * that ran out and may take a minute to refresh; overload is Google's capacity at this
+ * instant, usually clears in seconds, and is emphatically not something the operator did.
+ *
+ * A plain 500 with no such wording is *not* included: that is an outage, and walking the
+ * whole chain through one adds four failed requests to a service already in trouble.
+ */
+export function isOverloadedFailure(status, message = "") {
+  if (status === 503) return true;
+  if (status !== 500) return false;
+  return /overload|unavailable|try again|capacity|busy/i.test(message);
 }
 
 /**
@@ -238,6 +267,18 @@ function describeFailure(status, message, model) {
       model,
       retryable: true,
     });
+  }
+  // Reached only once every model in the chain has been full, and after the retry sweep —
+  // so the wording is about all of them, and about it not being the reader's doing. The
+  // old text ("Gemini is having trouble") described the same state as a fault, which sent
+  // people looking at their key and their code for a condition neither one caused.
+  if (isOverloadedFailure(status, message)) {
+    const error = new GeminiError(
+      "Every Gemini model is busy right now — Google is turning requests away, which usually clears within a minute. Nothing is wrong with your key or this app. Try again shortly.",
+      { status: 503, model, retryable: true },
+    );
+    error.overloaded = true;
+    return error;
   }
   if (status >= 500) {
     return new GeminiError(`Gemini is having trouble (HTTP ${status}). Try again shortly.`, {
@@ -731,6 +772,20 @@ const ANSWER_NOW =
 export const ANSWER_RESERVE_MS = 25_000;
 
 /**
+ * Extra passes down the chain when every model in it was full, and the first wait between
+ * them (doubling after that: 0.8s, then 1.6s).
+ *
+ * Two is chosen against the shape of the failure rather than by taste. A 503 sweep that
+ * finds *every* model full is usually a capacity spike measured in seconds, so a couple of
+ * short waits catches most of them; past that it is an outage, and more passes add failed
+ * requests to a service already struggling while the user waits for a worse outcome. The
+ * cost of getting it wrong is bounded either way — about 2.4 seconds — and it is only
+ * spent when the alternative was failing the request outright.
+ */
+export const OVERLOAD_SWEEPS = 2;
+export const OVERLOAD_BACKOFF_MS = 800;
+
+/**
  * The model's own turn, reassembled from the stream so it can be sent back verbatim.
  *
  * Verbatim is the whole point, and the reason this is a class rather than a string join.
@@ -830,6 +885,8 @@ export async function* streamChat({
   budgetPressure = 0,
   deadlineAt = null,
   answerReserveMs = ANSWER_RESERVE_MS,
+  overloadSweeps = OVERLOAD_SWEEPS,
+  sleep,
 }) {
   const deadline = new StreamDeadline(signal);
   let tikTok = null;
@@ -922,6 +979,11 @@ export async function* streamChat({
         budgetPressure,
         round,
         media,
+        deadlineAt,
+        overloadSweeps,
+        // Only forwarded when the caller supplied one, so `streamRound` keeps its own
+        // default rather than being handed `undefined` and losing it.
+        ...(sleep ? { sleep } : {}),
       })) {
         if (frame.type === "function_call") {
           calls.push(frame.call);
@@ -1038,10 +1100,52 @@ async function* streamRound({
   budgetPressure,
   round = 0,
   media = false,
+  deadlineAt = null,
+  overloadSweeps = OVERLOAD_SWEEPS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   let lastError = null;
+  // Set by `walkChain` so the loop below can tell its three endings apart: a model
+  // answered, the caller went away, or the chain ran out.
+  let answered = false;
+  let abandoned = false;
+  // Whether the pass that just finished found *every* model full, as opposed to hitting
+  // some other failure. Only the first is worth waiting on.
+  let allFull = false;
 
+  // Finding every model full is a real state and usually a brief one: it is Google's
+  // capacity in this second, not a fact about the key or the request. So the remedy is to
+  // wait a moment and ask again, which is what the user would do by hand and what the old
+  // behaviour — fail the whole turn on the first 503 — made them do by hand.
+  //
+  // Bounded twice over: a fixed number of passes, and only while enough time remains to
+  // use an answer if one arrives. A retry that lands past the deadline has bought nothing.
+  for (let sweep = 0; ; sweep += 1) {
+    allFull = false;
+    yield* walkChain();
+    if (answered || abandoned) return;
+    if (!allFull || sweep >= overloadSweeps) break;
+
+    const waitMs = OVERLOAD_BACKOFF_MS * 2 ** sweep;
+    if (deadlineAt !== null && Date.now() + waitMs + ANSWER_RESERVE_MS > deadlineAt) break;
+    yield { type: "stage", stage: "busy", waitMs, attempt: sweep + 1 };
+    await sleep(waitMs);
+    if (deadline.callerAborted) return;
+    // No need to clear what the pass just learned: `planChain` falls back to the whole
+    // chain when every model in it is cooled, which is exactly the state we are in.
+  }
+
+  throw (
+    lastError ??
+    new GeminiError("No model in the chain was available for this API key.", { status: 502 })
+  );
+
+  /** One pass down the chain. Sets `answered` once a model has streamed its reply. */
+  async function* walkChain() {
   const plan = planChain({ models, health, budgetPressure });
+  // What this pass ran into, which is what decides whether another pass is worth making.
+  let sawOverload = false;
+  let sawOther = false;
   // Why we're not on the preferred model. Seeded from the plan — which knows about quota
   // learned on earlier requests and about budget pressure — and overwritten by anything we
   // learn the hard way while walking the chain below.
@@ -1050,7 +1154,7 @@ async function* streamRound({
   let remainingMs = plan.skipped.find((s) => s.model === plan.preferred)?.remainingMs;
 
   for (const model of plan.models) {
-    if (deadline.callerAborted) return;
+    if (deadline.callerAborted) return void (abandoned = true);
     const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
 
     // The gap between here and the first token is the longest unexplained pause in the
@@ -1076,7 +1180,7 @@ async function* streamRound({
       });
     } catch (error) {
       // The caller giving up is not a failure to report — it's what they asked for.
-      if (deadline.callerAborted) return;
+      if (deadline.callerAborted) return void (abandoned = true);
       if (deadline.timedOut) {
         throw new GeminiError(
           `Gemini did not respond within ${Math.round(requestTimeoutMs / 1000)}s. Try again shortly.`,
@@ -1104,6 +1208,19 @@ async function* streamRound({
         reason = REASONS.quota;
         detail = message;
         remainingMs = entry.until - Date.now();
+      } else if (isOverloadedFailure(response.status, message)) {
+        // Remembered like a quota, on a much shorter clock: capacity comes back in
+        // seconds, and a model held out of the chain after it recovered is an answer
+        // quietly taken on a worse model for no reason.
+        const cooldownMs = retryAfterMs(response, text) ?? OVERLOAD_COOLDOWN_MS;
+        const entry = health.markExhausted(model, {
+          reason: REASONS.overloaded,
+          detail: message,
+          cooldownMs,
+        });
+        reason = REASONS.overloaded;
+        detail = message;
+        remainingMs = entry.until - Date.now();
       } else if (isContextLimitFailure(response.status, message)) {
         reason = REASONS.context;
         detail = message;
@@ -1111,6 +1228,9 @@ async function* streamRound({
         reason = REASONS.unavailable;
         detail = message;
       }
+
+      if (isOverloadedFailure(response.status, message)) sawOverload = true;
+      else sawOther = true;
 
       if (shouldFallThrough(response.status, message)) {
         lastError = describeFailure(response.status, message, model);
@@ -1150,7 +1270,7 @@ async function* streamRound({
     try {
       yield* parseSSE(response.body, deadline, idleTimeoutMs);
     } catch (error) {
-      if (deadline.callerAborted) return;
+      if (deadline.callerAborted) return void (abandoned = true);
       if (deadline.timedOut) {
         throw new GeminiError(
           `Gemini stopped sending data for ${Math.round(idleTimeoutMs / 1000)}s. Try again shortly.`,
@@ -1165,11 +1285,12 @@ async function* streamRound({
     // aborts the shared controller mid-turn: the sources arrive, the answer never does,
     // and nothing anywhere reports an error. Re-armed by the next round's own fetch.
     deadline.clear();
+    answered = true;
     return;
   }
 
-  throw (
-    lastError ??
-    new GeminiError("No model in the chain was available for this API key.", { status: 502 })
-  );
+  // Every model refused. Whether that is worth waiting out is decided by *how* they
+  // refused: all of them full is a moment to sit through, anything else is not.
+  allFull = sawOverload && !sawOther;
+}
 }

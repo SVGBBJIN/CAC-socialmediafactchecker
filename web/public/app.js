@@ -187,6 +187,10 @@ function stageText(stage) {
       return stage.round > 0 ? "Reading the sources" : "Asking the model";
     case "thinking":
       return stage.round > 0 ? "Working through the sources" : "Working out what to check";
+    case "busy":
+      // Named as Google's problem, not the app's. A reader who thinks they broke something
+      // starts checking their key; one who knows the service is full just waits.
+      return "Every Gemini model is busy — waiting a moment and trying again";
     case "wrapping":
       return "Out of time to search — answering with what I have";
     case "rewriting":

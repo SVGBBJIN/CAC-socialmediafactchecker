@@ -15,13 +15,20 @@ import {
   findYouTubeVideoIDs,
   isInvalidKeyFailure,
   isQuotaFailure,
+  isOverloadedFailure,
   isContextLimitFailure,
   retryAfterMs,
   REQUEST_TIMEOUT_MS,
   resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from "./lib/gemini.js";
-import { ModelHealth, planChain, healthSnapshot, MAX_COOLDOWN_MS } from "./lib/degradation.js";
+import {
+  ModelHealth,
+  planChain,
+  healthSnapshot,
+  MAX_COOLDOWN_MS,
+  OVERLOAD_COOLDOWN_MS,
+} from "./lib/degradation.js";
 import {
   tikTokVideoID,
   isTikTokShortLink,
@@ -1562,4 +1569,150 @@ test("a rewrite does not make Gemini watch the video a second time", async () =>
   // Not silently dropped: a model that thinks the clip went missing says so instead of
   // answering, which is worse than the cost this avoids.
   assert.match(reread[0].parts.at(-1).text, /watched earlier in this turn/);
+});
+
+/* ---------------- overloaded upstream ---------------- */
+
+test("503 is told apart from an outage, and from a bad request", () => {
+  assert.equal(isOverloadedFailure(503, "The model is overloaded. Please try again later."), true);
+  assert.equal(isOverloadedFailure(503, ""), true);
+  // A 500 counts only when it says so; a bare one is an outage, and walking the chain
+  // through an outage adds four failed requests to a service already in trouble.
+  assert.equal(isOverloadedFailure(500, "The model is overloaded"), true);
+  assert.equal(isOverloadedFailure(500, "Internal error encountered"), false);
+  assert.equal(isOverloadedFailure(429, "quota"), false);
+  assert.equal(isOverloadedFailure(400, "bad request"), false);
+
+  // Capacity is per model, so a full model is a reason to try the next one — not to fail
+  // the request while the rest of the chain goes untried.
+  assert.equal(shouldFallThrough(503, "The model is overloaded"), true);
+  assert.equal(shouldFallThrough(500, "Internal error encountered"), false);
+});
+
+test("an overloaded model hands the answer to the next one in the chain", async () => {
+  const health = new ModelHealth();
+  const tried = [];
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      health,
+      fetchImpl: async (url) => {
+        tried.push(decodeURIComponent(url));
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 503,
+            text: async () => JSON.stringify({ error: { message: "The model is overloaded." } }),
+          };
+        }
+        return sseResponse([frame("answered anyway")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2);
+  assert.equal(answerFrames(frames).at(-1).text, "answered anyway");
+
+  const announced = answerFrames(frames).find((f) => f.type === "model");
+  assert.equal(announced.model, "gemini-3.5-flash");
+  assert.equal(announced.reason, "overloaded");
+  assert.equal(announced.label, "busy");
+  // The note has to say whose problem it is: a reader who thinks they broke something
+  // goes looking at their key for a condition they had no part in.
+  assert.match(announced.note, /Nothing is wrong with your key/);
+
+  // And the busy model is remembered, briefly — long enough to skip on the next request,
+  // short enough not to keep answering on a worse model after capacity came back.
+  const cooled = health.status("gemini-3.6-flash");
+  assert.equal(cooled.reason, "overloaded");
+  assert.ok(cooled.remainingMs <= OVERLOAD_COOLDOWN_MS);
+});
+
+test("every model full is waited out once, then reported as Google's capacity", async () => {
+  const waits = [];
+  let attempts = 0;
+
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b"],
+        health: new ModelHealth(),
+        overloadSweeps: 2,
+        sleep: async (ms) => waits.push(ms),
+        fetchImpl: async () => {
+          attempts += 1;
+          return {
+            ok: false,
+            status: 503,
+            text: async () => JSON.stringify({ error: { message: "The model is overloaded." } }),
+          };
+        },
+      }),
+    ),
+    (error) => {
+      // The message names the condition and who owns it, rather than reading as a fault in
+      // this app — which is what "Gemini is having trouble (HTTP 503)" read as.
+      assert.match(error.message, /Every Gemini model is busy/);
+      assert.match(error.message, /Nothing is wrong with your key/);
+      assert.equal(error.retryable, true);
+      return true;
+    },
+  );
+
+  // Three passes over two models, with a short doubling wait between them.
+  assert.equal(attempts, 6);
+  assert.deepEqual(waits, [800, 1600]);
+});
+
+test("a chain that fails some other way is not waited out", async () => {
+  // Waiting only pays when the condition is capacity. A 404 will still be a 404 in two
+  // seconds, and the wait is time taken from a user who is owed the error now.
+  const waits = [];
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b"],
+        health: new ModelHealth(),
+        sleep: async (ms) => waits.push(ms),
+        fetchImpl: async (url) => ({
+          ok: false,
+          status: decodeURIComponent(url).includes("/a:") ? 503 : 404,
+          text: async () => JSON.stringify({ error: { message: "nope" } }),
+        }),
+      }),
+    ),
+    /./,
+  );
+  assert.deepEqual(waits, [], "a mixed failure is not a capacity spike");
+});
+
+test("the wait is skipped when there is no time left to use an answer", async () => {
+  const waits = [];
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a"],
+        health: new ModelHealth(),
+        sleep: async (ms) => waits.push(ms),
+        // Past the point where a fresh answer could finish anyway.
+        deadlineAt: Date.now() + 5_000,
+        fetchImpl: async () => ({
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({ error: { message: "overloaded" } }),
+        }),
+      }),
+    ),
+    /busy/,
+  );
+  assert.deepEqual(waits, [], "a retry that lands past the deadline buys nothing");
 });

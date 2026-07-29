@@ -81,10 +81,13 @@ slowest request this app makes: resolve the embed, download the clip, possibly u
 simply stopped — no error, no text, an empty bubble that vanished on the next render. It
 now says so: a stream that closes without an answer is reported as a failure, with the
 elapsed time and a pointer to this setting. If that message arrives at a suspiciously
-round number of seconds, this is what it is. Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on
-Pro. It is deliberately not set in `vercel.json`, because that file uses the legacy
-`builds` key, which `functions` cannot be combined with; the project setting is the one
-that always applies.
+round number of seconds, this is what it is.
+
+Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on Pro. It is
+deliberately not set in `vercel.json`, because that file uses the legacy `builds` key,
+which `functions` cannot be combined with; the project setting is the one that always
+applies. YouTube carries the same exposure and always has, since Gemini watching a video
+takes tens of seconds — which is also what the 15s keep-alive below is for.
 
 Then set `MAX_REQUEST_SECONDS` a few seconds *below* it. Every stage is logged with its
 elapsed second (`[chat] 24s waiting (gemini-3.6-flash)`), so the runtime log names the step
@@ -103,8 +106,7 @@ That number is a deadline the turn tries to *land* inside, not just a tripwire:
 - **The hard abort remains the backstop**, for when those judgements are wrong. It ends the
   turn with an explanation and whatever text had arrived; left to the host, the same moment
   arrives as a killed process and a connection that stops mid-sentence with nothing to mark
-  it. YouTube has the same exposure and always has — Gemini watching a
-video takes tens of seconds — which is what the 15s keep-alive below is for.
+  it.
 
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function
 instance and resets on a cold start, so on Vercel the real ceiling is looser than the
@@ -159,12 +161,13 @@ reasoning.
 
 ## Graceful degradation
 
-The chain steps down on its own and steps back up on its own. Four things move it:
+The chain steps down on its own and steps back up on its own. Five things move it:
 
 | Trigger | What happens | What the pill shows |
 | --- | --- | --- |
 | The model isn't available to this key (404/403) | Try the next model | `… · fallback` |
 | The model is out of quota (429, or `RESOURCE_EXHAUSTED`) | Try the next model, and **remember** — the exhausted one is skipped outright until its cooldown ends | `… · quota` |
+| The model is overloaded (503, or a 500 that says so) | Try the next model, and remember for 20s. If *every* model is full, wait and sweep the chain twice more — 0.8s, then 1.6s | `… · busy` |
 | The client is near its daily message cap | Start one model down the chain, to make the remaining messages go further | `… · conserving` |
 | The conversation is too long for the model | Try the next model; if none accept, say "start a new chat" rather than relaying token arithmetic | `… · long chat` |
 
@@ -174,6 +177,21 @@ remembering: the next request would otherwise re-learn it at the cost of a round
 as long as the quota window lasts. Cooldowns come from the server's own `Retry-After` or
 `retryDelay` where it sends one, are capped at 15 minutes, and expire by themselves — there
 is no flag anyone has to remember to flip back.
+
+**Capacity is per model too**, and for the same reason a 503 is a reason to try the next
+one rather than to fail the turn. It used to fail the turn: 5xx was treated as terminal on
+the grounds that walking the chain through an outage only adds load, which is right for an
+outage and wrong for the far more common case — the newest, most popular model in the chain
+being full for a few seconds while the ones below it have room. The two are told apart by
+what the body says, so a bare `500 Internal error` is still terminal and a 503 is not. Its
+cooldown is 20 seconds rather than a minute, because capacity comes back fast and a model
+held out after it recovered is an answer quietly taken on a worse model for nothing.
+
+When every model is full, that is worth sitting out rather than handing back: the chain is
+swept twice more with a short doubling wait, and the wait is skipped entirely if the turn's
+deadline leaves no room to use an answer. Only then does it fail — saying that Google is
+turning requests away and that the key and the app are not at fault, which the old *Gemini
+is having trouble (HTTP 503)* did not.
 
 The registry lives in `lib/degradation.js` and is process memory, with the same caveat as
 the rate limiter in `lib/guard.js`: under `node server.js` it is one shared registry; on
