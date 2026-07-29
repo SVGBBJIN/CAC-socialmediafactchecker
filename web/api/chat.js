@@ -95,6 +95,27 @@ export default async function handler(req, res) {
   // If the user hits Stop or closes the tab, stop paying for tokens nobody will read.
   res.on("close", () => controller.abort());
 
+  // The request's own deadline, set below whatever the host will allow.
+  //
+  // A host that enforces its limit by killing the function ends a streaming response the
+  // worst possible way: the socket closes mid-answer with no error frame, so the browser
+  // cannot tell a cut-off request from a finished one — which is precisely how a video
+  // fact-check on a default Vercel plan presents, since the whole thing (fetch the clip,
+  // upload it, wait for a model to watch it) runs well past 10 seconds. Stopping first
+  // means the turn ends with an explanation and whatever text had arrived, instead of
+  // silence.
+  let outOfTime = false;
+  const started = Date.now();
+  // Deliberately not `unref`'d, unlike the heartbeat below. This timer is the only thing
+  // that ends a request whose upstream has gone quiet, so it has to hold the event loop
+  // open until it fires — `unref`'d, it is exactly as absent as no deadline at all in the
+  // one case it exists for. `clearTimeout` in the `finally` runs on every exit path, so it
+  // can never outlive the request.
+  const budget = setTimeout(() => {
+    outOfTime = true;
+    controller.abort();
+  }, limits.maxRequestSeconds * 1000);
+
   let lastWrite = Date.now();
   const send = (frame) => {
     if (res.writableEnded) return;
@@ -112,6 +133,31 @@ export default async function handler(req, res) {
   }, HEARTBEAT_MS);
   heartbeat.unref?.();
 
+  // Where the request got to, and when. Stages are the phases that produce no output, so
+  // they are also the phases a request dies in without leaving a trace — logging them is
+  // what turns "it just stopped" into a line in the host's runtime log naming the step and
+  // the second it stopped on.
+  const trace = (note) => console.log(`[chat] ${Math.round((Date.now() - started) / 1000)}s ${note}`);
+
+  /**
+   * End the turn on our own deadline rather than the host's.
+   *
+   * Reported as an error rather than a quiet `done`: the text above it, if any, is a
+   * fragment, and a fragment shipped as a finished fact-check is the failure this whole
+   * app exists to prevent. Retryable, because the next attempt may well fit.
+   */
+  const sendOutOfTime = () => {
+    trace(`out of time after ${limits.maxRequestSeconds}s`);
+    send({
+      type: "error",
+      message:
+        `This request hit its ${limits.maxRequestSeconds}s limit before the answer was ` +
+        `finished, so anything above is partial. Raise MAX_REQUEST_SECONDS — and the host's ` +
+        `own function timeout with it — or ask about one claim at a time.`,
+      retryable: true,
+    });
+  };
+
   try {
     for await (const frame of verifiedChat({
       apiKey,
@@ -125,10 +171,20 @@ export default async function handler(req, res) {
       budgetPressure: usage.pressure ?? 0,
       signal: controller.signal,
     })) {
+      if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
+      if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);
       send(frame);
     }
-    send({ type: "done" });
+
+    if (outOfTime) {
+      sendOutOfTime();
+    } else {
+      trace("done");
+      send({ type: "done" });
+    }
   } catch (error) {
+    // Our own deadline firing is reported, not mistaken for the user walking away.
+    if (outOfTime) return sendOutOfTime();
     if (controller.signal.aborted) return;
     const isGemini = error instanceof GeminiError;
     if (!isGemini) console.error("[chat]", error);
@@ -140,6 +196,7 @@ export default async function handler(req, res) {
     });
   } finally {
     clearInterval(heartbeat);
+    clearTimeout(budget);
     if (!res.writableEnded) res.end();
   }
 }

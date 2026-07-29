@@ -84,7 +84,13 @@ elapsed time and a pointer to this setting. If that message arrives at a suspici
 round number of seconds, this is what it is. Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on
 Pro. It is deliberately not set in `vercel.json`, because that file uses the legacy
 `builds` key, which `functions` cannot be combined with; the project setting is the one
-that always applies. YouTube has the same exposure and always has — Gemini watching a
+that always applies.
+
+Then set `MAX_REQUEST_SECONDS` a few seconds *below* it. The app stops itself at that
+point and ends the turn with an explanation and whatever text had arrived; left to the
+host, the same moment arrives as a killed process and a connection that simply stops
+mid-sentence. Every stage is logged with its elapsed second (`[chat] 24s waiting
+(gemini-3.6-flash)`), so the runtime log names the step a request died in. YouTube has the same exposure and always has — Gemini watching a
 video takes tens of seconds — which is what the 15s keep-alive below is for.
 
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function

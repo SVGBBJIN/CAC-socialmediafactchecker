@@ -27,6 +27,17 @@ export function config(env = process.env) {
     // could run until the model stopped on its own, and output tokens are the
     // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`.
     maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 4096),
+    // How long one request may run before it stops itself, in seconds.
+    //
+    // This exists because the host has a limit of its own and enforces it by killing the
+    // process — which on a streaming response means the connection simply stops: no
+    // error, no explanation, and whatever had been written is all the reader ever gets,
+    // with nothing to say it was cut off. Stopping a few seconds early is the difference
+    // between that and a partial answer that says why it is partial.
+    //
+    // Set it *below* the host's own ceiling: Vercel's max duration (10s by default on
+    // Hobby, 60s ceiling there, 300s on Pro), or the proxy timeout in front of it.
+    maxRequestSeconds: positiveInt(env.MAX_REQUEST_SECONDS, 55),
   };
 }
 
