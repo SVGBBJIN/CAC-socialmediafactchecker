@@ -687,6 +687,71 @@ test("prose written alongside a refused, past-budget tool call is not left on sc
   assert.ok(!readerSees(frames).includes("let me search again"), "the half-thought is withdrawn");
 });
 
+test("the bibliography is sent while the searches land, before the answer is written", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1", "https://b.example/2"]),
+    }),
+  );
+
+  const firstSources = frames.findIndex((f) => f.type === "sources");
+  const firstDelta = frames.findIndex((f) => f.type === "delta");
+  assert.ok(firstSources !== -1, "a bibliography must be sent");
+  assert.ok(
+    firstSources < firstDelta,
+    "the sources must arrive before the first token, so markers link as the answer streams",
+  );
+  assert.equal(frames[firstSources].provisional, true);
+  // Provisional means everything retrieved, since what gets cited is not known yet.
+  assert.deepEqual(frames[firstSources].sources.map((s) => s.n), [1, 2]);
+
+  // The last one is the real bibliography: not provisional, and narrowed to what was cited.
+  const last = frames.filter((f) => f.type === "sources").at(-1);
+  assert.ok(!last.provisional);
+  assert.deepEqual(last.sources.map((s) => s.n), [1]);
+});
+
+test("a search that turns up nothing new does not re-send the same bibliography", async () => {
+  // The second call is the same query, served from the turn's cache; the third finds a page
+  // the first already returned. Neither grows the ledger, so neither is worth a frame.
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } },
+        { name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } },
+        { name: "web_search", args: { query: "bridge price", claim: "The bridge cost $4bn" } },
+      ],
+    },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      // Every query returns the same single page.
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
+  assert.equal(provisional.length, 1, "one bibliography, not one per search");
+  assert.deepEqual(provisional[0].sources.map((s) => s.n), [1]);
+});
+
 test("a stream that dies mid-answer keeps the text it wrote and its bibliography", async () => {
   // Gemini ends turns on RECITATION or SAFETY partway through an answer without warning.
   // The text that arrived is real and is kept — but so are its sources, which is the part

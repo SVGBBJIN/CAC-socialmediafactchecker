@@ -192,6 +192,11 @@ function ledgerBlock(ledger) {
     .join("\n");
 }
 
+/** The ledger as a `sources` frame, carrying only the fields the browser renders. */
+function sourceRows(sources) {
+  return sources.map(({ n, title, url, domain, published }) => ({ n, title, url, domain, published }));
+}
+
 /**
  * Stream one verified answer.
  *
@@ -206,7 +211,11 @@ function ledgerBlock(ledger) {
  *   means it failed the audit and is being rewritten. Consumers that show text **must**
  *   honour this: text this layer has stopped counting but the screen keeps showing is what
  *   a reader sees as a reply mangling itself. See `supersede`.
- * - `{type: "sources", sources}` — the bibliography, built from the ledger.
+ * - `{type: "sources", sources, provisional}` — the bibliography, built from the ledger.
+ *   Sent **as the searches land**, with `provisional: true` and the whole ledger, so the
+ *   evidence is on screen and every `[n]` marker resolves to a link from the first token of
+ *   the answer rather than only after the last one. Sent once more at the end without the
+ *   flag, narrowed to what the answer actually cited; a consumer replaces on each one.
  * - `{type: "unverified", message}` — the answer failed the audit twice and is labelled.
  */
 export async function* verifiedChat({
@@ -239,6 +248,10 @@ export async function* verifiedChat({
   // A stream that died *after* the model had already written something. Held rather than
   // thrown on the spot — see the catch below — so the turn can still be finished.
   let streamError = null;
+  // How many sources the browser has already been sent, so a search that returns nothing
+  // new — a repeat query served from the cache, or a page another search already found —
+  // doesn't re-send a bibliography identical to the one already on screen.
+  let sentSources = 0;
 
   /**
    * Withdraw the text written so far, because the model has moved on from it.
@@ -329,6 +342,27 @@ export async function* verifiedChat({
           continue;
         }
         yield frame;
+
+        // The bibliography goes out as soon as there is one to send, rather than being held
+        // until the answer is finished and audited. Two things come of that, both of them
+        // paid for by work already done:
+        //
+        // - The evidence is on screen during the longest silence in the turn. Between the
+        //   last search landing and the first token of the answer the model is reading
+        //   everything it just retrieved, which on a multi-claim video is most of the wait —
+        //   and the reader can spend it reading the sources instead of watching a blank
+        //   bubble with a spinner over it.
+        // - Every `[n]` in the answer resolves to a link from the moment it is typed. The
+        //   browser can only turn a marker into a link if it already holds the source that
+        //   marker points at, so with the bibliography arriving last, markers stayed inert
+        //   plain text for the whole of the stream and only became clickable once it ended.
+        //
+        // Provisional because what the answer cites is not known yet: this is everything
+        // retrieved, and the frame at the end narrows it to what was actually used.
+        if (frame.type === "search" && ledger.size > sentSources) {
+          sentSources = ledger.size;
+          yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+        }
       }
     } catch (error) {
       // The caller closing the tab is what they asked for, not a failure to dress up.
@@ -421,17 +455,19 @@ export async function* verifiedChat({
   }
 
   if (ledger.size > 0) {
-    // The bibliography is what the answer cites. When the answer cites nothing at all —
-    // it was cut off, or it never got past searching — the whole ledger is shown instead
-    // of an empty list: those pages were fetched on the reader's behalf and are the only
-    // evidence the turn produced, so hiding them because no marker points at them throws
-    // away the one useful thing that happened.
+    // The final bibliography, replacing the provisional one sent while the searches were
+    // landing. It is what the answer cites: a page the answer never used is evidence that
+    // was gathered and not relied on, and listing it under a finished verdict implies a
+    // support it does not give.
+    //
+    // When the answer cites nothing at all — it was cut off, or it never got past searching
+    // — the whole ledger is shown instead of an empty list: those pages were fetched on the
+    // reader's behalf and are the only evidence the turn produced, so hiding them because no
+    // marker points at them throws away the one useful thing that happened.
     const cited = audit?.cited ?? [];
     yield {
       type: "sources",
-      sources: ledger.sources
-        .filter((s) => cited.length === 0 || cited.includes(s.n))
-        .map(({ n, title, url, domain, published }) => ({ n, title, url, domain, published })),
+      sources: sourceRows(ledger.sources.filter((s) => cited.length === 0 || cited.includes(s.n))),
     };
   }
 
