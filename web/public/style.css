@@ -503,3 +503,81 @@ body {
     display: flex;
   }
 }
+
+/* ---------- Evidence trail ---------- */
+
+/*
+ * Searches above the answer, sources below it, and — when the citation audit failed twice
+ * — a warning under both. Styled as apparatus rather than as content: quieter than the
+ * answer, always present, never something the model can decide to leave out.
+ */
+
+.searches {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.search-chip {
+  align-self: flex-start;
+  max-width: 100%;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  overflow-wrap: anywhere;
+}
+.search-chip.failed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+a.citation {
+  color: var(--accent);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  vertical-align: super;
+  line-height: 0;
+  padding: 0 1px;
+}
+a.citation:hover {
+  text-decoration: underline;
+}
+
+.sources {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  font-size: 13px;
+}
+.sources-heading {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.sources ol {
+  margin: 0;
+  padding-left: 1.4em;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sources a {
+  color: var(--text);
+}
+.source-domain {
+  color: var(--text-dim);
+}
+
+.unverified {
+  margin-top: 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  color: var(--danger);
+  font-size: 13px;
+}

@@ -86,6 +86,30 @@ Unlike the iOS path, the key here never reaches the client at all — there is a
 put it behind. See [web/README.md](web/README.md) for how that works, the controls that
 keep strangers off your quota, and the Vercel deploy.
 
+### Every claim carries a citation
+
+The chat assistant has one tool — `web_search` — and is not permitted to assert a fact it
+did not retrieve with it. The system prompt says so; the app then *checks*, because a
+prompt is a request and this needs a guarantee. Search results are numbered into a ledger,
+and the finished answer is audited against it: a checkable sentence with no citation
+marker, a marker for a source that does not exist, or a URL no search returned all reject
+the answer, which is withdrawn from the screen and sent back to be rewritten. A rewrite
+that fails too is shown labelled `Unverified` rather than suppressed. The Sources list
+under each answer is rendered by the app from what was actually fetched, never typed by
+the model.
+
+The same search path runs from the terminal, so a citation can be reproduced rather than
+taken on trust:
+
+```bash
+cd web && npm run search -- --claim "Measles cases tripled in 2026" \
+                            --query "measles cases 2026 CDC"
+```
+
+It works with no configuration (DuckDuckGo, best-effort) and properly with any one of
+Brave, Tavily, Serper or Google Programmable Search. [web/README.md](web/README.md#every-claim-carries-a-citation)
+has the rules, the query schema, and what is deliberately *not* audited.
+
 It ingests video the same two ways the Swift pipeline does, for the same reasons. A
 **YouTube** link is handed to Gemini as a URL and Gemini watches it itself. A **TikTok**
 link can't be — Gemini won't fetch one — so `web/lib/tiktok.js` does what the model won't:

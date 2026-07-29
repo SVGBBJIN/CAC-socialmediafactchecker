@@ -91,7 +91,7 @@ function escapeHTML(text) {
  * and the only tags introduced afterwards are ones this function writes, so model
  * output cannot inject markup.
  */
-function renderMarkdown(text) {
+function renderMarkdown(text, sources) {
   // Odd segments are the insides of ``` fences; leave those untouched.
   const segments = text.split(/```/);
   return segments
@@ -107,11 +107,96 @@ function renderMarkdown(text) {
       let plain = segment;
       if (index > 0) plain = plain.replace(/^\n+/, "");
       if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
-      return escapeHTML(plain)
-        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+      return linkCitations(
+        escapeHTML(plain)
+          .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"),
+        sources,
+      );
     })
     .join("");
+}
+
+/**
+ * Turn `[3]` into a link to source 3.
+ *
+ * A marker the reader cannot follow is only marginally better than no marker: the whole
+ * point of the citation rule is that a claim can be checked, and "can be checked" means
+ * one click, not scrolling to a list and matching a number by eye. Markers with no
+ * matching source are left as plain text — the server-side audit is what stops those
+ * being written, and quietly linking one somewhere would hide the failure.
+ *
+ * Runs on already-escaped HTML and only ever inserts a URL that came from the server's
+ * ledger, escaped again here.
+ */
+function linkCitations(html, sources) {
+  if (!sources?.length) return html;
+  const byNumber = new Map(sources.map((s) => [String(s.n), s]));
+  return html.replace(/\[(\d+)\]/g, (match, number) => {
+    const source = byNumber.get(number);
+    if (!source) return match;
+    return `<a class="citation" href="${escapeHTML(source.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(source.title)}">[${number}]</a>`;
+  });
+}
+
+/** The searches that were run, as chips above the answer. */
+function searchListElement(searches) {
+  const wrap = document.createElement("div");
+  wrap.className = "searches";
+  for (const item of searches) {
+    const chip = document.createElement("div");
+    chip.className = item.error ? "search-chip failed" : "search-chip";
+    chip.textContent = item.error
+      ? `Search failed: ${item.query || "(invalid query)"} — ${item.error}`
+      : `Searched “${item.query}” · ${item.results.length} source${
+          item.results.length === 1 ? "" : "s"
+        }`;
+    if (item.claim) chip.title = `Checking: ${item.claim}`;
+    wrap.append(chip);
+  }
+  return wrap;
+}
+
+/**
+ * The bibliography, built by the server from what the search tool actually returned.
+ *
+ * Rendered from the ledger rather than from anything the model typed, which is what makes
+ * it trustworthy: a page that no search returned cannot appear in this list.
+ */
+function sourceListElement(sources) {
+  const wrap = document.createElement("div");
+  wrap.className = "sources";
+
+  const heading = document.createElement("div");
+  heading.className = "sources-heading";
+  heading.textContent = `Sources (${sources.length}) — retrieved by the app, not written by the model`;
+  wrap.append(heading);
+
+  const list = document.createElement("ol");
+  for (const source of sources) {
+    const item = document.createElement("li");
+    item.value = source.n;
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = source.title;
+    const domain = document.createElement("span");
+    domain.className = "source-domain";
+    domain.textContent = ` ${source.domain}`;
+    item.append(link, domain);
+    list.append(item);
+  }
+  wrap.append(list);
+  return wrap;
+}
+
+/** The banner an answer earns by failing the citation check twice. */
+function unverifiedElement(notice) {
+  const wrap = document.createElement("div");
+  wrap.className = "unverified";
+  wrap.textContent = notice.message;
+  return wrap;
 }
 
 /**
@@ -131,12 +216,19 @@ function messageElement(message, conversationId) {
   const body = document.createElement("div");
   body.className = "body";
   if (message.role === "assistant") {
-    body.innerHTML = renderMarkdown(message.content);
+    body.innerHTML = renderMarkdown(message.content, message.sources);
   } else {
     body.textContent = message.content;
   }
 
-  wrap.append(who, body);
+  wrap.append(who);
+  // The evidence trail is part of the message, so it is stored with it and re-rendered
+  // from history — an answer whose sources vanished on reload would be unauditable the
+  // moment the page refreshed.
+  if (message.searches?.length) wrap.append(searchListElement(message.searches));
+  wrap.append(body);
+  if (message.sources?.length) wrap.append(sourceListElement(message.sources));
+  if (message.unverified) wrap.append(unverifiedElement(message.unverified));
 
   // `retryable` distinguishes "Gemini is overloaded, try again" from "that request was
   // malformed and will fail identically" — retrying the latter just burns another round
@@ -352,6 +444,25 @@ async function streamAnswer(conversationId) {
   let answer = "";
   let failed = null;
   let retryable = false;
+  const searches = [];
+  let sources = [];
+  let unverified = null;
+
+  // Live containers for the evidence trail. Created up front and left empty so the
+  // ordering — searches, answer, sources, warning — is fixed by the DOM rather than by
+  // the order frames happen to arrive in.
+  let searchesEl = document.createElement("div");
+  searchesEl.className = "searches";
+  bubble.insertBefore(searchesEl, body);
+  let sourcesEl = document.createElement("div");
+  let noticeEl = document.createElement("div");
+  bubble.append(sourcesEl, noticeEl);
+
+  /** Swap a placeholder for freshly rendered content, keeping the handle pointing at it. */
+  const replace = (element, next) => {
+    element.replaceWith(next);
+    return next;
+  };
 
   // Re-parsing and re-rendering the whole answer on every delta is O(n) per token and
   // O(n^2) over a long reply, and it also blows away any text selection the reader had
@@ -365,7 +476,7 @@ async function streamAnswer(conversationId) {
     renderScheduled = true;
     requestAnimationFrame(() => {
       renderScheduled = false;
-      body.innerHTML = renderMarkdown(answer);
+      body.innerHTML = renderMarkdown(answer, sources);
       scrollToBottom();
     });
   }
@@ -434,6 +545,24 @@ async function streamAnswer(conversationId) {
         } else if (frame.type === "delta") {
           answer += frame.text;
           scheduleRender();
+        } else if (frame.type === "search") {
+          searches.push(frame);
+          searchesEl = replace(searchesEl, searchListElement(searches));
+          scrollToBottom();
+        } else if (frame.type === "reset") {
+          // The server rejected what it had written and is starting again. Clearing the
+          // bubble is the point: a failed answer must not be left on screen above its
+          // replacement, where a reader would take the two together as one.
+          answer = "";
+          body.innerHTML = "";
+        } else if (frame.type === "sources") {
+          sources = frame.sources;
+          sourcesEl = replace(sourcesEl, sourceListElement(sources));
+          // Re-render so the markers in the finished answer become links.
+          scheduleRender();
+        } else if (frame.type === "unverified") {
+          unverified = frame;
+          noticeEl = replace(noticeEl, unverifiedElement(frame));
         } else if (frame.type === "error") {
           // The server already classified this — a quota/5xx/timeout failure sets it,
           // a policy refusal or a malformed request doesn't.
@@ -447,7 +576,7 @@ async function streamAnswer(conversationId) {
   } finally {
     // Flushed synchronously rather than left to a pending rAF: the bubble has to show
     // the final `answer` the instant streaming stops, not up to one frame late.
-    body.innerHTML = renderMarkdown(answer);
+    body.innerHTML = renderMarkdown(answer, sources);
     body.classList.remove("caret");
     inFlight = null;
     setBusy(false);
@@ -459,7 +588,18 @@ async function streamAnswer(conversationId) {
   // the next render.
   const target = conversations.find((c) => c.id === conversationId);
   if (target) {
-    if (answer) target.messages.push({ role: "assistant", content: answer });
+    if (answer) {
+      // Stored alongside the text, so the answer keeps its evidence across a reload:
+      // `searches` is what was asked, `sources` is what came back and is what the
+      // markers in `content` point at, `unverified` is the label if it failed the check.
+      target.messages.push({
+        role: "assistant",
+        content: answer,
+        searches: searches.length ? searches : undefined,
+        sources: sources.length ? sources : undefined,
+        unverified: unverified ?? undefined,
+      });
+    }
     if (failed) target.messages.push({ role: "error", content: failed, retryable, restorePoint });
     persist();
   }

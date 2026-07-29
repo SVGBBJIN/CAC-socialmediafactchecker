@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import chatHandler from "./api/chat.js";
 import configHandler from "./api/config.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
+import { providerFromEnv } from "./lib/search.js";
+import { searchEnabled } from "./lib/verified-chat.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -77,6 +79,18 @@ const server = createServer(async (req, res) => {
   }
 });
 
+function describeSearch() {
+  if (!searchEnabled()) return "DISABLED (WEB_SEARCH_ENABLED=false) — answers will be uncited";
+  try {
+    const { name } = providerFromEnv();
+    return name === "duckduckgo"
+      ? "duckduckgo — keyless fallback, blocked often. Set a key: see web/.env.example"
+      : `${name} (key loaded)`;
+  } catch (error) {
+    return `misconfigured — ${error.message}`;
+  }
+}
+
 const port = Number(process.env.PORT) || 3000;
 const host = process.env.HOST || "127.0.0.1";
 
@@ -85,6 +99,11 @@ server.listen(port, host, () => {
   console.log(`  env file   ${loadedEnv.length ? loadedEnv.join(", ") : "none found"}`);
   console.log(`  API key    ${process.env.GEMINI_API_KEY ? "loaded" : "MISSING — see web/README.md"}`);
   console.log(
-    `  passphrase ${process.env.APP_PASSWORD ? "required" : "not set (fine on 127.0.0.1)"}\n`,
+    `  passphrase ${process.env.APP_PASSWORD ? "required" : "not set (fine on 127.0.0.1)"}`,
   );
+  // Printed because the failure it prevents is a silent one: a key under a name or a
+  // casing this app doesn't read leaves the app quietly on the keyless fallback, which
+  // then gets blocked, and every search fails for a reason that looks nothing like
+  // "your key wasn't picked up".
+  console.log(`  search     ${describeSearch()}\n`);
 });

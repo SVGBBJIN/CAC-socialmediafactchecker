@@ -99,13 +99,19 @@ web/
   public/          Front end — index.html, app.js, style.css. No key, ever.
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
-  lib/gemini.js    Gemini client + the model fallback chain + video attachment.
+  lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
+  lib/verified-chat.js  The fact-check turn: search tool, system prompt, citation audit.
+  lib/search.js    Query → search provider → normalised, openable sources.
+  lib/search-schema.js  JSON Schema for a query, and the Gemini tool declaration.
+  lib/citations.js The ledger, and the audit that decides if an answer may be shown.
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
+  bin/search.mjs   Run one search from the terminal, through the same code path.
   server.js        Local dev server. Mounts the same handlers Vercel runs.
   test.js          Unit tests. No network, no dependencies.
+  test-search.js   Tests for search, the schema, and the citation audit.
   test-ui.mjs      Browser tests for app.js. Opt-in — see below.
 ```
 
@@ -127,6 +133,85 @@ isn't installed.
 Flash 3.6, then 3.5, 3-preview, 2.5, 2.0 — and falls through on availability errors
 (404/403) only. Model IDs get retired and key tiers differ; pinning one ID breaks in the
 field. See the comments in the Swift file for the full reasoning.
+
+## Every claim carries a citation
+
+The assistant has one tool, `web_search`, and one rule enforced in code: **it may not
+assert a fact it did not retrieve.**
+
+The system prompt (`lib/verified-chat.js`) states plainly that everything factual the
+model says in a turn was found with that tool during that turn, that its training data is
+not a source and cannot be cited, and that every sentence carrying a verdict, a number, a
+date or an attribution must end with a marker — `[3]` — for a source it actually
+retrieved. Then the app checks, because a prompt is a request and this needs a guarantee:
+
+1. **The tool is the only door.** Each result comes back numbered by a ledger, and those
+   numbers are the entire set of citations the model is permitted to write.
+2. **The finished answer is audited** against that ledger before it is allowed to stand —
+   `lib/citations.js`. Three ways to fail: a checkable sentence with no marker, a marker
+   for a source that does not exist, and a URL no search returned.
+3. **A failed answer is withdrawn, not patched.** The model is told which sentences failed
+   and made to write the whole thing again; the browser is told to clear what it has shown
+   so a rejected answer never sits above its replacement. The repair prompt offers three
+   ways out and no others — cite it, search again, or delete the sentence.
+4. **If the rewrite fails too, the answer is shown carrying a warning.** Suppressing it
+   entirely would hide a failure the reader is better off seeing labelled.
+5. **The bibliography is rendered by the app, from the ledger.** The model is told not to
+   write one. A source list the model types is a source list it can invent; one built from
+   retrieved results cannot contain a page that was never fetched.
+
+What is *not* audited, deliberately: connective tissue ("here's what I found"), quoted
+descriptions of the claim under review — the video is the subject, not evidence — code
+blocks, and tables. Demanding a marker on those teaches the model to sprinkle citations
+where they mean nothing, which devalues the ones that carry weight.
+
+### Searching from the terminal
+
+The same validator, providers and numbering the model uses, without a browser or a chat:
+
+```bash
+npm run search -- --claim "Measles cases tripled in 2026" --query "measles cases 2026 CDC"
+npm run search -- --json '{"claim":"…","query":"…","site":"cdc.gov","freshness":"month"}'
+npm run search -- --schema          # the JSON Schema a query must satisfy
+npm run search -- --schema --tool   # the same thing as Gemini sees it
+```
+
+One implementation, so a citation that looks wrong in a chat answer can be reproduced
+exactly rather than approximately.
+
+### The query schema
+
+`lib/search-schema.js` holds one JSON Schema, converted into Gemini's function-declaration
+dialect for the model and enforced by a hand-written validator on the way back in. The
+model cannot invent an argument, ask for fifty results, or pass a URL where a domain
+belongs; a bad call comes back as a message it can act on rather than a silently corrected
+query. Fields: `query`, `claim`, `freshness`, `site`, `max_results`.
+
+`claim` is required, and that is the load-bearing decision. A fact-checker that searches
+for *topics* retrieves sources that are about the right subject and support nothing in
+particular. Naming the specific claim makes each search an act of verification and gives
+the ledger something to file each source against.
+
+### Which search engine
+
+Whichever one is configured — Brave, Tavily, Serper, or Google Programmable Search — with
+DuckDuckGo's HTML endpoint as a keyless fallback so the app works before any account
+exists. That fallback is best-effort and says so: DuckDuckGo answers a request it doesn't
+like with **HTTP 202 and its own homepage**, which is why the parser treats "no result
+markup" as an error rather than as an empty result. Telling the model a claim is
+unsupported when nothing was actually searched is the one failure this system cannot
+tolerate. Set a key before anyone relies on it — see `.env.example`.
+
+Key names are matched **case-insensitively**, so `Tavily_API_key` works as well as
+`TAVILY_API_KEY`. That is not tidiness: environment variables are case-sensitive, a key
+the app cannot see produces no error, and the resulting silent fall-through to DuckDuckGo
+looks like "search is broken" rather than "the key wasn't picked up". For the same reason
+`npm run dev` prints the provider it settled on at boot:
+
+```
+  search     tavily (key loaded)
+  search     duckduckgo — keyless fallback, blocked often. Set a key: see web/.env.example
+```
 
 ## What keeps a request bounded
 
@@ -155,6 +240,16 @@ field. See the comments in the Swift file for the full reasoning.
 - **An invalid key is terminal.** Gemini reports it as HTTP 400 / `API_KEY_INVALID`, not
   401 — so it is matched on the message, not the status, and never falls through to the
   next model with the same dead credential.
+- **At most four rounds of tool calls per message.** Each round is a model call plus its
+  searches, so the cap bounds latency and spend at once. Past it the tools are *withdrawn*
+  rather than refused — a model told not to use a tool it can still see will often try
+  anyway; a model with no tool declared answers with what it has.
+- **One repair round, not a loop.** An answer that fails the citation audit twice is
+  shown with a warning rather than regenerated again. Two failures are a signal that the
+  evidence isn't there, and a retry loop over an expensive call is a worse answer to that
+  than a labelled one.
+- **A 15s ceiling on each search**, independent of the Gemini timeouts. A hung search
+  otherwise holds the whole chat request open behind it.
 - **Replies are capped in tokens, not just requests in messages.** Every other cap in
   `guard.js` bounds input; `MAX_OUTPUT_TOKENS` (default 4096) bounds the one thing that
   wasn't bounded at all — a single reply could otherwise run until the model stopped on
@@ -164,6 +259,17 @@ field. See the comments in the Swift file for the full reasoning.
 
 ## Notes
 
+- **The model's turn is echoed back verbatim, signatures and all.** Thinking models
+  attach an opaque `thoughtSignature` to the parts they emit — `functionCall` parts
+  especially — and it has to travel back on the part it arrived on when that turn is
+  replayed. Rebuilding a call from its name and arguments drops it, and Gemini answers
+  that with a warning and worse tool use rather than an error: the model is asked to
+  continue reasoning whose thread it can no longer pick up. `ModelTurn` in `lib/gemini.js`
+  keeps parts in arrival order and merges two only when both are plain text with no
+  signature between them.
+- **Thinking summaries are echoed but not shown.** A `thought: true` part is the model's
+  working, not its answer; streaming it to the reader would put the model's musings in the
+  middle of a fact-check.
 - Conversations live in `localStorage`, per browser. Clearing site data clears them.
   Nothing is stored server-side.
 - Streaming uses SSE over `fetch`, not `EventSource`, because the request is a POST.
