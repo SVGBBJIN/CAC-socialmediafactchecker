@@ -198,8 +198,10 @@ export const WEB_SEARCH_TOOL = {
     "This is the only way you can learn anything about the world that is not in the " +
     "conversation itself, and every source you are allowed to cite comes from it: each " +
     "result is returned with a numbered citation marker, and only those numbers may " +
-    "appear in your answer. Call it once per claim, and again with a different query if " +
-    "the first results do not settle the claim.",
+    "appear in your answer. Call it once per claim, and issue every call you need in the " +
+    "same turn: calls made together are run at the same time and cost one wait between " +
+    "them all, while one call per turn makes the reader sit through each search in turn. " +
+    "Come back with a different query only for a claim the first results did not settle.",
   parameters: toGeminiSchema(SEARCH_QUERY_SCHEMA),
 };
 

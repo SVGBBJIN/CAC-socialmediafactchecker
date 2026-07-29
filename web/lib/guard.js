@@ -25,14 +25,27 @@ export function config(env = process.env) {
     maxTurns: positiveInt(env.MAX_TURNS, 20),
     // Every other cap here bounds *input*. Nothing bounded output — a single reply
     // could run until the model stopped on its own, and output tokens are the
-    // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`.
-    maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 4096),
+    // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`, which
+    // on a thinking model covers the reasoning as well as the reply — see the note on
+    // `DEFAULT_MAX_OUTPUT_TOKENS` for why that makes a small-looking number too small.
+    maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 16384),
+    // How much of that is reserved for reasoning, via Gemini's `thinkingConfig`, so the
+    // reasoning cannot itself consume the whole reply budget. 0 turns the field off
+    // entirely rather than asking Gemini to disable thinking, which not every model in
+    // the chain may accept — see `DEFAULT_THINKING_BUDGET_TOKENS` in lib/gemini.js.
+    thinkingBudgetTokens: nonNegativeInt(env.THINKING_BUDGET_TOKENS, 4096),
   };
 }
 
 function positiveInt(raw, fallback) {
   const value = Number.parseInt(raw ?? "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** Like `positiveInt`, but 0 is a real, meaningful value rather than "unset". */
+function nonNegativeInt(raw, fallback) {
+  const value = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 /** Compare without leaking the answer through how long the comparison took. */

@@ -95,6 +95,8 @@ export default async function handler(req, res) {
   // If the user hits Stop or closes the tab, stop paying for tokens nobody will read.
   res.on("close", () => controller.abort());
 
+  const started = Date.now();
+
   let lastWrite = Date.now();
   const send = (frame) => {
     if (res.writableEnded) return;
@@ -112,6 +114,12 @@ export default async function handler(req, res) {
   }, HEARTBEAT_MS);
   heartbeat.unref?.();
 
+  // Where the request got to, and when. Stages are the phases that produce no output, so
+  // they are also the phases a request dies in without leaving a trace — logging them is
+  // what turns "it just stopped" into a line in the host's runtime log naming the step and
+  // the second it stopped on.
+  const trace = (note) => console.log(`[chat] ${Math.round((Date.now() - started) / 1000)}s ${note}`);
+
   try {
     for await (const frame of verifiedChat({
       apiKey,
@@ -119,14 +127,25 @@ export default async function handler(req, res) {
       system: SYSTEM_PROMPT,
       models: modelChainFromEnv(),
       maxOutputTokens: limits.maxOutputTokens,
+      thinkingBudgetTokens: limits.thinkingBudgetTokens,
       // How close this client is to its daily cap. Near it, the chain starts one model
       // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
       // exactly as it was.
       budgetPressure: usage.pressure ?? 0,
       signal: controller.signal,
     })) {
+      if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
+      if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);
+      if (frame.type === "truncated" && frame.totalTokens != null) {
+        // What THINKING_BUDGET_TOKENS is a guess about, made concrete: if thinking is most
+        // of `totalTokens`, the budget still needs to come down (or the model needs a
+        // shorter question); if it's the answer, MAX_OUTPUT_TOKENS is the one to raise.
+        trace(`truncated: ${frame.thoughtsTokens} thinking + ${frame.answerTokens} answer = ${frame.totalTokens}`);
+      }
       send(frame);
     }
+
+    trace("done");
     send({ type: "done" });
   } catch (error) {
     if (controller.signal.aborted) return;

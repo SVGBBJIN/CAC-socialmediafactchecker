@@ -15,13 +15,23 @@ import {
   findYouTubeVideoIDs,
   isInvalidKeyFailure,
   isQuotaFailure,
+  isOverloadedFailure,
   isContextLimitFailure,
+  isUnsupportedThinkingConfig,
+  supportsThinkingBudget,
   retryAfterMs,
   REQUEST_TIMEOUT_MS,
   resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_THINKING_BUDGET_TOKENS,
 } from "./lib/gemini.js";
-import { ModelHealth, planChain, healthSnapshot, MAX_COOLDOWN_MS } from "./lib/degradation.js";
+import {
+  ModelHealth,
+  planChain,
+  healthSnapshot,
+  MAX_COOLDOWN_MS,
+  OVERLOAD_COOLDOWN_MS,
+} from "./lib/degradation.js";
 import {
   tikTokVideoID,
   isTikTokShortLink,
@@ -67,6 +77,18 @@ async function collect(iterator) {
   return out;
 }
 
+/**
+ * The frames that carry the answer, without the progress reports interleaved through them.
+ *
+ * `stage` frames say what the request is doing during the stretches where it produces no
+ * text — fetching a clip, waiting on a model, thinking. They can be emitted at any point
+ * and more of them is not a behaviour change, so tests about *what was answered* filter
+ * them out; the test that they are emitted at all is `progress is reported…` below.
+ */
+function answerFrames(frames) {
+  return frames.filter((f) => f.type !== "stage");
+}
+
 /* ---------------- Gemini client ---------------- */
 
 test("streams deltas in order and reports the model that answered", async () => {
@@ -79,8 +101,9 @@ test("streams deltas in order and reports the model that answered", async () => 
     }),
   );
 
+  const answer = answerFrames(frames);
   assert.deepEqual(
-    frames.map((f) => (f.type === "model" ? { type: f.type, model: f.model, degraded: f.degraded } : f)),
+    answer.map((f) => (f.type === "model" ? { type: f.type, model: f.model, degraded: f.degraded } : f)),
     [
       { type: "model", model: "gemini-3.6-flash", degraded: false },
       { type: "delta", text: "Hello" },
@@ -88,8 +111,8 @@ test("streams deltas in order and reports the model that answered", async () => 
     ],
   );
   // The preferred model answered, so the badge has nothing to warn about.
-  assert.deepEqual(frames[0].reason, null);
-  assert.equal(frames[0].label, "");
+  assert.deepEqual(answer[0].reason, null);
+  assert.equal(answer[0].label, "");
 });
 
 test("reassembles a frame split across two network chunks", async () => {
@@ -129,15 +152,16 @@ test("falls through a 404 model to the next in the chain", async () => {
     }),
   );
 
+  const answer = answerFrames(frames);
   assert.equal(tried.length, 2);
-  assert.equal(frames[0].type, "model");
-  assert.equal(frames[0].model, "gemini-2.0-flash");
+  assert.equal(answer[0].type, "model");
+  assert.equal(answer[0].model, "gemini-2.0-flash");
   // The frame carries why, not just what: the badge has to be able to say that the answer
   // came from the second model and that it wasn't the user's doing.
-  assert.equal(frames[0].degraded, true);
-  assert.equal(frames[0].preferred, "retired-model");
-  assert.equal(frames[0].reason, "unavailable");
-  assert.match(frames[0].note, /retired-model/);
+  assert.equal(answer[0].degraded, true);
+  assert.equal(answer[0].preferred, "retired-model");
+  assert.equal(answer[0].reason, "unavailable");
+  assert.match(answer[0].note, /retired-model/);
 });
 
 test("a bad key is terminal, not a reason to try four more models", async () => {
@@ -272,6 +296,32 @@ test("MAX_TOKENS keeps the text and says it was cut off; other finish reasons th
   );
 });
 
+test("a truncated answer reports where the tokens actually went, when Gemini says", async () => {
+  // What THINKING_BUDGET_TOKENS is a guess about, made checkable: this is the number that
+  // says whether a repeat truncation needs a smaller thinking budget or a bigger reply cap.
+  const withUsage = `data: ${JSON.stringify({
+    candidates: [{ content: { parts: [{ text: "cut off" }] }, finishReason: "MAX_TOKENS" }],
+    usageMetadata: { thoughtsTokenCount: 3000, candidatesTokenCount: 1096, totalTokenCount: 4096 },
+  })}\n\n`;
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([withUsage]),
+    }),
+  );
+
+  assert.deepEqual(frames.at(-1), {
+    type: "truncated",
+    reason: "max_output_tokens",
+    thoughtsTokens: 3000,
+    answerTokens: 1096,
+    totalTokens: 4096,
+  });
+});
+
 test("the API key travels as a header, never in the URL", async () => {
   let seen;
   await collect(
@@ -377,11 +427,21 @@ test("the token cap can be overridden per call", async () => {
 });
 
 test("MAX_OUTPUT_TOKENS from the environment feeds the guard config", () => {
-  assert.equal(guardConfig({}).maxOutputTokens, 4096);
+  assert.equal(guardConfig({}).maxOutputTokens, 16384);
   assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "256" }).maxOutputTokens, 256);
   // Garbage falls back to the default rather than producing NaN and disabling the cap.
-  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 4096);
-  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 4096);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 16384);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 16384);
+});
+
+test("THINKING_BUDGET_TOKENS from the environment feeds the guard config", () => {
+  assert.equal(guardConfig({}).thinkingBudgetTokens, 4096);
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "1024" }).thinkingBudgetTokens, 1024);
+  // Unlike the other caps, 0 is a real value here — it turns the field off rather than
+  // being treated as "unset" and falling back to the default.
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "0" }).thinkingBudgetTokens, 0);
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "not a number" }).thinkingBudgetTokens, 4096);
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "-5" }).thinkingBudgetTokens, 4096);
 });
 
 test("a video is attached once, at its first mention, not on every turn", () => {
@@ -570,6 +630,94 @@ test("fall-through rules", () => {
   // A broken credential must never be spent down the chain, whichever status carries it.
   assert.equal(shouldFallThrough(400, "API key not valid. Pass a valid API key."), false);
   assert.equal(shouldFallThrough(403, "API_KEY_INVALID"), false);
+  // A guess about which models accept thinkingConfig costs a fall-through when wrong,
+  // not the whole chain.
+  assert.equal(shouldFallThrough(400, 'Unknown name "thinkingConfig" at generation_config'), true);
+});
+
+test("thinking budget is offered to the models that should support it, not to 2.0", () => {
+  assert.equal(supportsThinkingBudget("gemini-3.6-flash"), true);
+  assert.equal(supportsThinkingBudget("gemini-3.5-flash"), true);
+  assert.equal(supportsThinkingBudget("gemini-3-flash-preview"), true);
+  assert.equal(supportsThinkingBudget("gemini-2.5-flash"), true);
+  assert.equal(supportsThinkingBudget("gemini-2.0-flash"), false);
+});
+
+test("an unknown thinkingConfig field is recognised however Gemini phrases it", () => {
+  assert.equal(isUnsupportedThinkingConfig(400, 'Unknown name "thinkingConfig"'), true);
+  assert.equal(isUnsupportedThinkingConfig(400, "thinking_config is not a valid field"), true);
+  assert.equal(isUnsupportedThinkingConfig(400, "malformed request"), false);
+  assert.equal(isUnsupportedThinkingConfig(404, "thinkingConfig"), false);
+});
+
+test("the reasoning budget is capped separately from the reply, and only for models that take it", async () => {
+  const sent = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      // One model that should get the field, one that shouldn't.
+      models: ["gemini-3.6-flash", "gemini-2.0-flash"],
+      thinkingBudgetTokens: 4096,
+      fetchImpl: async (url, options) => {
+        sent.push(JSON.parse(options.body));
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  assert.equal(sent.length, 1, "the preferred model answered; the second was never called");
+  assert.deepEqual(sent[0].generationConfig.thinkingConfig, { thinkingBudget: 4096 });
+  assert.equal(answerFrames(frames).at(-1).text, "ok");
+});
+
+test("thinkingBudgetTokens: 0 turns the field off rather than sending a zero budget", async () => {
+  let sent;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      thinkingBudgetTokens: 0,
+      fetchImpl: async (url, options) => {
+        sent = JSON.parse(options.body);
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+  assert.ok(!("thinkingConfig" in sent.generationConfig));
+});
+
+test("a model that rejects thinkingConfig outright is skipped, not fatal", async () => {
+  // The defensive fallback for `supportsThinkingBudget` guessing wrong about a given
+  // model: this app has no live confirmation either way, so a bad guess must degrade to
+  // the next model in the chain rather than take the whole turn down.
+  const tried = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      thinkingBudgetTokens: 4096,
+      fetchImpl: async (url) => {
+        tried.push(url);
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () =>
+              JSON.stringify({
+                error: { message: 'Invalid JSON payload: Unknown name "thinkingConfig" at generation_config' },
+              }),
+          };
+        }
+        return sseResponse([frame("answered anyway")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2);
+  assert.equal(answerFrames(frames).at(-1).text, "answered anyway");
 });
 
 test("quota and context failures are told apart from ordinary bad requests", () => {
@@ -654,10 +802,11 @@ test("what one request learns about a quota, the next one acts on before sending
 
   // The whole point: the exhausted model is not contacted at all. Re-learning the same
   // 429 on every request for a minute is a round trip per request that buys nothing.
+  const answer = answerFrames(frames);
   assert.equal(tried.length, 1);
   assert.match(tried[0], /gemini-3\.5-flash/);
-  assert.equal(frames[0].degraded, true);
-  assert.equal(frames[0].reason, "quota");
+  assert.equal(answer[0].degraded, true);
+  assert.equal(answer[0].reason, "quota");
 });
 
 test("a cooldown expires on its own, and a model that answers is marked healthy again", () => {
@@ -1315,7 +1464,7 @@ test("streamChat attaches the clip and cleans up its upload when the answer is d
   assert.deepEqual(deleted, ["files/xyz"]);
 });
 
-test("attachTikTok: false leaves a link as plain text and fetches nothing", async () => {
+test("attachMedia: false leaves a link as plain text and fetches nothing", async () => {
   let sentBody;
   const fetchImpl = async (url, init) => {
     sentBody = JSON.parse(init.body);
@@ -1328,7 +1477,7 @@ test("attachTikTok: false leaves a link as plain text and fetches nothing", asyn
       messages: [{ role: "user", content: SOURCE_URL }],
       models: ["gemini-3.6-flash"],
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
     }),
   );
 
@@ -1389,4 +1538,197 @@ test("an upload that never returns a session URL fails loudly", async () => {
     uploadFile(Buffer.alloc(4), "video/mp4", { apiKey: "k", fetchImpl, sleep: async () => {} }),
     /did not return an upload URL/,
   );
+});
+
+test("progress is reported through the stretches that produce no text", async () => {
+  // The gap before the first token is the longest silence in the app — on a video it is
+  // most of the request. Unreported, an empty bubble is indistinguishable from a dead one,
+  // which is the whole complaint these frames exist to answer.
+  const thinking = `data: ${JSON.stringify({
+    candidates: [{ content: { parts: [{ text: "hmm", thought: true }] } }],
+  })}\n\n`;
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl: async () => sseResponse([thinking, frame("the answer")]),
+    }),
+  );
+
+  const stages = frames.filter((f) => f.type === "stage");
+  assert.deepEqual(stages.map((s) => s.stage), ["waiting", "thinking"]);
+  // Reported before the request goes out, not after it comes back.
+  assert.ok(frames.indexOf(stages[0]) < frames.findIndex((f) => f.type === "model"));
+  assert.equal(stages[0].model, "gemini-3.6-flash");
+  assert.equal(stages[0].media, false);
+
+  // The thinking is announced but never shown: a model's musings mid-fact-check read as
+  // findings, so the reader gets the fact of it and not the content.
+  assert.deepEqual(
+    frames.filter((f) => f.type === "delta").map((f) => f.text),
+    ["the answer"],
+  );
+});
+
+test("a video says so, so the wait can be named as watching rather than thinking", async () => {
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check https://www.youtube.com/watch?v=dQw4w9WgXcQ" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([frame("ok")]),
+    }),
+  );
+
+  const waiting = frames.find((f) => f.type === "stage" && f.stage === "waiting");
+  assert.equal(waiting.media, true);
+});
+
+test("a rewrite does not make Gemini watch the video a second time", async () => {
+  // The repair round is a rewrite of an answer the model can already see. Re-attaching the
+  // video makes Gemini fetch and watch the whole thing again to fix a citation — tens of
+  // seconds, on precisely the requests that are already close to their deadline. The
+  // TikTok path was guarded against this; the YouTube one was not, because the attachment
+  // happens here rather than in the fetching code.
+  const messages = [
+    { role: "user", content: "check https://youtu.be/dQw4w9WgXcQ" },
+    { role: "assistant", content: "The clip claims a thing." },
+    { role: "user", content: "rewrite that with citations" },
+  ];
+
+  const watched = toGeminiContents(messages);
+  assert.equal(watched[0].parts[0].file_data.file_uri, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+  const reread = toGeminiContents(messages, { attachVideos: false });
+  assert.ok(
+    !JSON.stringify(reread).includes("file_data"),
+    "no round after the first may re-send the video",
+  );
+  // Not silently dropped: a model that thinks the clip went missing says so instead of
+  // answering, which is worse than the cost this avoids.
+  assert.match(reread[0].parts.at(-1).text, /watched earlier in this turn/);
+});
+
+/* ---------------- overloaded upstream ---------------- */
+
+test("503 is told apart from an outage, and from a bad request", () => {
+  assert.equal(isOverloadedFailure(503, "The model is overloaded. Please try again later."), true);
+  assert.equal(isOverloadedFailure(503, ""), true);
+  // A 500 counts only when it says so; a bare one is an outage, and walking the chain
+  // through an outage adds four failed requests to a service already in trouble.
+  assert.equal(isOverloadedFailure(500, "The model is overloaded"), true);
+  assert.equal(isOverloadedFailure(500, "Internal error encountered"), false);
+  assert.equal(isOverloadedFailure(429, "quota"), false);
+  assert.equal(isOverloadedFailure(400, "bad request"), false);
+
+  // Capacity is per model, so a full model is a reason to try the next one — not to fail
+  // the request while the rest of the chain goes untried.
+  assert.equal(shouldFallThrough(503, "The model is overloaded"), true);
+  assert.equal(shouldFallThrough(500, "Internal error encountered"), false);
+});
+
+test("an overloaded model hands the answer to the next one in the chain", async () => {
+  const health = new ModelHealth();
+  const tried = [];
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      health,
+      fetchImpl: async (url) => {
+        tried.push(decodeURIComponent(url));
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 503,
+            text: async () => JSON.stringify({ error: { message: "The model is overloaded." } }),
+          };
+        }
+        return sseResponse([frame("answered anyway")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2);
+  assert.equal(answerFrames(frames).at(-1).text, "answered anyway");
+
+  const announced = answerFrames(frames).find((f) => f.type === "model");
+  assert.equal(announced.model, "gemini-3.5-flash");
+  assert.equal(announced.reason, "overloaded");
+  assert.equal(announced.label, "busy");
+  // The note has to say whose problem it is: a reader who thinks they broke something
+  // goes looking at their key for a condition they had no part in.
+  assert.match(announced.note, /Nothing is wrong with your key/);
+
+  // And the busy model is remembered, briefly — long enough to skip on the next request,
+  // short enough not to keep answering on a worse model after capacity came back.
+  const cooled = health.status("gemini-3.6-flash");
+  assert.equal(cooled.reason, "overloaded");
+  assert.ok(cooled.remainingMs <= OVERLOAD_COOLDOWN_MS);
+});
+
+test("every model full is waited out once, then reported as Google's capacity", async () => {
+  const waits = [];
+  let attempts = 0;
+
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b"],
+        health: new ModelHealth(),
+        overloadSweeps: 2,
+        sleep: async (ms) => waits.push(ms),
+        fetchImpl: async () => {
+          attempts += 1;
+          return {
+            ok: false,
+            status: 503,
+            text: async () => JSON.stringify({ error: { message: "The model is overloaded." } }),
+          };
+        },
+      }),
+    ),
+    (error) => {
+      // The message names the condition and who owns it, rather than reading as a fault in
+      // this app — which is what "Gemini is having trouble (HTTP 503)" read as.
+      assert.match(error.message, /Every Gemini model is busy/);
+      assert.match(error.message, /Nothing is wrong with your key/);
+      assert.equal(error.retryable, true);
+      return true;
+    },
+  );
+
+  // Three passes over two models, with a short doubling wait between them.
+  assert.equal(attempts, 6);
+  assert.deepEqual(waits, [800, 1600]);
+});
+
+test("a chain that fails some other way is not waited out", async () => {
+  // Waiting only pays when the condition is capacity. A 404 will still be a 404 in two
+  // seconds, and the wait is time taken from a user who is owed the error now.
+  const waits = [];
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b"],
+        health: new ModelHealth(),
+        sleep: async (ms) => waits.push(ms),
+        fetchImpl: async (url) => ({
+          ok: false,
+          status: decodeURIComponent(url).includes("/a:") ? 503 : 404,
+          text: async () => JSON.stringify({ error: { message: "nope" } }),
+        }),
+      }),
+    ),
+    /./,
+  );
+  assert.deepEqual(waits, [], "a mixed failure is not a capacity spike");
 });

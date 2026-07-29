@@ -19,6 +19,7 @@ import {
   describeDegradation,
   REASONS,
   MAX_COOLDOWN_MS,
+  OVERLOAD_COOLDOWN_MS,
 } from "./degradation.js";
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -51,8 +52,52 @@ export const REQUEST_TIMEOUT_MS = 0;
  * Default ceiling on a single reply, in tokens. Applied even when the caller doesn't
  * pass one explicitly — a spend cap that has to be opted out of is a spend cap that
  * eventually gets forgotten. `web/api/chat.js` overrides this from `MAX_OUTPUT_TOKENS`.
+ *
+ * Raised from 4096, which was set as "far more prose than a fact-check needs" and was
+ * right about the prose and wrong about the budget. On a thinking model this cap covers
+ * the *whole* output, thinking included, and the models at the head of the chain think
+ * before they search and again before they answer. So the answer gets whatever the
+ * reasoning left it, and a fact-check that reads as three paragraphs can run into a cap
+ * sized for ten — which arrives as a verdict cut off mid-sentence, right where the
+ * citation would have gone.
+ *
+ * Raising this alone only raises the ceiling both draws from — a model that thinks more
+ * just spends the increase on thinking. `DEFAULT_THINKING_BUDGET_TOKENS` below is what
+ * actually reserves room for the answer; this cap is the outer bound on the two combined.
  */
-export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
+/**
+ * How many of those tokens a thinking model may spend on its internal reasoning per model
+ * call, via Gemini's `generationConfig.thinkingConfig.thinkingBudget`.
+ *
+ * This is the actual fix for a fact-check truncated mid-verdict, and raising
+ * `maxOutputTokens` alone is not: without it, the visible answer and the invisible
+ * reasoning draw from one shared pool, a model that thinks longer simply leaves less for
+ * the answer, and a bigger pool just moves where that runs out. Capping the reasoning
+ * specifically reserves the rest — `maxOutputTokens - thinkingBudgetTokens`, as a floor —
+ * for what the reader actually sees.
+ *
+ * Sent only to models known to support it (`supportsThinkingBudget`); the field does not
+ * exist on `gemini-2.0-flash`, and Gemini rejects an unrecognised name outright rather
+ * than ignoring it. Not verified against a live thinking-capable response as of writing —
+ * `isUnsupportedThinkingConfig` below exists as the fallback if that guess about which
+ * models accept the field turns out wrong, so a bad guess degrades to the next model in
+ * the chain rather than to a broken turn.
+ */
+export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
+
+/**
+ * Whether `model` is expected to accept `thinkingConfig.thinkingBudget`.
+ *
+ * The chain's thinking models are the "3" series and 2.5; "2.0" predates extended
+ * thinking and does not have a budget to cap. Matched on the version number rather than
+ * listed by name so a new preview ID slots in without a code change — the same reasoning
+ * `DEFAULT_MODEL_CHAIN` documents for not pinning IDs.
+ */
+export function supportsThinkingBudget(model) {
+  return !/(?:^|[^0-9])2\.0(?:[^0-9]|$)/.test(String(model));
+}
 
 /** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
 export const DEFAULT_MODEL_CHAIN = [
@@ -97,8 +142,17 @@ export class GeminiError extends Error {
  *   while four models that would have answered went untried.
  * - A request too large for this model's context window: fall through, then give up on
  *   the chain with a message that says so. See `isContextLimitFailure`.
- * - Everything else (401/`API_KEY_INVALID`, 5xx) is terminal here — falling through would
- *   spend the same broken credential four more times, or hammer an outage.
+ * - 503, or a 500 that says the model is overloaded: fall through. Capacity in Gemini is
+ *   **per model**, the same way quota is — `gemini-3.6-flash` being full at this instant
+ *   says nothing about whether `gemini-3.5-flash` has room, and the newest and most
+ *   popular model in the chain is precisely the one most likely to be full. Treating it as
+ *   terminal, as this used to, meant the single most common transient upstream failure
+ *   killed the request outright while four models that would have answered went untried.
+ * - A 400 naming `thinkingConfig` as unknown: fall through. `supportsThinkingBudget` is a
+ *   guess about which models accept the field, made without a live response to check it
+ *   against — this is what a wrong guess costs instead of costing the whole chain.
+ * - Everything else (401/`API_KEY_INVALID`, other 5xx) is terminal here — falling through
+ *   would spend the same broken credential four more times, or hammer a genuine outage.
  */
 export function shouldFallThrough(status, message = "") {
   // Checked before anything else: a bad key arrives as a 400 or 403 (see
@@ -106,7 +160,9 @@ export function shouldFallThrough(status, message = "") {
   if (isInvalidKeyFailure(status, message)) return false;
   if (status === 404 || status === 403) return true;
   if (isQuotaFailure(status, message)) return true;
+  if (isOverloadedFailure(status, message)) return true;
   if (isContextLimitFailure(status, message)) return true;
+  if (isUnsupportedThinkingConfig(status, message)) return true;
   if (status !== 400) return false;
   const lowered = message.toLowerCase();
   return (
@@ -130,6 +186,40 @@ export function isQuotaFailure(status, message = "") {
   if (status === 429) return true;
   if (status !== 400 && status !== 403) return false;
   return /quota|rate[\s_-]?limit|resource[\s_-]?exhausted/i.test(message);
+}
+
+/**
+ * Whether a failure means "this model has no capacity right this second".
+ *
+ * 503 is the documented status and the one that reaches users as *Gemini is having trouble
+ * (HTTP 503)*. A 500 counts too when the body says overloaded — Gemini's own guidance for
+ * `INTERNAL` is to retry or try a different model, which is the same remedy.
+ *
+ * Kept separate from `isQuotaFailure` even though both fall through the chain, because the
+ * two want different cooldowns and say different things to the user. Quota is an allowance
+ * that ran out and may take a minute to refresh; overload is Google's capacity at this
+ * instant, usually clears in seconds, and is emphatically not something the operator did.
+ *
+ * A plain 500 with no such wording is *not* included: that is an outage, and walking the
+ * whole chain through one adds four failed requests to a service already in trouble.
+ */
+export function isOverloadedFailure(status, message = "") {
+  if (status === 503) return true;
+  if (status !== 500) return false;
+  return /overload|unavailable|try again|capacity|busy/i.test(message);
+}
+
+/**
+ * Whether a 400 is Gemini refusing `thinkingConfig` as a field it doesn't recognise.
+ *
+ * The safety net for `supportsThinkingBudget` guessing wrong. Gemini's protobuf-JSON
+ * parser rejects an unknown field name outright ("Unknown name \"thinkingConfig\" ...")
+ * rather than ignoring it, so a model this app believes supports thinking but doesn't
+ * would otherwise fail the whole chain over one optional parameter.
+ */
+export function isUnsupportedThinkingConfig(status, message = "") {
+  if (status !== 400) return false;
+  return /thinking[_ ]?config/i.test(message);
 }
 
 /**
@@ -238,6 +328,18 @@ function describeFailure(status, message, model) {
       model,
       retryable: true,
     });
+  }
+  // Reached only once every model in the chain has been full, and after the retry sweep —
+  // so the wording is about all of them, and about it not being the reader's doing. The
+  // old text ("Gemini is having trouble") described the same state as a fault, which sent
+  // people looking at their key and their code for a condition neither one caused.
+  if (isOverloadedFailure(status, message)) {
+    const error = new GeminiError(
+      "Every Gemini model is busy right now — Google is turning requests away, which usually clears within a minute. Nothing is wrong with your key or this app. Try again shortly.",
+      { status: 503, model, retryable: true },
+    );
+    error.overloaded = true;
+    return error;
   }
   if (status >= 500) {
     return new GeminiError(`Gemini is having trouble (HTTP ${status}). Try again shortly.`, {
@@ -484,7 +586,7 @@ function describeClip(resolved) {
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
  */
-export function toGeminiContents(messages, { tikTok } = {}) {
+export function toGeminiContents(messages, { tikTok, attachVideos = true } = {}) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
   const clips = tikTok?.attachments ?? new Map();
@@ -499,6 +601,19 @@ export function toGeminiContents(messages, { tikTok } = {}) {
       for (const id of findYouTubeVideoIDs(text)) {
         if (attachedVideos.has(id)) continue;
         attachedVideos.add(id);
+        // `attachVideos: false` is the repair round, which is a rewrite of an answer the
+        // model can already see. Re-attaching would make Gemini fetch and watch the whole
+        // video a second time to correct a citation — tens of seconds, and the single
+        // largest avoidable cost in a turn, since the round is billed and timed like the
+        // first one for no new information. The note replaces it so the model knows the
+        // clip is not missing, only already seen.
+        if (!attachVideos) {
+          notes.push(
+            `[The video at ${canonicalYouTubeURL(id)} was watched earlier in this turn. ` +
+              `Work from what you already wrote about it.]`,
+          );
+          continue;
+        }
         parts.push({ file_data: { file_uri: canonicalYouTubeURL(id) } });
       }
 
@@ -643,7 +758,23 @@ function* framesFromLine(line) {
   // frequently the one carrying the citation. Announced so the turn can be labelled
   // instead of quietly shipped as whole.
   if (finish === "MAX_TOKENS") {
-    yield { type: "truncated", reason: "max_output_tokens" };
+    // Gemini reports where the tokens actually went on the frame that carries the finish
+    // reason — `thoughtsTokenCount` against `candidatesTokenCount` is the real breakdown
+    // between reasoning and the visible reply, in place of guessing at one from outside.
+    // Worth keeping precisely because `thinkingBudgetTokens` is a guess about how the two
+    // trade off; this is how that guess gets checked against what actually happened.
+    const usage = frame?.usageMetadata;
+    yield {
+      type: "truncated",
+      reason: "max_output_tokens",
+      ...(usage
+        ? {
+            thoughtsTokens: usage.thoughtsTokenCount ?? 0,
+            answerTokens: usage.candidatesTokenCount ?? 0,
+            totalTokens: usage.totalTokenCount ?? null,
+          }
+        : {}),
+    };
     return;
   }
   if (finish && finish !== "STOP") {
@@ -680,13 +811,42 @@ async function* parseSSE(body, deadline, idleTimeoutMs) {
 /**
  * How many rounds of tool calls one message may take before the model is made to answer.
  *
- * Each round is a full model call plus however many searches it asked for, so this is a
- * latency and a spend ceiling at once. Four is enough for a multi-claim video — one search
- * per claim, plus a follow-up when the first query lands badly — and short of the loop a
- * model can otherwise fall into, re-searching the same claim because it doesn't like the
- * answer.
+ * A *round* is one model call plus every tool call it asked for in that call. The searches
+ * within a round run at once, so a round costs about one search, not one per claim — which
+ * is what makes three rounds enough for a multi-claim video: everything worth looking up in
+ * the first, a follow-up for the queries that landed badly in the second, the answer in the
+ * third. The ceiling is on rounds rather than searches because rounds are what costs time:
+ * each one re-sends the whole conversation, video included, and waits for a model that has
+ * to read it again before it can say anything.
  */
-export const MAX_TOOL_ROUNDS = 4;
+export const MAX_TOOL_ROUNDS = 3;
+
+/**
+ * What the model is told when its tool budget is spent and it asked to search anyway.
+ *
+ * Withdrawing the declaration is usually enough — see the note at the call site — but
+ * "usually" leaves a turn that ends with a tool call nobody will run and no answer in it,
+ * which reaches the reader as sources with nothing underneath them. So the request is made
+ * explicitly, in the conversation, where the model cannot miss it.
+ */
+const ANSWER_NOW =
+  "You have used your search budget for this turn and the web_search tool is no longer " +
+  "available. Do not ask for it again. Write your answer now, using only the sources " +
+  "already retrieved above, and say plainly which parts you could not check.";
+
+/**
+ * Extra passes down the chain when every model in it was full, and the first wait between
+ * them (doubling after that: 0.8s, then 1.6s).
+ *
+ * Two is chosen against the shape of the failure rather than by taste. A 503 sweep that
+ * finds *every* model full is usually a capacity spike measured in seconds, so a couple of
+ * short waits catches most of them; past that it is an outage, and more passes add failed
+ * requests to a service already struggling while the user waits for a worse outcome. The
+ * cost of getting it wrong is bounded — about 2.4 seconds — and it is only spent when the
+ * alternative was failing the request outright.
+ */
+export const OVERLOAD_SWEEPS = 2;
+export const OVERLOAD_BACKOFF_MS = 800;
 
 /**
  * The model's own turn, reassembled from the stream so it can be sent back verbatim.
@@ -737,6 +897,17 @@ class ModelTurn {
   parts() {
     return this._parts.filter((part) => part.functionCall || part.text || part.thoughtSignature);
   }
+
+  /**
+   * The same, minus the tool calls — what the turn *said*, without what it asked for.
+   *
+   * Used for the one round where the calls are deliberately not run: replaying a
+   * `functionCall` into a request that declares no tools invites a 400, and a call nobody
+   * answered would sit in the history as a question the model is still waiting on.
+   */
+  spokenParts() {
+    return this.parts().filter((part) => !part.functionCall);
+  }
 }
 
 /**
@@ -752,6 +923,10 @@ class ModelTurn {
  * `toolRunner(call, {signal})` returns `{response, frame}` — `response` goes back to the
  * model as the `functionResponse` payload, and `frame`, if present, is yielded to the
  * consumer so the UI can show what was searched.
+ *
+ * Every call a round asks for is dispatched at once and awaited in call order, and the
+ * round announces itself first with `{type: "tool_start", calls}` so the consumer can show
+ * what is in flight rather than only what has landed.
  */
 export async function* streamChat({
   apiKey,
@@ -760,17 +935,23 @@ export async function* streamChat({
   models = DEFAULT_MODEL_CHAIN,
   temperature = 0.7,
   maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+  // 0 or null opts out — sent as "don't include the field" rather than "thinkingBudget: 0",
+  // since 0 has its own meaning to Gemini (disable thinking) that not every model may
+  // accept, and this app has no live confirmation either way.
+  thinkingBudgetTokens = DEFAULT_THINKING_BUDGET_TOKENS,
   signal,
   fetchImpl = fetch,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS,
-  attachTikTok = true,
+  attachMedia = true,
   tikTokOptions = {},
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
   health = modelHealth,
   budgetPressure = 0,
+  overloadSweeps = OVERLOAD_SWEEPS,
+  sleep,
 }) {
   const deadline = new StreamDeadline(signal);
   let tikTok = null;
@@ -779,7 +960,14 @@ export async function* streamChat({
     // TikTok clips are fetched before the first model call, not per model: the bytes are
     // the same whichever model answers, and re-downloading them on each fall-through
     // would turn one slow link into four.
-    if (attachTikTok) {
+    if (attachMedia) {
+      // Announced before it starts, because it is the longest silence in the request and
+      // the one the user has least reason to expect: resolving an embed, downloading a
+      // clip and uploading it can run for tens of seconds before a single token exists to
+      // show for it. Unreported, that is indistinguishable from the app having hung.
+      if (messages.some((m) => m?.role !== "assistant" && findTikTokLinks(String(m?.content ?? "")).length > 0)) {
+        yield { type: "stage", stage: "attaching" };
+      }
       tikTok = await resolveTikTokParts(messages, {
         apiKey,
         fetchImpl,
@@ -789,9 +977,18 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { tikTok });
+    const contents = toGeminiContents(messages, { tikTok, attachVideos: attachMedia });
+    // Whether the model has a video to watch. It changes what the wait *is* — Gemini
+    // fetching and watching a clip before its first token is a different thing to report
+    // than a model composing a sentence — and the reader is owed the difference.
+    const media = contents.some((turn) =>
+      turn.parts.some((part) => part.file_data || part.inline_data),
+    );
     const useTools = Boolean(tools?.length && toolRunner);
     let announced = null;
+    // Whether the model has already been told, in so many words, that its tools are gone.
+    // Once is a nudge; twice would be a loop, and a loop here is unbounded model calls.
+    let nudged = false;
 
     for (let round = 0; ; round += 1) {
       const requestBody = {
@@ -810,10 +1007,12 @@ export async function* streamChat({
       // Past the budget the tools are withdrawn rather than merely refused. A model handed
       // a tool it is told not to use will often try anyway; a model with no tool declared
       // answers with what it has, which is the outcome the budget exists to force.
-      if (useTools && round < maxToolRounds) requestBody.tools = tools;
+      const toolsThisRound = useTools && round < maxToolRounds;
+      if (toolsThisRound) requestBody.tools = tools;
 
       const calls = [];
       const turn = new ModelTurn();
+      let thinkingAnnounced = false;
 
       for await (const frame of streamRound({
         requestBody,
@@ -825,6 +1024,13 @@ export async function* streamChat({
         idleTimeoutMs,
         health,
         budgetPressure,
+        round,
+        media,
+        thinkingBudgetTokens,
+        overloadSweeps,
+        // Only forwarded when the caller supplied one, so `streamRound` keeps its own
+        // default rather than being handed `undefined` and losing it.
+        ...(sleep ? { sleep } : {}),
       })) {
         if (frame.type === "function_call") {
           calls.push(frame.call);
@@ -843,8 +1049,18 @@ export async function* streamChat({
         }
         if (frame.type === "delta") {
           turn.addText(frame.text, frame.signature, frame.thought);
-          // A thinking summary is part of the turn but not part of the answer.
-          if (frame.thought || frame.text.length === 0) continue;
+          // A thinking summary is part of the turn but not part of the answer — it is
+          // withheld rather than shown, since the model's musings in the middle of a
+          // fact-check read as findings. But withholding it silently means a model that
+          // thinks for thirty seconds before its first search looks like a model doing
+          // nothing, so the *fact* of it is reported even though the content is not.
+          if (frame.thought || frame.text.length === 0) {
+            if (frame.thought && !thinkingAnnounced) {
+              thinkingAnnounced = true;
+              yield { type: "stage", stage: "thinking", round };
+            }
+            continue;
+          }
         }
         yield frame;
       }
@@ -854,11 +1070,43 @@ export async function* streamChat({
       if (calls.length === 0 || !useTools) return;
       if (deadline.callerAborted) return;
 
+      // The budget is spent, the declaration was withdrawn, and the model asked anyway.
+      // Running the call would restart a loop that has no ceiling of its own — every round
+      // past this one is a further model call the user is waiting through, and the turn
+      // ends with searches and no answer. So the calls are dropped, the request is put in
+      // words once, and if that round asks again the turn ends with whatever it has.
+      if (!toolsThisRound) {
+        if (nudged) return;
+        nudged = true;
+        const spoken = turn.spokenParts();
+        if (spoken.length > 0) contents.push({ role: "model", parts: spoken });
+        contents.push({ role: "user", parts: [{ text: ANSWER_NOW }] });
+        continue;
+      }
+
       contents.push({ role: "model", parts: turn.parts() });
 
+      // The searches a round asked for are announced before any of them has finished, so
+      // the UI can say what is being looked up while it is being looked up rather than
+      // after. Without this the reader watches a blank screen for the length of the
+      // slowest search and then sees every chip appear at once.
+      yield { type: "tool_start", calls: calls.map(({ name, args }) => ({ name, args })) };
+
+      // Dispatched together, not one after another. The model is told it may ask for every
+      // search it needs in a single round precisely so they can overlap here: four claims
+      // now cost one search's worth of waiting rather than four. Results are still consumed
+      // in call order, so the numbering in the ledger doesn't depend on which search won.
+      const running = calls.map((call) => {
+        const pending = Promise.resolve(toolRunner(call, { signal }));
+        // A sibling failing first must not turn the rest of the round into unhandled
+        // rejections; the real handling is the `await` below, which still throws.
+        pending.catch(() => {});
+        return pending;
+      });
+
       const responseParts = [];
-      for (const call of calls) {
-        const { response, frame } = await toolRunner(call, { signal });
+      for (const [index, call] of calls.entries()) {
+        const { response, frame } = await running[index];
         if (frame) yield frame;
         responseParts.push({ functionResponse: { name: call.name, response } });
       }
@@ -897,10 +1145,53 @@ async function* streamRound({
   idleTimeoutMs,
   health,
   budgetPressure,
+  round = 0,
+  media = false,
+  thinkingBudgetTokens = 0,
+  overloadSweeps = OVERLOAD_SWEEPS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   let lastError = null;
+  // Set by `walkChain` so the loop below can tell its three endings apart: a model
+  // answered, the caller went away, or the chain ran out.
+  let answered = false;
+  let abandoned = false;
+  // Whether the pass that just finished found *every* model full, as opposed to hitting
+  // some other failure. Only the first is worth waiting on.
+  let allFull = false;
 
+  // Finding every model full is a real state and usually a brief one: it is Google's
+  // capacity in this second, not a fact about the key or the request. So the remedy is to
+  // wait a moment and ask again, which is what the user would do by hand and what the old
+  // behaviour — fail the whole turn on the first 503 — made them do by hand.
+  //
+  // Bounded by a fixed number of passes: past that it is an outage rather than a spike,
+  // and more passes add failed requests to a service already struggling.
+  for (let sweep = 0; ; sweep += 1) {
+    allFull = false;
+    yield* walkChain();
+    if (answered || abandoned) return;
+    if (!allFull || sweep >= overloadSweeps) break;
+
+    const waitMs = OVERLOAD_BACKOFF_MS * 2 ** sweep;
+    yield { type: "stage", stage: "busy", waitMs, attempt: sweep + 1 };
+    await sleep(waitMs);
+    if (deadline.callerAborted) return;
+    // No need to clear what the pass just learned: `planChain` falls back to the whole
+    // chain when every model in it is cooled, which is exactly the state we are in.
+  }
+
+  throw (
+    lastError ??
+    new GeminiError("No model in the chain was available for this API key.", { status: 502 })
+  );
+
+  /** One pass down the chain. Sets `answered` once a model has streamed its reply. */
+  async function* walkChain() {
   const plan = planChain({ models, health, budgetPressure });
+  // What this pass ran into, which is what decides whether another pass is worth making.
+  let sawOverload = false;
+  let sawOther = false;
   // Why we're not on the preferred model. Seeded from the plan — which knows about quota
   // learned on earlier requests and about budget pressure — and overwritten by anything we
   // learn the hard way while walking the chain below.
@@ -909,8 +1200,24 @@ async function* streamRound({
   let remainingMs = plan.skipped.find((s) => s.model === plan.preferred)?.remainingMs;
 
   for (const model of plan.models) {
-    if (deadline.callerAborted) return;
+    if (deadline.callerAborted) return void (abandoned = true);
     const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+
+    // The gap between here and the first token is the longest unexplained pause in the
+    // app — a model that has to fetch and watch a video before it says anything takes
+    // tens of seconds, and there is deliberately no header deadline, so nothing else
+    // marks the time. Reported per attempt, so walking the chain is visible too.
+    yield { type: "stage", stage: "waiting", model, round, media };
+
+    // Support for the field varies per model in the chain, so it is set (or removed)
+    // freshly for whichever model this attempt is about to call — mutated in place on the
+    // shared `requestBody` rather than cloned, since only one attempt is ever in flight
+    // and the object is rebuilt from scratch at the top of every round anyway.
+    if (thinkingBudgetTokens > 0 && supportsThinkingBudget(model)) {
+      requestBody.generationConfig.thinkingConfig = { thinkingBudget: thinkingBudgetTokens };
+    } else {
+      delete requestBody.generationConfig.thinkingConfig;
+    }
 
     let response;
     // No-ops unless a caller asked for a header deadline; there is no default one.
@@ -929,7 +1236,7 @@ async function* streamRound({
       });
     } catch (error) {
       // The caller giving up is not a failure to report — it's what they asked for.
-      if (deadline.callerAborted) return;
+      if (deadline.callerAborted) return void (abandoned = true);
       if (deadline.timedOut) {
         throw new GeminiError(
           `Gemini did not respond within ${Math.round(requestTimeoutMs / 1000)}s. Try again shortly.`,
@@ -957,6 +1264,19 @@ async function* streamRound({
         reason = REASONS.quota;
         detail = message;
         remainingMs = entry.until - Date.now();
+      } else if (isOverloadedFailure(response.status, message)) {
+        // Remembered like a quota, on a much shorter clock: capacity comes back in
+        // seconds, and a model held out of the chain after it recovered is an answer
+        // quietly taken on a worse model for no reason.
+        const cooldownMs = retryAfterMs(response, text) ?? OVERLOAD_COOLDOWN_MS;
+        const entry = health.markExhausted(model, {
+          reason: REASONS.overloaded,
+          detail: message,
+          cooldownMs,
+        });
+        reason = REASONS.overloaded;
+        detail = message;
+        remainingMs = entry.until - Date.now();
       } else if (isContextLimitFailure(response.status, message)) {
         reason = REASONS.context;
         detail = message;
@@ -964,6 +1284,9 @@ async function* streamRound({
         reason = REASONS.unavailable;
         detail = message;
       }
+
+      if (isOverloadedFailure(response.status, message)) sawOverload = true;
+      else sawOther = true;
 
       if (shouldFallThrough(response.status, message)) {
         lastError = describeFailure(response.status, message, model);
@@ -1003,7 +1326,7 @@ async function* streamRound({
     try {
       yield* parseSSE(response.body, deadline, idleTimeoutMs);
     } catch (error) {
-      if (deadline.callerAborted) return;
+      if (deadline.callerAborted) return void (abandoned = true);
       if (deadline.timedOut) {
         throw new GeminiError(
           `Gemini stopped sending data for ${Math.round(idleTimeoutMs / 1000)}s. Try again shortly.`,
@@ -1012,11 +1335,18 @@ async function* streamRound({
       }
       throw error;
     }
+    // The stream is over, so the stall clock has nothing left to measure — and what comes
+    // next is the tool round, which is *meant* to take seconds with no bytes arriving.
+    // Left armed, the last chunk's deadline goes on running underneath the searches and
+    // aborts the shared controller mid-turn: the sources arrive, the answer never does,
+    // and nothing anywhere reports an error. Re-armed by the next round's own fetch.
+    deadline.clear();
+    answered = true;
     return;
   }
 
-  throw (
-    lastError ??
-    new GeminiError("No model in the chain was available for this API key.", { status: 502 })
-  );
+  // Every model refused. Whether that is worth waiting out is decided by *how* they
+  // refused: all of them full is a moment to sit through, anything else is not.
+  allFull = sawOverload && !sawOther;
+}
 }

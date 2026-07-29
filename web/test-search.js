@@ -554,7 +554,7 @@ test("the model searches, the sources are numbered, the answer is shown", async 
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1", "https://b.example/2"]),
     }),
   );
@@ -586,7 +586,7 @@ test("an uncited answer is rejected, rewritten, and only the rewrite is shown", 
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
     }),
   );
@@ -619,7 +619,7 @@ test("an answer that fails twice is shown, but labelled unverified", async () =>
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
     }),
   );
@@ -644,7 +644,7 @@ test("a bad tool call is corrected by the model, not fatal to the turn", async (
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       // The real `search` runs the validator; only the network is faked.
       fetchSearch: null,
       searchImpl: (await import("./lib/search.js")).search,
@@ -666,7 +666,7 @@ test("search can be turned off, and then nothing is enforced", async () => {
       messages: [{ role: "user", content: "hello" }],
       env: { WEB_SEARCH_ENABLED: "false" },
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
     }),
   );
   assert.ok(!sent[0].tools);
@@ -695,7 +695,7 @@ test("a thought signature travels back on the part it arrived on", async () => {
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
     }),
   );
@@ -734,7 +734,7 @@ test("parallel calls keep their own signatures, in order", async () => {
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
     }),
   );
@@ -758,7 +758,7 @@ test("text with no signature is still merged into one part", async () => {
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
       searchImpl: async () => searchResult("A claim here", ["https://a.example/1"]),
     }),
   );
@@ -774,4 +774,274 @@ test("the system prompt states where the model's facts come from", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /web_search/);
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Your training data is not a source/);
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /checked automatically after/);
+});
+
+/* ---------------- doing the looking up all at once ---------------- */
+
+test("every search a round asks for runs at the same time, not one after another", async () => {
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "one", claim: "The first claim" } },
+        { name: "web_search", args: { query: "two", claim: "The second claim" } },
+        { name: "web_search", args: { query: "three", claim: "The third claim" } },
+      ],
+    },
+    { text: "All three check out [1]." },
+  ]);
+
+  let inFlight = 0;
+  let peak = 0;
+  const searchImpl = async (args) => {
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 20));
+    inFlight -= 1;
+    return searchResult(args.claim, [`https://${args.query}.example/p`]);
+  };
+
+  const started = Date.now();
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl,
+    }),
+  );
+
+  // The point of the change: three 20ms searches cost one 20ms wait, not three.
+  assert.equal(peak, 3, "the round's searches must overlap");
+  assert.ok(Date.now() - started < 55, "three searches must not have run in sequence");
+
+  // Overlapping must not shuffle the ledger: numbering follows the order the model asked
+  // in, whichever search happens to return first.
+  const searches = frames.filter((f) => f.type === "search");
+  assert.deepEqual(searches.map((f) => f.claim), [
+    "The first claim",
+    "The second claim",
+    "The third claim",
+  ]);
+  assert.deepEqual(searches.map((f) => f.results[0].n), [1, 2, 3]);
+});
+
+test("the searches are announced before any of them has come back", async () => {
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "one", claim: "The first claim" } },
+        { name: "web_search", args: { query: "two", claim: "The second claim" } },
+      ],
+    },
+    { text: "Checks out [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, [`https://${args.query}.example/p`]),
+    }),
+  );
+
+  const announced = frames.findIndex((f) => f.type === "searching");
+  const firstResult = frames.findIndex((f) => f.type === "search");
+  assert.ok(announced !== -1 && announced < firstResult, "the wait must be shown while it happens");
+  assert.deepEqual(frames[announced].searches.map((s) => s.query), ["one", "two"]);
+  assert.deepEqual(frames[announced].searches.map((s) => s.claim), [
+    "The first claim",
+    "The second claim",
+  ]);
+  // `tool_start` is the transport frame; the browser is told about searches, not tools.
+  assert.ok(!frames.some((f) => f.type === "tool_start"));
+});
+
+test("the same query asked twice is searched once", async () => {
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } },
+        // Same query, different claim — and, in the round after, the same one again.
+        { name: "web_search", args: { query: "Bridge Cost ", claim: "The bridge was over budget" } },
+      ],
+    },
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  let ran = 0;
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => {
+        ran += 1;
+        return searchResult(args.claim, ["https://a.example/1"]);
+      },
+    }),
+  );
+
+  assert.equal(ran, 1, "a repeated query must cost nothing but the model's own round trip");
+  // The model still gets an answer for each call it made, and each claim is filed against
+  // the source that was retrieved for it.
+  assert.equal(frames.filter((f) => f.type === "search").length, 3);
+  const sources = frames.find((f) => f.type === "sources");
+  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+});
+
+test("a model that keeps asking to search past its budget is made to answer, once", async () => {
+  // Every round asks for another search and never writes anything. Withdrawing the tool
+  // is the first move; the second is saying so. Neither may become an unbounded loop.
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "q", claim: "A claim to check" } }] },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  // Three rounds with the tool, one with it withdrawn, one after being told to answer.
+  assert.equal(sent.length, 5);
+  assert.equal(sent.filter((body) => body.tools).length, 3);
+  assert.match(sent.at(-1).contents.at(-1).parts[0].text, /search budget/);
+  // Withdrawn means withdrawn: the calls it made anyway were never run.
+  assert.equal(frames.filter((f) => f.type === "search").length, 3);
+  assert.ok(!frames.some((f) => f.type === "error"));
+});
+
+test("the rewrite round is a rewrite: no tools, and no second round of searching", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion." },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    }),
+  );
+
+  assert.ok(!sent.at(-1).tools, "the repair round must not be handed a tool it should not use");
+  assert.match(repairInstruction([{ message: "x" }], ledgerOf(1)), /cannot search again/i);
+});
+
+test("a rewrite that comes back empty puts the withdrawn answer back", async () => {
+  // The failed answer is cleared from the screen the moment the rewrite starts. If the
+  // rewrite then says nothing, the reader must not be left with sources over a blank.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion." },
+    { text: "" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    }),
+  );
+
+  const reset = frames.findIndex((f) => f.type === "reset");
+  const restored = frames.map((f, i) => ({ f, i })).filter(({ f }) => f.type === "delta").at(-1);
+  assert.ok(restored.i > reset);
+  assert.equal(restored.f.text, "The bridge cost $2.1 billion.");
+  // Restored, not endorsed: it is the text that failed the check, and it says so.
+  assert.ok(frames.some((f) => f.type === "unverified"));
+});
+
+test("a turn that spends itself searching still ends with words, not a blank", async () => {
+  // The model asks for a search every round and never writes anything. An empty answer
+  // passes the citation audit trivially, so nothing else in the pipeline objects — this is
+  // the check that the reader is not handed a list of sources under a blank space.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "q", claim: "A claim to check" } }] },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  const text = frames.filter((f) => f.type === "delta").map((f) => f.text).join("");
+  assert.match(text, /did not get to an answer/);
+  // And the sources it did retrieve are shown, even though no marker points at them.
+  assert.deepEqual(frames.find((f) => f.type === "sources").sources.map((s) => s.n), [1]);
+});
+
+/* ---------------- what the banners say ---------------- */
+
+test("the unverified notice agrees with itself about number", () => {
+  const one = unverifiedNotice([{ type: "uncited_claim" }]);
+  assert.match(one, /1 statement carries no citation/);
+  assert.ok(!/carry/.test(one), "one statement does not carry, it carries");
+
+  const many = unverifiedNotice([{ type: "uncited_claim" }, { type: "uncited_claim" }]);
+  assert.match(many, /2 statements carry no citation/);
+});
+
+test("a cut-off last sentence is not also reported as a citation failure", () => {
+  // Hitting the token cap already earns its own banner. The final sentence has no marker
+  // because the marker goes at the end and the end is what was cut off — calling that a
+  // citation failure puts a second, more alarming notice next to the one that explains it,
+  // and blames the model for the cap.
+  const ledger = ledgerOf(2);
+  const text = "The bridge cost $2.1 billion [1]. The contractor was fined in 2019 and the";
+
+  const whole = auditAnswer(text, ledger);
+  assert.equal(whole.ok, false, "unfinished or not, an uncited claim is one");
+  assert.equal(whole.violations.filter((v) => v.type === "uncited_claim").length, 1);
+
+  const cut = auditAnswer(text, ledger, { truncated: true });
+  assert.equal(cut.ok, true);
+  assert.deepEqual(cut.cited, [1], "the sentences that did finish are still audited");
+});
+
+test("truncation excuses the last sentence and nothing else", () => {
+  const ledger = ledgerOf(2);
+  // An uncited claim in the middle is not explained by the ending being cut off.
+  const audit = auditAnswer(
+    "The bridge cost $2.1 billion. The report was published in 2019 [2]. Costs rose again in",
+    ledger,
+    { truncated: true },
+  );
+  assert.equal(audit.ok, false);
+  assert.equal(audit.violations.filter((v) => v.type === "uncited_claim").length, 1);
+  assert.match(audit.violations[0].message, /2\.1 billion/);
+
+  // And a fabricated citation fails wherever it sits, cut off or not.
+  const invented = auditAnswer("The bridge cost $2.1 billion [9] and the", ledger, {
+    truncated: true,
+  });
+  assert.ok(invented.violations.some((v) => v.type === "unknown_source"));
 });

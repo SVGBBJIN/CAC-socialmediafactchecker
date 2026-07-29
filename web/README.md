@@ -77,12 +77,24 @@ Either path deploys correctly; neither one requires the other.
 **Check the function timeout before trusting video on a deployment.** A TikTok link is the
 slowest request this app makes: resolve the embed, download the clip, possibly upload it,
 *then* wait for Gemini to watch it. That runs well past Vercel's default max duration
-(10s on Hobby), and a function killed mid-flight looks to the user like the answer simply
-stopped. Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on
-Pro. It is deliberately not set in `vercel.json`, because that file uses the legacy
-`builds` key, which `functions` cannot be combined with; the project setting is the one
-that always applies. YouTube has the same exposure and always has — Gemini watching a
-video takes tens of seconds — which is what the 15s keep-alive below is for.
+(10s on Hobby), and a function killed mid-flight used to look to the user like the answer
+simply stopped — no error, no text, an empty bubble that vanished on the next render. It
+now says so: a stream that closes without an answer is reported as a failure, with the
+elapsed time and a pointer to this setting. If that message arrives at a suspiciously
+round number of seconds, this is what it is.
+
+Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on Pro. It is
+deliberately not set in `vercel.json`, because that file uses the legacy `builds` key,
+which `functions` cannot be combined with; the project setting is the one that always
+applies. YouTube carries the same exposure and always has, since Gemini watching a video
+takes tens of seconds — which is also what the 15s keep-alive below is for.
+
+There is no request deadline inside the app — a turn runs until it finishes or the host
+stops it, and the host's limit is the only ceiling. What makes that survivable is that it
+is no longer silent: every stage is logged with its elapsed second (`[chat] 24s waiting
+(gemini-3.6-flash)`), so the runtime log names the step a request died in, and the browser
+reports a stream that closes without an answer instead of quietly dropping the bubble. Set
+Max Duration high enough for the slowest thing you actually paste.
 
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function
 instance and resets on a cold start, so on Vercel the real ceiling is looser than the
@@ -137,12 +149,13 @@ reasoning.
 
 ## Graceful degradation
 
-The chain steps down on its own and steps back up on its own. Four things move it:
+The chain steps down on its own and steps back up on its own. Five things move it:
 
 | Trigger | What happens | What the pill shows |
 | --- | --- | --- |
 | The model isn't available to this key (404/403) | Try the next model | `… · fallback` |
 | The model is out of quota (429, or `RESOURCE_EXHAUSTED`) | Try the next model, and **remember** — the exhausted one is skipped outright until its cooldown ends | `… · quota` |
+| The model is overloaded (503, or a 500 that says so) | Try the next model, and remember for 20s. If *every* model is full, wait and sweep the chain twice more — 0.8s, then 1.6s | `… · busy` |
 | The client is near its daily message cap | Start one model down the chain, to make the remaining messages go further | `… · conserving` |
 | The conversation is too long for the model | Try the next model; if none accept, say "start a new chat" rather than relaying token arithmetic | `… · long chat` |
 
@@ -153,14 +166,53 @@ as long as the quota window lasts. Cooldowns come from the server's own `Retry-A
 `retryDelay` where it sends one, are capped at 15 minutes, and expire by themselves — there
 is no flag anyone has to remember to flip back.
 
+**Capacity is per model too**, and for the same reason a 503 is a reason to try the next
+one rather than to fail the turn. It used to fail the turn: 5xx was treated as terminal on
+the grounds that walking the chain through an outage only adds load, which is right for an
+outage and wrong for the far more common case — the newest, most popular model in the chain
+being full for a few seconds while the ones below it have room. The two are told apart by
+what the body says, so a bare `500 Internal error` is still terminal and a 503 is not. Its
+cooldown is 20 seconds rather than a minute, because capacity comes back fast and a model
+held out after it recovered is an answer quietly taken on a worse model for nothing.
+
+When every model is full, that is worth sitting out rather than handing back: the chain is
+swept twice more with a short doubling wait, and the wait is skipped entirely if the turn's
+deadline leaves no room to use an answer. Only then does it fail — saying that Google is
+turning requests away and that the key and the app are not at fault, which the old *Gemini
+is having trouble (HTTP 503)* did not.
+
 The registry lives in `lib/degradation.js` and is process memory, with the same caveat as
 the rate limiter in `lib/guard.js`: under `node server.js` it is one shared registry; on
 Vercel it is per function instance, so a cold start re-learns from the first 429. That is
 one wasted round trip, which is exactly where this started.
 
-Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is now labelled instead of being
+Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is labelled instead of being
 shipped as if it were finished — a fact-check cut off mid-sentence reads like a verdict,
 and the sentence it was cut off in is usually the one carrying the citation.
+
+That last point is also why a truncated answer's **final** sentence is exempt from the
+citation audit: its missing marker is explained by the cut, and reporting it as a citation
+failure stacks a second, more alarming banner on top of the one that already says the
+answer stops mid-thought. Every earlier sentence is still held to the rule, and an
+invented citation still fails wherever it appears.
+
+**`MAX_OUTPUT_TOKENS` alone does not fix truncation, and raising it repeatedly is chasing
+the wrong number.** On a thinking model this cap covers the reasoning as well as the
+reply — one shared pool — and the models at the head of the chain think before they
+search and again before they answer. A bigger pool just gives the reasoning more room to
+spend; it does not reserve any of it for what the reader sees.
+
+`THINKING_BUDGET_TOKENS` is what actually does that, via Gemini's
+`thinkingConfig.thinkingBudget`. Capping the reasoning specifically guarantees
+`MAX_OUTPUT_TOKENS − THINKING_BUDGET_TOKENS` as a floor for the visible answer — the
+default, 4096 out of a 16384 total, aims to leave three-quarters of the budget for what
+gets shown. It is sent only to models believed to support it (the "3" series and 2.5, not
+`gemini-2.0-flash`), matched on the version number so a new preview ID doesn't need a code
+change; if that guess is wrong for some future model, Gemini's "unknown field" 400 is
+treated the same as an unsupported model — fall through to the next one, not fail the
+turn. That guess has not been checked against a live thinking-capable response. Set
+`THINKING_BUDGET_TOKENS=0` to turn the field off entirely rather than requesting a zero
+budget, which not every model may accept.
 
 ## Every claim carries a citation
 
@@ -180,13 +232,66 @@ retrieved. Then the app checks, because a prompt is a request and this needs a g
    for a source that does not exist, and a URL no search returned.
 3. **A failed answer is withdrawn, not patched.** The model is told which sentences failed
    and made to write the whole thing again; the browser is told to clear what it has shown
-   so a rejected answer never sits above its replacement. The repair prompt offers three
-   ways out and no others — cite it, search again, or delete the sentence.
+   so a rejected answer never sits above its replacement. The rewrite round carries **no
+   tools** — searching is over by then, and a round that goes looking again resets the
+   answer under audit and can end the turn on a search instead of a verdict — so the
+   repair prompt offers two ways out and no others: cite it, or delete the sentence.
 4. **If the rewrite fails too, the answer is shown carrying a warning.** Suppressing it
-   entirely would hide a failure the reader is better off seeing labelled.
+   entirely would hide a failure the reader is better off seeing labelled. If the rewrite
+   comes back *empty*, the withdrawn answer goes back up under that same warning: the
+   screen was cleared for a replacement that never arrived, and sources over a blank space
+   look like a broken app rather than a failed check.
 5. **The bibliography is rendered by the app, from the ledger.** The model is told not to
    write one. A source list the model types is a source list it can invent; one built from
    retrieved results cannot contain a page that was never fetched.
+
+### Saying what it is doing
+
+Most of a video fact-check produces no text at all: fetching the clip, waiting on a model
+that has to watch it before it can speak, the model thinking before its first search. Those
+stretches used to be reported as nothing — an empty bubble with a caret, which looks the
+same whether the request is working, stuck, or already dead.
+
+The server now emits `{type: "stage", …}` at each of those transitions and the browser
+shows it with a running clock: *Fetching the video · 6s*, *Watching the video · 24s*,
+*Working out what to check*, *Rewriting — the first answer failed the citation check*. The
+clock is the part that matters — "Watching the video" is reassuring at five seconds and
+ambiguous at forty, and a number lets the reader tell slow from stuck without guessing.
+
+The model's thinking is announced but never shown. Its content is withheld on purpose —
+musings in the middle of a fact-check read as findings — but withholding it *silently* is
+what made a model that thinks for thirty seconds look like a model doing nothing.
+
+### Looking everything up at once
+
+A fact-check that searches one claim, reads the result, searches the next claim and reads
+that one spends the reader's time in series: every round is a fresh model call that
+re-sends the whole conversation — the video included — and waits for the model to read it
+again before it can say anything. Four claims that way is four waits for one answer.
+
+So the turn is shaped as two passes, and both the system prompt and the tool description
+say so: list every claim first and issue **all** the searches in one turn, then read the
+results and write the verdict. The runtime is what makes that pay off:
+
+- **The calls in a round are dispatched together** and awaited in call order, so four
+  searches cost one search's worth of waiting and the ledger still numbers them in the
+  order the model asked.
+- **A repeated query is served from the turn's cache.** Same query, no second round trip —
+  the results would be identical, so the only thing a repeat buys is the wait.
+- **The searches are announced before they return** (`{type: "searching"}`), so the browser
+  shows what is being looked up while it is being looked up, instead of a still bubble
+  followed by every chip at once.
+- **The video is attached exactly once per turn, not once per round.** A rewrite re-sent
+  the YouTube link as a `file_data` part, which made Gemini fetch and watch the whole clip
+  again to correct a citation — tens of seconds, on the requests already closest to their
+  deadline. Later rounds get a note saying the clip was watched earlier instead. The TikTok
+  path was already guarded; the YouTube one was not, because the attachment happens in
+  `toGeminiContents` rather than in the code that does the fetching.
+- **Three rounds of searching, then the tools are withdrawn.** A model that asks anyway is
+  told once, in the conversation, to answer from what it has; if it asks again the turn
+  ends. Withdrawing a declaration is a hint, and a hint is not a ceiling — without the hard
+  stop, a model that keeps calling is an unbounded number of model calls the reader is
+  sitting through.
 
 What is *not* audited, deliberately: connective tissue ("here's what I found"), quoted
 descriptions of the claim under review — the video is the subject, not evidence — code

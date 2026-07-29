@@ -524,6 +524,39 @@ body {
  * answer, always present, never something the model can decide to leave out.
  */
 
+.stage {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.stage[hidden] {
+  display: none;
+}
+.stage-label {
+  animation: stage-pulse 1.6s ease-in-out infinite;
+}
+.stage-clock {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+@keyframes stage-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-label {
+    animation: none;
+  }
+}
+
 .searches {
   display: flex;
   flex-direction: column;
@@ -543,6 +576,27 @@ body {
 .search-chip.failed {
   color: var(--danger);
   border-color: var(--danger);
+}
+/* A search that has been sent and not yet answered. Pulsing rather than static because
+   the distinction it carries is "still happening", which a still chip cannot make. */
+.search-chip.pending {
+  border-style: dashed;
+  animation: chip-pulse 1.4s ease-in-out infinite;
+}
+@keyframes chip-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .search-chip.pending {
+    animation: none;
+    opacity: 0.7;
+  }
 }
 
 a.citation {

@@ -55,10 +55,21 @@ export const BUDGET_PRESSURE_THRESHOLD = 0.8;
 /** Why a model was passed over. Ordered loosely by how much the user should care. */
 export const REASONS = {
   quota: "quota",
+  overloaded: "overloaded",
   budget: "budget",
   context: "context",
   unavailable: "unavailable",
 };
+
+/**
+ * How long an overloaded model is presumed busy when the server doesn't say.
+ *
+ * Much shorter than a quota cooldown, because it is a much shorter-lived condition: a 503
+ * is capacity at this instant, not an allowance that has run out, and it typically clears
+ * in seconds. Sitting out a full minute over one would keep answering on a worse model
+ * long after the good one was free again.
+ */
+export const OVERLOAD_COOLDOWN_MS = 20_000;
 
 /**
  * Which models are currently believed to be out of quota, and until when.
@@ -215,6 +226,11 @@ export function describeDegradation({ reason, preferred, model, remainingMs, det
       return {
         label: "quota",
         note: `${preferred} is out of quota or rate-limited, so this answer came from ${model}.${recovery}`,
+      };
+    case REASONS.overloaded:
+      return {
+        label: "busy",
+        note: `${preferred} was overloaded and turned the request away, so this answer came from ${model}. Nothing is wrong with your key or your usage — it is Google's capacity at that moment.${recovery}`,
       };
     case REASONS.budget:
       return {
