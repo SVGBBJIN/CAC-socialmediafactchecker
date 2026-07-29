@@ -169,6 +169,11 @@ export default async function handler(req, res) {
       // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
       // exactly as it was.
       budgetPressure: usage.pressure ?? 0,
+      // The same deadline the abort above enforces, handed over so the turn can *land*
+      // before it rather than be cut off at it: searching stops while there is still time
+      // to write the answer, and a rewrite that cannot finish is not started. The abort
+      // stays as the backstop for the case where that judgement is wrong.
+      deadlineAt: started + limits.maxRequestSeconds * 1000,
       signal: controller.signal,
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));

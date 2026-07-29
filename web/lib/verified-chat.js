@@ -106,6 +106,20 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
 /** How many times a failed answer gets sent back for a rewrite before we ship it flagged. */
 export const MAX_REPAIR_ROUNDS = 1;
 
+/**
+ * Time a rewrite needs, below which the answer ships flagged instead.
+ *
+ * A rewrite is a second complete answer: the whole conversation goes back up, the model
+ * reads it again, and it writes the piece from the top. Starting one with fifteen seconds
+ * left buys a second failure — the request dies mid-rewrite, and because the first answer
+ * was withdrawn to make room for it, the reader gets less than if we had never tried.
+ *
+ * Shipping the flawed answer under its warning is the better trade at that point. It is
+ * the outcome the audit already defines for a rewrite that fails; running out of time is
+ * just another way of failing, and it costs the reader nothing extra to admit it early.
+ */
+export const REPAIR_RESERVE_MS = 30_000;
+
 export function searchEnabled(env = process.env) {
   // Read case-insensitively, like the provider keys: an operator who typed
   // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
@@ -214,6 +228,8 @@ export async function* verifiedChat({
   searchImpl = search,
   signal,
   maxRepairRounds = MAX_REPAIR_ROUNDS,
+  deadlineAt = null,
+  repairReserveMs = REPAIR_RESERVE_MS,
   ...geminiOptions
 }) {
   const enabled = searchEnabled(env);
@@ -254,7 +270,8 @@ export async function* verifiedChat({
       // The repair round must not re-attach the video: the bytes are already in the
       // conversation the model is rewriting from, and re-attaching would re-download and
       // re-upload the whole clip to correct a citation. Its sources travel as text below.
-      attachTikTok: attempt === 0,
+      attachMedia: attempt === 0,
+      deadlineAt,
       ...geminiOptions,
     })) {
       // The answer under audit is the text written *after* the last search. Anything
@@ -285,17 +302,22 @@ export async function* verifiedChat({
     if (!enabled) return;
 
     audit = auditAnswer(answer, ledger);
+    // A rewrite is a whole second answer. Starting one that cannot finish is worse than
+    // not starting it: the first answer is withdrawn to make room, and the reader ends up
+    // with less than if we had shipped the flawed one under its warning — which is what
+    // happens instead.
+    const timeToRewrite = deadlineAt === null || deadlineAt - Date.now() > repairReserveMs;
     // Cheap and local, so it is over before the frame is read — but a rejected answer is
     // about to be pulled off the screen, and "Checking citations" is what makes the next
     // few seconds legible rather than alarming.
-    if (!audit.ok && !truncated && attempt < maxRepairRounds) {
+    if (!audit.ok && !truncated && timeToRewrite && attempt < maxRepairRounds) {
       yield { type: "stage", stage: "rewriting" };
     }
     // A truncated answer fails the audit almost by construction — it was cut off, and the
     // sentence it was cut off in is the one that would have carried the citation. Sending
     // it back for a rewrite spends a second full answer to arrive at the same cliff edge,
     // so the cap is reported honestly instead: the text that arrived is kept, and labelled.
-    if (audit.ok || truncated || attempt >= maxRepairRounds) break;
+    if (audit.ok || truncated || !timeToRewrite || attempt >= maxRepairRounds) break;
 
     // Rejected. The UI is told to drop what it has shown before the rewrite starts, so a
     // failed answer is never left on screen next to the one that replaces it.

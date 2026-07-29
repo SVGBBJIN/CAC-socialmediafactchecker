@@ -187,6 +187,8 @@ function stageText(stage) {
       return stage.round > 0 ? "Reading the sources" : "Asking the model";
     case "thinking":
       return stage.round > 0 ? "Working through the sources" : "Working out what to check";
+    case "wrapping":
+      return "Out of time to search — answering with what I have";
     case "rewriting":
       return "Rewriting — the first answer failed the citation check";
     default:

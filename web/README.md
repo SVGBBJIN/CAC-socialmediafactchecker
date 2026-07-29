@@ -86,11 +86,24 @@ Pro. It is deliberately not set in `vercel.json`, because that file uses the leg
 `builds` key, which `functions` cannot be combined with; the project setting is the one
 that always applies.
 
-Then set `MAX_REQUEST_SECONDS` a few seconds *below* it. The app stops itself at that
-point and ends the turn with an explanation and whatever text had arrived; left to the
-host, the same moment arrives as a killed process and a connection that simply stops
-mid-sentence. Every stage is logged with its elapsed second (`[chat] 24s waiting
-(gemini-3.6-flash)`), so the runtime log names the step a request died in. YouTube has the same exposure and always has — Gemini watching a
+Then set `MAX_REQUEST_SECONDS` a few seconds *below* it. Every stage is logged with its
+elapsed second (`[chat] 24s waiting (gemini-3.6-flash)`), so the runtime log names the step
+a request died in.
+
+That number is a deadline the turn tries to *land* inside, not just a tripwire:
+
+- **Searching stops while there is still time to answer.** Tools are withdrawn once less
+  than `ANSWER_RESERVE_MS` (25s) remains, so the turn ends on a verdict rather than on a
+  search it had no time to use. The reader is told: *Out of time to search — answering with
+  what I have.*
+- **A rewrite that cannot finish is never started.** The citation repair round is a second
+  complete answer, and it withdraws the first one to make room. Begun with less than
+  `REPAIR_RESERVE_MS` (30s) left, it leaves the reader with less than shipping the flawed
+  answer under its warning would have — so with less than that, the warning is what ships.
+- **The hard abort remains the backstop**, for when those judgements are wrong. It ends the
+  turn with an explanation and whatever text had arrived; left to the host, the same moment
+  arrives as a killed process and a connection that stops mid-sentence with nothing to mark
+  it. YouTube has the same exposure and always has — Gemini watching a
 video takes tens of seconds — which is what the 15s keep-alive below is for.
 
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function
@@ -238,6 +251,12 @@ results and write the verdict. The runtime is what makes that pay off:
 - **The searches are announced before they return** (`{type: "searching"}`), so the browser
   shows what is being looked up while it is being looked up, instead of a still bubble
   followed by every chip at once.
+- **The video is attached exactly once per turn, not once per round.** A rewrite re-sent
+  the YouTube link as a `file_data` part, which made Gemini fetch and watch the whole clip
+  again to correct a citation — tens of seconds, on the requests already closest to their
+  deadline. Later rounds get a note saying the clip was watched earlier instead. The TikTok
+  path was already guarded; the YouTube one was not, because the attachment happens in
+  `toGeminiContents` rather than in the code that does the fetching.
 - **Three rounds of searching, then the tools are withdrawn.** A model that asks anyway is
   told once, in the conversation, to answer from what it has; if it asks again the turn
   ends. Withdrawing a declaration is a hint, and a hint is not a ceiling — without the hard

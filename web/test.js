@@ -1340,7 +1340,7 @@ test("streamChat attaches the clip and cleans up its upload when the answer is d
   assert.deepEqual(deleted, ["files/xyz"]);
 });
 
-test("attachTikTok: false leaves a link as plain text and fetches nothing", async () => {
+test("attachMedia: false leaves a link as plain text and fetches nothing", async () => {
   let sentBody;
   const fetchImpl = async (url, init) => {
     sentBody = JSON.parse(init.body);
@@ -1353,7 +1353,7 @@ test("attachTikTok: false leaves a link as plain text and fetches nothing", asyn
       messages: [{ role: "user", content: SOURCE_URL }],
       models: ["gemini-3.6-flash"],
       fetchImpl,
-      attachTikTok: false,
+      attachMedia: false,
     }),
   );
 
@@ -1537,4 +1537,29 @@ test("a request that outlives its budget stops itself and says so", async () => 
 
   // And the wait was narrated while it happened, rather than after it failed.
   assert.equal(frames[0].type, "stage");
+});
+
+test("a rewrite does not make Gemini watch the video a second time", async () => {
+  // The repair round is a rewrite of an answer the model can already see. Re-attaching the
+  // video makes Gemini fetch and watch the whole thing again to fix a citation — tens of
+  // seconds, on precisely the requests that are already close to their deadline. The
+  // TikTok path was guarded against this; the YouTube one was not, because the attachment
+  // happens here rather than in the fetching code.
+  const messages = [
+    { role: "user", content: "check https://youtu.be/dQw4w9WgXcQ" },
+    { role: "assistant", content: "The clip claims a thing." },
+    { role: "user", content: "rewrite that with citations" },
+  ];
+
+  const watched = toGeminiContents(messages);
+  assert.equal(watched[0].parts[0].file_data.file_uri, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+  const reread = toGeminiContents(messages, { attachVideos: false });
+  assert.ok(
+    !JSON.stringify(reread).includes("file_data"),
+    "no round after the first may re-send the video",
+  );
+  // Not silently dropped: a model that thinks the clip went missing says so instead of
+  // answering, which is worse than the cost this avoids.
+  assert.match(reread[0].parts.at(-1).text, /watched earlier in this turn/);
 });

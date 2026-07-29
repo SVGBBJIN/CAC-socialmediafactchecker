@@ -484,7 +484,7 @@ function describeClip(resolved) {
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
  */
-export function toGeminiContents(messages, { tikTok } = {}) {
+export function toGeminiContents(messages, { tikTok, attachVideos = true } = {}) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
   const clips = tikTok?.attachments ?? new Map();
@@ -499,6 +499,19 @@ export function toGeminiContents(messages, { tikTok } = {}) {
       for (const id of findYouTubeVideoIDs(text)) {
         if (attachedVideos.has(id)) continue;
         attachedVideos.add(id);
+        // `attachVideos: false` is the repair round, which is a rewrite of an answer the
+        // model can already see. Re-attaching would make Gemini fetch and watch the whole
+        // video a second time to correct a citation — tens of seconds, and the single
+        // largest avoidable cost in a turn, since the round is billed and timed like the
+        // first one for no new information. The note replaces it so the model knows the
+        // clip is not missing, only already seen.
+        if (!attachVideos) {
+          notes.push(
+            `[The video at ${canonicalYouTubeURL(id)} was watched earlier in this turn. ` +
+              `Work from what you already wrote about it.]`,
+          );
+          continue;
+        }
         parts.push({ file_data: { file_uri: canonicalYouTubeURL(id) } });
       }
 
@@ -704,6 +717,20 @@ const ANSWER_NOW =
   "already retrieved above, and say plainly which parts you could not check.";
 
 /**
+ * Time held back from searching so there is still room to write the answer.
+ *
+ * The request has a hard deadline it must not cross — the host's, minus a margin — and
+ * spending it all on searches is how a turn ends with sources and no verdict. So searching
+ * stops early enough that one more round can finish: the tools are withdrawn while there
+ * is still time to use what they found, which is the whole point of having found it.
+ *
+ * Sized for a model reading a page of results and writing a few hundred words. Too small
+ * and the answer gets cut off anyway; too large and a turn stops searching while it still
+ * had time to check another claim.
+ */
+export const ANSWER_RESERVE_MS = 25_000;
+
+/**
  * The model's own turn, reassembled from the stream so it can be sent back verbatim.
  *
  * Verbatim is the whole point, and the reason this is a class rather than a string join.
@@ -794,13 +821,15 @@ export async function* streamChat({
   fetchImpl = fetch,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS,
-  attachTikTok = true,
+  attachMedia = true,
   tikTokOptions = {},
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
   health = modelHealth,
   budgetPressure = 0,
+  deadlineAt = null,
+  answerReserveMs = ANSWER_RESERVE_MS,
 }) {
   const deadline = new StreamDeadline(signal);
   let tikTok = null;
@@ -809,7 +838,7 @@ export async function* streamChat({
     // TikTok clips are fetched before the first model call, not per model: the bytes are
     // the same whichever model answers, and re-downloading them on each fall-through
     // would turn one slow link into four.
-    if (attachTikTok) {
+    if (attachMedia) {
       // Announced before it starts, because it is the longest silence in the request and
       // the one the user has least reason to expect: resolving an embed, downloading a
       // clip and uploading it can run for tens of seconds before a single token exists to
@@ -826,7 +855,7 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { tikTok });
+    const contents = toGeminiContents(messages, { tikTok, attachVideos: attachMedia });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
@@ -838,6 +867,9 @@ export async function* streamChat({
     // Whether the model has already been told, in so many words, that its tools are gone.
     // Once is a nudge; twice would be a loop, and a loop here is unbounded model calls.
     let nudged = false;
+    // Whether the reader has been told that searching stopped for time rather than because
+    // there was nothing left to check.
+    let wrappedUp = false;
 
     for (let round = 0; ; round += 1) {
       const requestBody = {
@@ -853,11 +885,26 @@ export async function* streamChat({
       if (system) {
         requestBody.systemInstruction = { parts: [{ text: system }] };
       }
-      // Past the budget the tools are withdrawn rather than merely refused. A model handed
-      // a tool it is told not to use will often try anyway; a model with no tool declared
+      // Two budgets, both spent the same way. Rounds bound how much searching one turn may
+      // do; the clock bounds how long the whole request may take, and searching has to stop
+      // early enough that there is still time to write the answer — a turn that spends its
+      // last second on a search ends with sources and no verdict, which is worse than one
+      // that stopped looking a claim sooner.
+      //
+      // Past either, the tools are withdrawn rather than merely refused. A model handed a
+      // tool it is told not to use will often try anyway; a model with no tool declared
       // answers with what it has, which is the outcome the budget exists to force.
-      const toolsThisRound = useTools && round < maxToolRounds;
+      const outOfTimeToSearch =
+        deadlineAt !== null && deadlineAt - Date.now() < answerReserveMs;
+      const toolsThisRound = useTools && round < maxToolRounds && !outOfTimeToSearch;
       if (toolsThisRound) requestBody.tools = tools;
+      // Announced, because "it stopped searching" and "it never had anything to search
+      // with" look identical in the finished answer, and only one of them is worth the
+      // reader knowing about.
+      if (useTools && outOfTimeToSearch && round > 0 && !wrappedUp) {
+        wrappedUp = true;
+        yield { type: "stage", stage: "wrapping" };
+      }
 
       const calls = [];
       const turn = new ModelTurn();
