@@ -998,3 +998,50 @@ test("a turn that spends itself searching still ends with words, not a blank", a
   // And the sources it did retrieve are shown, even though no marker points at them.
   assert.deepEqual(frames.find((f) => f.type === "sources").sources.map((s) => s.n), [1]);
 });
+
+/* ---------------- what the banners say ---------------- */
+
+test("the unverified notice agrees with itself about number", () => {
+  const one = unverifiedNotice([{ type: "uncited_claim" }]);
+  assert.match(one, /1 statement carries no citation/);
+  assert.ok(!/carry/.test(one), "one statement does not carry, it carries");
+
+  const many = unverifiedNotice([{ type: "uncited_claim" }, { type: "uncited_claim" }]);
+  assert.match(many, /2 statements carry no citation/);
+});
+
+test("a cut-off last sentence is not also reported as a citation failure", () => {
+  // Hitting the token cap already earns its own banner. The final sentence has no marker
+  // because the marker goes at the end and the end is what was cut off — calling that a
+  // citation failure puts a second, more alarming notice next to the one that explains it,
+  // and blames the model for the cap.
+  const ledger = ledgerOf(2);
+  const text = "The bridge cost $2.1 billion [1]. The contractor was fined in 2019 and the";
+
+  const whole = auditAnswer(text, ledger);
+  assert.equal(whole.ok, false, "unfinished or not, an uncited claim is one");
+  assert.equal(whole.violations.filter((v) => v.type === "uncited_claim").length, 1);
+
+  const cut = auditAnswer(text, ledger, { truncated: true });
+  assert.equal(cut.ok, true);
+  assert.deepEqual(cut.cited, [1], "the sentences that did finish are still audited");
+});
+
+test("truncation excuses the last sentence and nothing else", () => {
+  const ledger = ledgerOf(2);
+  // An uncited claim in the middle is not explained by the ending being cut off.
+  const audit = auditAnswer(
+    "The bridge cost $2.1 billion. The report was published in 2019 [2]. Costs rose again in",
+    ledger,
+    { truncated: true },
+  );
+  assert.equal(audit.ok, false);
+  assert.equal(audit.violations.filter((v) => v.type === "uncited_claim").length, 1);
+  assert.match(audit.violations[0].message, /2\.1 billion/);
+
+  // And a fabricated citation fails wherever it sits, cut off or not.
+  const invented = auditAnswer("The bridge cost $2.1 billion [9] and the", ledger, {
+    truncated: true,
+  });
+  assert.ok(invented.violations.some((v) => v.type === "unknown_source"));
+});

@@ -186,9 +186,19 @@ the rate limiter in `lib/guard.js`: under `node server.js` it is one shared regi
 Vercel it is per function instance, so a cold start re-learns from the first 429. That is
 one wasted round trip, which is exactly where this started.
 
-Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is now labelled instead of being
+Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is labelled instead of being
 shipped as if it were finished — a fact-check cut off mid-sentence reads like a verdict,
 and the sentence it was cut off in is usually the one carrying the citation.
+
+That last point is why the cap is 8192 and not the 4096 it started at. On a thinking model
+`maxOutputTokens` covers the reasoning as well as the reply, and the models at the head of
+the chain think before they search and again before they answer — so a number picked as
+"more prose than any fact-check needs" is not what the answer actually gets. It is also why
+a truncated answer's **final** sentence is exempt from the citation audit: its missing
+marker is explained by the cut, and reporting it as a citation failure stacks a second,
+more alarming banner on top of the one that already says the answer stops mid-thought.
+Every earlier sentence is still held to the rule, and an invented citation still fails
+wherever it appears.
 
 ## Every claim carries a citation
 

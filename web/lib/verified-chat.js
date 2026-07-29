@@ -284,7 +284,7 @@ export async function* verifiedChat({
     if (signal?.aborted) return;
     if (!enabled) return;
 
-    audit = auditAnswer(answer, ledger);
+    audit = auditAnswer(answer, ledger, { truncated });
     // Cheap and local, so it is over before the frame is read — but a rejected answer is
     // about to be pulled off the screen, and "Checking citations" is what makes the next
     // few seconds legible rather than alarming.
@@ -329,7 +329,7 @@ export async function* verifiedChat({
       answer = discarded;
       // Re-audited so the label and the bibliography describe the text actually on screen,
       // not the rewrite that never arrived.
-      audit = auditAnswer(answer, ledger);
+      audit = auditAnswer(answer, ledger, { truncated });
       yield { type: "delta", text: answer };
     } else if (ledger.size > 0) {
       // Sources were retrieved and then nothing was said about them: the model spent the

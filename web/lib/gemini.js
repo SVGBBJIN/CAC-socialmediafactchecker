@@ -52,8 +52,16 @@ export const REQUEST_TIMEOUT_MS = 0;
  * Default ceiling on a single reply, in tokens. Applied even when the caller doesn't
  * pass one explicitly — a spend cap that has to be opted out of is a spend cap that
  * eventually gets forgotten. `web/api/chat.js` overrides this from `MAX_OUTPUT_TOKENS`.
+ *
+ * Raised from 4096, which was set as "far more prose than a fact-check needs" and was
+ * right about the prose and wrong about the budget. On a thinking model this cap covers
+ * the *whole* output, thinking included, and the models at the head of the chain think
+ * before they search and again before they answer. So the answer gets whatever the
+ * reasoning left it, and a fact-check that reads as three paragraphs can run into a cap
+ * sized for ten — which arrives as a verdict cut off mid-sentence, right where the
+ * citation would have gone.
  */
-export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 
 /** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
 export const DEFAULT_MODEL_CHAIN = [

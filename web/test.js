@@ -398,11 +398,11 @@ test("the token cap can be overridden per call", async () => {
 });
 
 test("MAX_OUTPUT_TOKENS from the environment feeds the guard config", () => {
-  assert.equal(guardConfig({}).maxOutputTokens, 4096);
+  assert.equal(guardConfig({}).maxOutputTokens, 8192);
   assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "256" }).maxOutputTokens, 256);
   // Garbage falls back to the default rather than producing NaN and disabling the cap.
-  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 4096);
-  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 4096);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 8192);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 8192);
 });
 
 test("a video is attached once, at its first mention, not on every turn", () => {

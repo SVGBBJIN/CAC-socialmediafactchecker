@@ -25,8 +25,10 @@ export function config(env = process.env) {
     maxTurns: positiveInt(env.MAX_TURNS, 20),
     // Every other cap here bounds *input*. Nothing bounded output — a single reply
     // could run until the model stopped on its own, and output tokens are the
-    // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`.
-    maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 4096),
+    // expensive side of the meter. Passed through to Gemini's `maxOutputTokens`, which
+    // on a thinking model covers the reasoning as well as the reply — see the note on
+    // `DEFAULT_MAX_OUTPUT_TOKENS` for why that makes a small-looking number too small.
+    maxOutputTokens: positiveInt(env.MAX_OUTPUT_TOKENS, 8192),
   };
 }
 

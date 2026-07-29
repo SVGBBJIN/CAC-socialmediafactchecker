@@ -216,7 +216,7 @@ export function markersIn(text) {
  *   the repair prompt built from it is read top-down and a fabricated citation is the
  *   thing most worth fixing.
  */
-export function auditAnswer(text, ledger) {
+export function auditAnswer(text, ledger, { truncated = false } = {}) {
   const violations = [];
   const cited = new Set();
   // Code samples are excluded from every check below, including the URL one: a `curl` line
@@ -258,8 +258,18 @@ export function auditAnswer(text, ledger) {
   }
 
   // Uncited assertions.
+  //
+  // When the answer was cut off at the token cap, its final sentence is exempt. Not out of
+  // leniency — it is the one sentence whose missing citation is *explained*, because the
+  // marker goes at the end and the end is what got truncated. Reporting it as a citation
+  // failure puts a second, more alarming banner next to the one that already says the
+  // answer stops mid-thought, and blames the model for the cap. Every other sentence is
+  // still held to the rule, and a fabricated citation still fails wherever it appears.
+  const sentences = auditableSentences(answer);
+  const exempt = truncated ? sentences.length - 1 : -1;
   const uncited = [];
-  for (const sentence of auditableSentences(answer)) {
+  for (const [index, sentence] of sentences.entries()) {
+    if (index === exempt) continue;
     if (!isCheckableClaim(sentence)) continue;
     if (markersIn(sentence).length > 0) continue;
     uncited.push(sentence);
@@ -353,7 +363,10 @@ export function unverifiedNotice(violations) {
   }
   if (kinds.has("uncited_claim")) {
     const count = violations.filter((v) => v.type === "uncited_claim").length;
-    reasons.push(`${count} statement${count === 1 ? "" : "s"} carry no citation`);
+    // The verb agrees too. Pluralising the noun and leaving "carry" gave "1 statement
+    // carry no citation" — a small thing, on the one banner in the app whose whole job is
+    // to be believed.
+    reasons.push(count === 1 ? "1 statement carries no citation" : `${count} statements carry no citation`);
   }
   return `Unverified: ${reasons.join("; ")}. Treat the statements above as unchecked.`;
 }
