@@ -89,24 +89,12 @@ which `functions` cannot be combined with; the project setting is the one that a
 applies. YouTube carries the same exposure and always has, since Gemini watching a video
 takes tens of seconds — which is also what the 15s keep-alive below is for.
 
-Then set `MAX_REQUEST_SECONDS` a few seconds *below* it. Every stage is logged with its
-elapsed second (`[chat] 24s waiting (gemini-3.6-flash)`), so the runtime log names the step
-a request died in.
-
-That number is a deadline the turn tries to *land* inside, not just a tripwire:
-
-- **Searching stops while there is still time to answer.** Tools are withdrawn once less
-  than `ANSWER_RESERVE_MS` (25s) remains, so the turn ends on a verdict rather than on a
-  search it had no time to use. The reader is told: *Out of time to search — answering with
-  what I have.*
-- **A rewrite that cannot finish is never started.** The citation repair round is a second
-  complete answer, and it withdraws the first one to make room. Begun with less than
-  `REPAIR_RESERVE_MS` (30s) left, it leaves the reader with less than shipping the flawed
-  answer under its warning would have — so with less than that, the warning is what ships.
-- **The hard abort remains the backstop**, for when those judgements are wrong. It ends the
-  turn with an explanation and whatever text had arrived; left to the host, the same moment
-  arrives as a killed process and a connection that stops mid-sentence with nothing to mark
-  it.
+There is no request deadline inside the app — a turn runs until it finishes or the host
+stops it, and the host's limit is the only ceiling. What makes that survivable is that it
+is no longer silent: every stage is logged with its elapsed second (`[chat] 24s waiting
+(gemini-3.6-flash)`), so the runtime log names the step a request died in, and the browser
+reports a stream that closes without an answer instead of quietly dropping the bubble. Set
+Max Duration high enough for the slowest thing you actually paste.
 
 One thing to fix when you do: **the rate limiter is in-memory.** It lives per function
 instance and resets on a cold start, so on Vercel the real ceiling is looser than the

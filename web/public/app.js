@@ -191,8 +191,6 @@ function stageText(stage) {
       // Named as Google's problem, not the app's. A reader who thinks they broke something
       // starts checking their key; one who knows the service is full just waits.
       return "Every Gemini model is busy — waiting a moment and trying again";
-    case "wrapping":
-      return "Out of time to search — answering with what I have";
     case "rewriting":
       return "Rewriting — the first answer failed the citation check";
     default:

@@ -405,16 +405,6 @@ test("MAX_OUTPUT_TOKENS from the environment feeds the guard config", () => {
   assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 4096);
 });
 
-test("the request budget is configurable, and never absent", () => {
-  // It has to have a value at all times: it is what turns the host killing the function
-  // into a reported partial answer, and a request with no deadline of its own gets the
-  // host's, which arrives as an unexplained silence.
-  assert.equal(guardConfig({}).maxRequestSeconds, 55);
-  assert.equal(guardConfig({ MAX_REQUEST_SECONDS: "8" }).maxRequestSeconds, 8);
-  assert.equal(guardConfig({ MAX_REQUEST_SECONDS: "0" }).maxRequestSeconds, 55);
-  assert.equal(guardConfig({ MAX_REQUEST_SECONDS: "off" }).maxRequestSeconds, 55);
-});
-
 test("a video is attached once, at its first mention, not on every turn", () => {
   // Re-attaching makes Gemini ingest the same video again in the same request, and bill
   // for it. A long thread about one clip is the common case, not an edge case.
@@ -1469,83 +1459,6 @@ test("a video says so, so the wait can be named as watching rather than thinking
   assert.equal(waiting.media, true);
 });
 
-/* ---------------- the request's own deadline ---------------- */
-
-/**
- * Drive the real `/api/chat` handler with a stubbed request and response.
- *
- * Worth the harness for one reason: the budget is the only thing standing between a
- * stalled upstream and a request that hangs until the host kills it, and the ways it can
- * silently not work — an `unref`'d timer, an abort mistaken for the user leaving — all
- * look like success from inside the modules it coordinates.
- */
-async function runChatHandler({ env, fetchImpl, messages }) {
-  const previous = {};
-  for (const [key, value] of Object.entries(env)) {
-    previous[key] = process.env[key];
-    process.env[key] = value;
-  }
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = fetchImpl;
-
-  try {
-    const handler = (await import("./api/chat.js")).default;
-    const frames = [];
-    const res = {
-      writableEnded: false,
-      writeHead: () => res,
-      write(chunk) {
-        for (const line of String(chunk).split("\n\n")) {
-          if (line.startsWith("data:")) frames.push(JSON.parse(line.slice(5)));
-        }
-        return true;
-      },
-      end() {
-        res.writableEnded = true;
-      },
-      on() {},
-    };
-    const req = { method: "POST", headers: {}, socket: {}, body: { messages } };
-    await handler(req, res);
-    return frames;
-  } finally {
-    globalThis.fetch = realFetch;
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
-test("a request that outlives its budget stops itself and says so", async () => {
-  // The upstream opens and never answers — the case a host handles by killing the
-  // function, which on a stream closes the connection with no error in it at all.
-  const stalled = (_url, options) =>
-    new Promise((_, reject) => {
-      options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-    });
-
-  const started = Date.now();
-  const frames = await runChatHandler({
-    env: { GEMINI_API_KEY: "k", MAX_REQUEST_SECONDS: "1", WEB_SEARCH_ENABLED: "false" },
-    fetchImpl: stalled,
-    messages: [{ role: "user", content: "is this true?" }],
-  });
-
-  const elapsed = Date.now() - started;
-  assert.ok(elapsed >= 900 && elapsed < 4000, `stopped on its own deadline, not the host's (${elapsed}ms)`);
-
-  // The turn ends with an explanation, and one the user can act on.
-  const error = frames.at(-1);
-  assert.equal(error.type, "error");
-  assert.match(error.message, /1s limit/);
-  assert.equal(error.retryable, true);
-  assert.ok(!frames.some((f) => f.type === "done"), "an unfinished turn is not a finished one");
-
-  // And the wait was narrated while it happened, rather than after it failed.
-  assert.equal(frames[0].type, "stage");
-});
-
 test("a rewrite does not make Gemini watch the video a second time", async () => {
   // The repair round is a rewrite of an answer the model can already see. Re-attaching the
   // video makes Gemini fetch and watch the whole thing again to fix a citation — tens of
@@ -1691,28 +1604,4 @@ test("a chain that fails some other way is not waited out", async () => {
     /./,
   );
   assert.deepEqual(waits, [], "a mixed failure is not a capacity spike");
-});
-
-test("the wait is skipped when there is no time left to use an answer", async () => {
-  const waits = [];
-  await assert.rejects(
-    collect(
-      streamChat({
-        apiKey: "k",
-        messages: [{ role: "user", content: "hi" }],
-        models: ["a"],
-        health: new ModelHealth(),
-        sleep: async (ms) => waits.push(ms),
-        // Past the point where a fresh answer could finish anyway.
-        deadlineAt: Date.now() + 5_000,
-        fetchImpl: async () => ({
-          ok: false,
-          status: 503,
-          text: async () => JSON.stringify({ error: { message: "overloaded" } }),
-        }),
-      }),
-    ),
-    /busy/,
-  );
-  assert.deepEqual(waits, [], "a retry that lands past the deadline buys nothing");
 });

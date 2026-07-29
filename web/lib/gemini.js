@@ -758,20 +758,6 @@ const ANSWER_NOW =
   "already retrieved above, and say plainly which parts you could not check.";
 
 /**
- * Time held back from searching so there is still room to write the answer.
- *
- * The request has a hard deadline it must not cross — the host's, minus a margin — and
- * spending it all on searches is how a turn ends with sources and no verdict. So searching
- * stops early enough that one more round can finish: the tools are withdrawn while there
- * is still time to use what they found, which is the whole point of having found it.
- *
- * Sized for a model reading a page of results and writing a few hundred words. Too small
- * and the answer gets cut off anyway; too large and a turn stops searching while it still
- * had time to check another claim.
- */
-export const ANSWER_RESERVE_MS = 25_000;
-
-/**
  * Extra passes down the chain when every model in it was full, and the first wait between
  * them (doubling after that: 0.8s, then 1.6s).
  *
@@ -779,8 +765,8 @@ export const ANSWER_RESERVE_MS = 25_000;
  * finds *every* model full is usually a capacity spike measured in seconds, so a couple of
  * short waits catches most of them; past that it is an outage, and more passes add failed
  * requests to a service already struggling while the user waits for a worse outcome. The
- * cost of getting it wrong is bounded either way — about 2.4 seconds — and it is only
- * spent when the alternative was failing the request outright.
+ * cost of getting it wrong is bounded — about 2.4 seconds — and it is only spent when the
+ * alternative was failing the request outright.
  */
 export const OVERLOAD_SWEEPS = 2;
 export const OVERLOAD_BACKOFF_MS = 800;
@@ -883,8 +869,6 @@ export async function* streamChat({
   maxToolRounds = MAX_TOOL_ROUNDS,
   health = modelHealth,
   budgetPressure = 0,
-  deadlineAt = null,
-  answerReserveMs = ANSWER_RESERVE_MS,
   overloadSweeps = OVERLOAD_SWEEPS,
   sleep,
 }) {
@@ -924,9 +908,6 @@ export async function* streamChat({
     // Whether the model has already been told, in so many words, that its tools are gone.
     // Once is a nudge; twice would be a loop, and a loop here is unbounded model calls.
     let nudged = false;
-    // Whether the reader has been told that searching stopped for time rather than because
-    // there was nothing left to check.
-    let wrappedUp = false;
 
     for (let round = 0; ; round += 1) {
       const requestBody = {
@@ -942,26 +923,11 @@ export async function* streamChat({
       if (system) {
         requestBody.systemInstruction = { parts: [{ text: system }] };
       }
-      // Two budgets, both spent the same way. Rounds bound how much searching one turn may
-      // do; the clock bounds how long the whole request may take, and searching has to stop
-      // early enough that there is still time to write the answer — a turn that spends its
-      // last second on a search ends with sources and no verdict, which is worse than one
-      // that stopped looking a claim sooner.
-      //
-      // Past either, the tools are withdrawn rather than merely refused. A model handed a
-      // tool it is told not to use will often try anyway; a model with no tool declared
+      // Past the budget the tools are withdrawn rather than merely refused. A model handed
+      // a tool it is told not to use will often try anyway; a model with no tool declared
       // answers with what it has, which is the outcome the budget exists to force.
-      const outOfTimeToSearch =
-        deadlineAt !== null && deadlineAt - Date.now() < answerReserveMs;
-      const toolsThisRound = useTools && round < maxToolRounds && !outOfTimeToSearch;
+      const toolsThisRound = useTools && round < maxToolRounds;
       if (toolsThisRound) requestBody.tools = tools;
-      // Announced, because "it stopped searching" and "it never had anything to search
-      // with" look identical in the finished answer, and only one of them is worth the
-      // reader knowing about.
-      if (useTools && outOfTimeToSearch && round > 0 && !wrappedUp) {
-        wrappedUp = true;
-        yield { type: "stage", stage: "wrapping" };
-      }
 
       const calls = [];
       const turn = new ModelTurn();
@@ -979,7 +945,6 @@ export async function* streamChat({
         budgetPressure,
         round,
         media,
-        deadlineAt,
         overloadSweeps,
         // Only forwarded when the caller supplied one, so `streamRound` keeps its own
         // default rather than being handed `undefined` and losing it.
@@ -1100,7 +1065,6 @@ async function* streamRound({
   budgetPressure,
   round = 0,
   media = false,
-  deadlineAt = null,
   overloadSweeps = OVERLOAD_SWEEPS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
@@ -1118,8 +1082,8 @@ async function* streamRound({
   // wait a moment and ask again, which is what the user would do by hand and what the old
   // behaviour — fail the whole turn on the first 503 — made them do by hand.
   //
-  // Bounded twice over: a fixed number of passes, and only while enough time remains to
-  // use an answer if one arrives. A retry that lands past the deadline has bought nothing.
+  // Bounded by a fixed number of passes: past that it is an outage rather than a spike,
+  // and more passes add failed requests to a service already struggling.
   for (let sweep = 0; ; sweep += 1) {
     allFull = false;
     yield* walkChain();
@@ -1127,7 +1091,6 @@ async function* streamRound({
     if (!allFull || sweep >= overloadSweeps) break;
 
     const waitMs = OVERLOAD_BACKOFF_MS * 2 ** sweep;
-    if (deadlineAt !== null && Date.now() + waitMs + ANSWER_RESERVE_MS > deadlineAt) break;
     yield { type: "stage", stage: "busy", waitMs, attempt: sweep + 1 };
     await sleep(waitMs);
     if (deadline.callerAborted) return;

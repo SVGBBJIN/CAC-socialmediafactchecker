@@ -25,12 +25,7 @@ import {
   repairInstruction,
   unverifiedNotice,
 } from "./lib/citations.js";
-import {
-  verifiedChat,
-  searchEnabled,
-  FACT_CHECK_SYSTEM_PROMPT,
-  REPAIR_RESERVE_MS,
-} from "./lib/verified-chat.js";
+import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
 
 /* ---------------- query schema ---------------- */
 
@@ -1002,81 +997,4 @@ test("a turn that spends itself searching still ends with words, not a blank", a
   assert.match(text, /did not get to an answer/);
   // And the sources it did retrieve are shown, even though no marker points at them.
   assert.deepEqual(frames.find((f) => f.type === "sources").sources.map((s) => s.n), [1]);
-});
-
-/* ---------------- landing inside the deadline ---------------- */
-
-test("searching stops in time to write the answer, rather than at the deadline", async () => {
-  // Three rounds of searching are allowed, but the clock only has room for one plus an
-  // answer. Stopping a claim short beats a turn that spends its last second on a search
-  // and ends with sources and no verdict.
-  const { fetchImpl, sent } = fakeGemini([
-    { calls: [{ name: "web_search", args: { query: "one", claim: "The first claim" } }] },
-    // The model would happily search again; the round it gets has no tool declared, so it
-    // answers instead. That is the withdrawal doing its job.
-    { text: "Answering with what I have [1]." },
-  ]);
-
-  const frames = await collect(
-    verifiedChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "Is this true?" }],
-      env: {},
-      fetchImpl,
-      attachMedia: false,
-      searchImpl: async (args) => {
-        // Real time has to pass for a clock-based decision to have anything to decide on.
-        await new Promise((r) => setTimeout(r, 300));
-        return searchResult(args.claim, ["https://a.example/1"]);
-      },
-      // Room for one round of searching and the answer, and not for a second round: the
-      // 300ms the first search spends is what takes the remaining time under the reserve.
-      deadlineAt: Date.now() + 25_200,
-      answerReserveMs: 25_000,
-    }),
-  );
-
-  assert.equal(frames.filter((f) => f.type === "search").length, 1);
-  // The tool was offered once and then withdrawn — not offered and refused.
-  assert.deepEqual(sent.map((body) => Boolean(body.tools)), [true, false]);
-  assert.ok(frames.some((f) => f.type === "stage" && f.stage === "wrapping"));
-  assert.match(frames.filter((f) => f.type === "delta").at(-1).text, /\[1\]/);
-});
-
-test("a rewrite that cannot finish is not started; the answer ships flagged instead", async () => {
-  // Withdrawing an answer to make room for a rewrite that then runs out of time leaves the
-  // reader with less than shipping the flawed one would have.
-  const { fetchImpl, sent } = fakeGemini([
-    { calls: [{ name: "web_search", args: { query: "q", claim: "The bridge cost $4bn" } }] },
-    { text: "The bridge cost $2.1 billion." },
-    { text: "The bridge cost $2.1 billion [1]." },
-  ]);
-
-  const frames = await collect(
-    verifiedChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "Is this true?" }],
-      env: {},
-      fetchImpl,
-      attachMedia: false,
-      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
-      deadlineAt: Date.now() + 60_000,
-      answerReserveMs: 1_000,
-      // Less headroom than a rewrite is judged to need.
-      repairReserveMs: 90_000,
-    }),
-  );
-
-  assert.ok(!frames.some((f) => f.type === "reset"), "nothing may be withdrawn without a replacement");
-  assert.equal(sent.length, 2, "the rewrite round is never sent");
-  // The answer is shown, carrying the label the check earned it.
-  const unverified = frames.find((f) => f.type === "unverified");
-  assert.ok(unverified);
-  assert.match(frames.filter((f) => f.type === "delta").at(-1).text, /2\.1 billion/);
-});
-
-test("with no deadline set, nothing about the turn changes", () => {
-  // The whole mechanism is opt-in from the caller: a null deadline must behave exactly as
-  // it did before there was one, or every existing test here is measuring the wrong thing.
-  assert.equal(REPAIR_RESERVE_MS > 0, true);
 });
