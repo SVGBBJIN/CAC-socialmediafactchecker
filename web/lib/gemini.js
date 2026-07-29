@@ -810,6 +810,13 @@ export async function* streamChat({
     // the same whichever model answers, and re-downloading them on each fall-through
     // would turn one slow link into four.
     if (attachTikTok) {
+      // Announced before it starts, because it is the longest silence in the request and
+      // the one the user has least reason to expect: resolving an embed, downloading a
+      // clip and uploading it can run for tens of seconds before a single token exists to
+      // show for it. Unreported, that is indistinguishable from the app having hung.
+      if (messages.some((m) => m?.role !== "assistant" && findTikTokLinks(String(m?.content ?? "")).length > 0)) {
+        yield { type: "stage", stage: "attaching" };
+      }
       tikTok = await resolveTikTokParts(messages, {
         apiKey,
         fetchImpl,
@@ -820,6 +827,12 @@ export async function* streamChat({
     if (deadline.callerAborted) return;
 
     const contents = toGeminiContents(messages, { tikTok });
+    // Whether the model has a video to watch. It changes what the wait *is* — Gemini
+    // fetching and watching a clip before its first token is a different thing to report
+    // than a model composing a sentence — and the reader is owed the difference.
+    const media = contents.some((turn) =>
+      turn.parts.some((part) => part.file_data || part.inline_data),
+    );
     const useTools = Boolean(tools?.length && toolRunner);
     let announced = null;
     // Whether the model has already been told, in so many words, that its tools are gone.
@@ -848,6 +861,7 @@ export async function* streamChat({
 
       const calls = [];
       const turn = new ModelTurn();
+      let thinkingAnnounced = false;
 
       for await (const frame of streamRound({
         requestBody,
@@ -859,6 +873,8 @@ export async function* streamChat({
         idleTimeoutMs,
         health,
         budgetPressure,
+        round,
+        media,
       })) {
         if (frame.type === "function_call") {
           calls.push(frame.call);
@@ -877,8 +893,18 @@ export async function* streamChat({
         }
         if (frame.type === "delta") {
           turn.addText(frame.text, frame.signature, frame.thought);
-          // A thinking summary is part of the turn but not part of the answer.
-          if (frame.thought || frame.text.length === 0) continue;
+          // A thinking summary is part of the turn but not part of the answer — it is
+          // withheld rather than shown, since the model's musings in the middle of a
+          // fact-check read as findings. But withholding it silently means a model that
+          // thinks for thirty seconds before its first search looks like a model doing
+          // nothing, so the *fact* of it is reported even though the content is not.
+          if (frame.thought || frame.text.length === 0) {
+            if (frame.thought && !thinkingAnnounced) {
+              thinkingAnnounced = true;
+              yield { type: "stage", stage: "thinking", round };
+            }
+            continue;
+          }
         }
         yield frame;
       }
@@ -963,6 +989,8 @@ async function* streamRound({
   idleTimeoutMs,
   health,
   budgetPressure,
+  round = 0,
+  media = false,
 }) {
   let lastError = null;
 
@@ -977,6 +1005,12 @@ async function* streamRound({
   for (const model of plan.models) {
     if (deadline.callerAborted) return;
     const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+
+    // The gap between here and the first token is the longest unexplained pause in the
+    // app — a model that has to fetch and watch a video before it says anything takes
+    // tens of seconds, and there is deliberately no header deadline, so nothing else
+    // marks the time. Reported per attempt, so walking the chain is visible too.
+    yield { type: "stage", stage: "waiting", model, round, media };
 
     let response;
     // No-ops unless a caller asked for a header deadline; there is no default one.

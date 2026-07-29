@@ -67,6 +67,18 @@ async function collect(iterator) {
   return out;
 }
 
+/**
+ * The frames that carry the answer, without the progress reports interleaved through them.
+ *
+ * `stage` frames say what the request is doing during the stretches where it produces no
+ * text — fetching a clip, waiting on a model, thinking. They can be emitted at any point
+ * and more of them is not a behaviour change, so tests about *what was answered* filter
+ * them out; the test that they are emitted at all is `progress is reported…` below.
+ */
+function answerFrames(frames) {
+  return frames.filter((f) => f.type !== "stage");
+}
+
 /* ---------------- Gemini client ---------------- */
 
 test("streams deltas in order and reports the model that answered", async () => {
@@ -79,8 +91,9 @@ test("streams deltas in order and reports the model that answered", async () => 
     }),
   );
 
+  const answer = answerFrames(frames);
   assert.deepEqual(
-    frames.map((f) => (f.type === "model" ? { type: f.type, model: f.model, degraded: f.degraded } : f)),
+    answer.map((f) => (f.type === "model" ? { type: f.type, model: f.model, degraded: f.degraded } : f)),
     [
       { type: "model", model: "gemini-3.6-flash", degraded: false },
       { type: "delta", text: "Hello" },
@@ -88,8 +101,8 @@ test("streams deltas in order and reports the model that answered", async () => 
     ],
   );
   // The preferred model answered, so the badge has nothing to warn about.
-  assert.deepEqual(frames[0].reason, null);
-  assert.equal(frames[0].label, "");
+  assert.deepEqual(answer[0].reason, null);
+  assert.equal(answer[0].label, "");
 });
 
 test("reassembles a frame split across two network chunks", async () => {
@@ -129,15 +142,16 @@ test("falls through a 404 model to the next in the chain", async () => {
     }),
   );
 
+  const answer = answerFrames(frames);
   assert.equal(tried.length, 2);
-  assert.equal(frames[0].type, "model");
-  assert.equal(frames[0].model, "gemini-2.0-flash");
+  assert.equal(answer[0].type, "model");
+  assert.equal(answer[0].model, "gemini-2.0-flash");
   // The frame carries why, not just what: the badge has to be able to say that the answer
   // came from the second model and that it wasn't the user's doing.
-  assert.equal(frames[0].degraded, true);
-  assert.equal(frames[0].preferred, "retired-model");
-  assert.equal(frames[0].reason, "unavailable");
-  assert.match(frames[0].note, /retired-model/);
+  assert.equal(answer[0].degraded, true);
+  assert.equal(answer[0].preferred, "retired-model");
+  assert.equal(answer[0].reason, "unavailable");
+  assert.match(answer[0].note, /retired-model/);
 });
 
 test("a bad key is terminal, not a reason to try four more models", async () => {
@@ -654,10 +668,11 @@ test("what one request learns about a quota, the next one acts on before sending
 
   // The whole point: the exhausted model is not contacted at all. Re-learning the same
   // 429 on every request for a minute is a round trip per request that buys nothing.
+  const answer = answerFrames(frames);
   assert.equal(tried.length, 1);
   assert.match(tried[0], /gemini-3\.5-flash/);
-  assert.equal(frames[0].degraded, true);
-  assert.equal(frames[0].reason, "quota");
+  assert.equal(answer[0].degraded, true);
+  assert.equal(answer[0].reason, "quota");
 });
 
 test("a cooldown expires on its own, and a model that answers is marked healthy again", () => {
@@ -1389,4 +1404,50 @@ test("an upload that never returns a session URL fails loudly", async () => {
     uploadFile(Buffer.alloc(4), "video/mp4", { apiKey: "k", fetchImpl, sleep: async () => {} }),
     /did not return an upload URL/,
   );
+});
+
+test("progress is reported through the stretches that produce no text", async () => {
+  // The gap before the first token is the longest silence in the app — on a video it is
+  // most of the request. Unreported, an empty bubble is indistinguishable from a dead one,
+  // which is the whole complaint these frames exist to answer.
+  const thinking = `data: ${JSON.stringify({
+    candidates: [{ content: { parts: [{ text: "hmm", thought: true }] } }],
+  })}\n\n`;
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl: async () => sseResponse([thinking, frame("the answer")]),
+    }),
+  );
+
+  const stages = frames.filter((f) => f.type === "stage");
+  assert.deepEqual(stages.map((s) => s.stage), ["waiting", "thinking"]);
+  // Reported before the request goes out, not after it comes back.
+  assert.ok(frames.indexOf(stages[0]) < frames.findIndex((f) => f.type === "model"));
+  assert.equal(stages[0].model, "gemini-3.6-flash");
+  assert.equal(stages[0].media, false);
+
+  // The thinking is announced but never shown: a model's musings mid-fact-check read as
+  // findings, so the reader gets the fact of it and not the content.
+  assert.deepEqual(
+    frames.filter((f) => f.type === "delta").map((f) => f.text),
+    ["the answer"],
+  );
+});
+
+test("a video says so, so the wait can be named as watching rather than thinking", async () => {
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check https://www.youtube.com/watch?v=dQw4w9WgXcQ" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([frame("ok")]),
+    }),
+  );
+
+  const waiting = frames.find((f) => f.type === "stage" && f.stage === "waiting");
+  assert.equal(waiting.media, true);
 });

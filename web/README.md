@@ -77,8 +77,11 @@ Either path deploys correctly; neither one requires the other.
 **Check the function timeout before trusting video on a deployment.** A TikTok link is the
 slowest request this app makes: resolve the embed, download the clip, possibly upload it,
 *then* wait for Gemini to watch it. That runs well past Vercel's default max duration
-(10s on Hobby), and a function killed mid-flight looks to the user like the answer simply
-stopped. Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on
+(10s on Hobby), and a function killed mid-flight used to look to the user like the answer
+simply stopped — no error, no text, an empty bubble that vanished on the next render. It
+now says so: a stream that closes without an answer is reported as a failure, with the
+elapsed time and a pointer to this setting. If that message arrives at a suspiciously
+round number of seconds, this is what it is. Raise it under **Settings → Functions → Max Duration** — 300s is the ceiling on
 Pro. It is deliberately not set in `vercel.json`, because that file uses the legacy
 `builds` key, which `functions` cannot be combined with; the project setting is the one
 that always applies. YouTube has the same exposure and always has — Gemini watching a
@@ -192,6 +195,23 @@ retrieved. Then the app checks, because a prompt is a request and this needs a g
 5. **The bibliography is rendered by the app, from the ledger.** The model is told not to
    write one. A source list the model types is a source list it can invent; one built from
    retrieved results cannot contain a page that was never fetched.
+
+### Saying what it is doing
+
+Most of a video fact-check produces no text at all: fetching the clip, waiting on a model
+that has to watch it before it can speak, the model thinking before its first search. Those
+stretches used to be reported as nothing — an empty bubble with a caret, which looks the
+same whether the request is working, stuck, or already dead.
+
+The server now emits `{type: "stage", …}` at each of those transitions and the browser
+shows it with a running clock: *Fetching the video · 6s*, *Watching the video · 24s*,
+*Working out what to check*, *Rewriting — the first answer failed the citation check*. The
+clock is the part that matters — "Watching the video" is reassuring at five seconds and
+ambiguous at forty, and a number lets the reader tell slow from stuck without guessing.
+
+The model's thinking is announced but never shown. Its content is withheld on purpose —
+musings in the middle of a fact-check read as findings — but withholding it *silently* is
+what made a model that thinks for thirty seconds look like a model doing nothing.
 
 ### Looking everything up at once
 

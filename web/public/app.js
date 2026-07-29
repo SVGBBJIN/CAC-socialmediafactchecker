@@ -170,6 +170,85 @@ function renderModelBadge(state) {
   el.modelBadge.title = state.note || `Answering on ${state.model}.`;
 }
 
+/**
+ * What the server says it is doing right now, in the reader's words.
+ *
+ * Every one of these is a phase that produces no text: fetching a clip, waiting on a model
+ * that has to watch it, a model thinking before it searches. They are most of the wait on
+ * a video, and until they were reported the bubble simply sat empty through all of them —
+ * which looks exactly like a request that has died, and gives no way to tell the two apart.
+ */
+function stageText(stage) {
+  switch (stage?.stage) {
+    case "attaching":
+      return "Fetching the video";
+    case "waiting":
+      if (stage.media) return "Watching the video";
+      return stage.round > 0 ? "Reading the sources" : "Asking the model";
+    case "thinking":
+      return stage.round > 0 ? "Working through the sources" : "Working out what to check";
+    case "rewriting":
+      return "Rewriting — the first answer failed the citation check";
+    default:
+      return "Working";
+  }
+}
+
+/**
+ * The status line, with a clock.
+ *
+ * The elapsed count is the part that earns its place: "Watching the video" alone is
+ * reassuring for five seconds and ambiguous at forty. With a number next to it the reader
+ * can see the difference between slow and stuck, and decide whether to wait or press Stop.
+ */
+function statusElement() {
+  const wrap = document.createElement("div");
+  wrap.className = "stage";
+  const label = document.createElement("span");
+  label.className = "stage-label";
+  const clock = document.createElement("span");
+  clock.className = "stage-clock";
+  wrap.append(label, clock);
+
+  const startedAt = Date.now();
+  let text = "Working";
+  const paint = () => {
+    label.textContent = `${text}…`;
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    clock.textContent = seconds >= 3 ? `${seconds}s` : "";
+  };
+  paint();
+  const timer = setInterval(paint, 1000);
+
+  return {
+    element: wrap,
+    /** Name the current step, and show the line if text had hidden it. */
+    set(next) {
+      text = next;
+      wrap.hidden = false;
+      paint();
+    },
+    /**
+     * Stand down while the answer is arriving.
+     *
+     * Hidden rather than removed: an answer can be followed by another silent phase — the
+     * citation check sending it back for a rewrite — and the line has to be able to come
+     * back without losing the clock, which is measuring the whole request.
+     */
+    hide() {
+      wrap.hidden = true;
+    },
+    /** Seconds the request has been running — what an unexplained ending gets measured in. */
+    elapsed() {
+      return Math.round((Date.now() - startedAt) / 1000);
+    },
+    stop() {
+      clearInterval(timer);
+      wrap.remove();
+    },
+  };
+}
+
 /** The banner an answer earns by running into the output-token cap. */
 function truncatedElement() {
   const wrap = document.createElement("div");
@@ -524,6 +603,11 @@ async function streamAnswer(conversationId) {
   let searchesEl = document.createElement("div");
   searchesEl.className = "searches";
   bubble.insertBefore(searchesEl, body);
+  // Above the searches, because it describes the step in progress and the searches are
+  // the record of steps already taken. Shown from the moment the request is sent: the
+  // silence before the first frame is exactly the silence it exists to explain.
+  const status = statusElement();
+  bubble.insertBefore(status.element, searchesEl);
   let sourcesEl = document.createElement("div");
   let noticeEl = document.createElement("div");
   // Its own slot rather than sharing `noticeEl`: a truncated answer usually fails the
@@ -594,7 +678,23 @@ async function streamAnswer(conversationId) {
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        // The server closed without ever sending an answer or an error. That is not a
+        // completed turn, and until now it was reported as one: the bubble was left empty,
+        // nothing was stored, and the next render removed it — the user watched a request
+        // vanish with no idea whether it failed or was still going. The usual cause is the
+        // host killing the function mid-flight, so the elapsed time is quoted; on Vercel
+        // it lands suspiciously close to the configured max duration.
+        if (!answer) {
+          retryable = true;
+          throw new Error(
+            `The connection closed after ${status.elapsed()}s without an answer. If this ` +
+              `happens on every video, the server is being cut off before it can finish — ` +
+              `raise the function timeout (Vercel: Settings → Functions → Max Duration).`,
+          );
+        }
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
 
       let boundary;
@@ -613,7 +713,10 @@ async function streamAnswer(conversationId) {
           continue;
         }
 
-        if (frame.type === "model") {
+        if (frame.type === "stage") {
+          status.set(stageText(frame));
+          scrollToBottom();
+        } else if (frame.type === "model") {
           modelState = frame;
           renderModelBadge(modelState);
         } else if (frame.type === "truncated") {
@@ -621,6 +724,8 @@ async function streamAnswer(conversationId) {
           truncatedEl = replace(truncatedEl, truncatedElement());
         } else if (frame.type === "delta") {
           answer += frame.text;
+          // Text is arriving; the reader can see for themselves that it is working.
+          if (frame.text) status.hide();
           scheduleRender();
         } else if (frame.type === "searching") {
           pendingSearches = frame.searches ?? [];
@@ -658,6 +763,7 @@ async function streamAnswer(conversationId) {
   } catch (error) {
     if (error.name !== "AbortError") failed = error.message;
   } finally {
+    status.stop();
     // Whatever was still in flight when the stream ended is not in flight any more —
     // a "Searching…" chip left spinning under a finished answer says the app is still
     // working when it has stopped, which is the one thing the chip exists to prevent.

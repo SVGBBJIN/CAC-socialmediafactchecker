@@ -195,7 +195,8 @@ function ledgerBlock(ledger) {
 /**
  * Stream one verified answer.
  *
- * Yields the frames `streamChat` does, plus:
+ * Yields the frames `streamChat` does — including its `{type: "stage"}` progress reports,
+ * which pass straight through — plus:
  * - `{type: "searching", searches}` — these searches have just been dispatched, all at
  *   once. Sent before any of them returns, so the UI can show the wait rather than a gap.
  * - `{type: "search", …}` — a search ran; `results` are its numbered sources, or `error`.
@@ -284,6 +285,12 @@ export async function* verifiedChat({
     if (!enabled) return;
 
     audit = auditAnswer(answer, ledger);
+    // Cheap and local, so it is over before the frame is read — but a rejected answer is
+    // about to be pulled off the screen, and "Checking citations" is what makes the next
+    // few seconds legible rather than alarming.
+    if (!audit.ok && !truncated && attempt < maxRepairRounds) {
+      yield { type: "stage", stage: "rewriting" };
+    }
     // A truncated answer fails the audit almost by construction — it was cut off, and the
     // sentence it was cut off in is the one that would have carried the citation. Sending
     // it back for a rewrite spends a second full answer to arrive at the same cliff edge,
