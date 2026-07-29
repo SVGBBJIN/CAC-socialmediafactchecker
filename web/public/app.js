@@ -31,7 +31,7 @@ const el = {
 let conversations = load();
 let activeId = localStorage.getItem(ACTIVE_KEY);
 let inFlight = null;
-let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000 };
+let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000, maxTurns: 20 };
 // What the pill shows: the last `model` frame, or the server's degradation snapshot from
 // /api/config before any answer has arrived. Held here rather than read back off the DOM
 // so re-rendering the message list can't lose it.
@@ -519,6 +519,10 @@ async function loadServerConfig() {
         Number.isFinite(received?.maxInputChars) && received.maxInputChars > 0
           ? received.maxInputChars
           : serverConfig.maxInputChars,
+      maxTurns:
+        Number.isFinite(received?.maxTurns) && received.maxTurns > 0
+          ? received.maxTurns
+          : serverConfig.maxTurns,
     };
   } catch {
     setStatus("Server unreachable", "bad");
@@ -575,10 +579,14 @@ async function streamAnswer(conversationId) {
   // exchange.
   const restorePoint = conversation.messages.length;
 
-  // Only real turns go upstream — a previous error bubble is UI, not context.
+  // Only real turns go upstream — a previous error bubble is UI, not context. Trimmed to
+  // the server's own MAX_TURNS before it ever leaves the browser: the server drops
+  // anything older on arrival regardless, so uploading it first only spends the reader's
+  // bandwidth — and the wait — on a video-heavy thread's history to have it thrown away.
   const history = conversation.messages
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({ role: m.role, content: m.content }))
+    .slice(-serverConfig.maxTurns);
 
   const bubble = messageElement({ role: "assistant", content: "" });
   const body = bubble.querySelector(".body");

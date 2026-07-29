@@ -989,7 +989,38 @@ test("history is trimmed to MAX_TURNS, keeping the most recent", () => {
   messages.push({ role: "user", content: "latest" });
 
   const trimmed = validateMessages({ messages }, limits);
-  assert.equal(trimmed.length, limits.maxTurns);
+  assert.ok(trimmed.length <= limits.maxTurns);
+  assert.equal(trimmed.at(-1).content, "latest");
+});
+
+test("a trim that would cut the history open on an assistant turn drops it instead", () => {
+  // 11 messages, alternating and ending on the user: slicing the last 4 (an even
+  // MAX_TURNS) out of this odd-length history lands squarely on an orphaned assistant
+  // reply. Gemini rejects a `contents` array that opens on `model`, so it must not
+  // survive the trim even though `maxTurns` alone would have kept it.
+  const messages = Array.from({ length: 10 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    content: `m${i}`,
+  }));
+  messages.push({ role: "user", content: "latest" });
+
+  const trimmed = validateMessages({ messages }, limits);
+  assert.equal(trimmed[0].role, "user", "contents must open on a user turn");
+  assert.equal(trimmed.length, 3, "the orphaned assistant reply is dropped, not just the cut");
+});
+
+test("a trim that already lands on a user turn is untouched", () => {
+  // 9 messages alternating and ending on the user: an odd MAX_TURNS out of this history
+  // lands the cut on a user turn already, so nothing extra should be dropped.
+  const messages = Array.from({ length: 8 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    content: `m${i}`,
+  }));
+  messages.push({ role: "user", content: "latest" });
+
+  const trimmed = validateMessages({ messages }, { ...limits, maxTurns: 3 });
+  assert.equal(trimmed.length, 3);
+  assert.equal(trimmed[0].role, "user");
   assert.equal(trimmed.at(-1).content, "latest");
 });
 
