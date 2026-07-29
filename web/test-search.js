@@ -498,7 +498,8 @@ test("the repair prompt names the failures and offers deletion as an out", () =>
 /**
  * A fake Gemini that replays scripted rounds. Each round is either `{text}` or
  * `{text, calls}`; a round with calls is followed by another round, exactly as the real
- * tool loop behaves.
+ * tool loop behaves. `finishReason` overrides how the round ends, for the turns that stop
+ * on something other than STOP.
  */
 function fakeGemini(rounds) {
   const sent = [];
@@ -524,12 +525,19 @@ function fakeGemini(rounds) {
       parts.push(part);
     }
 
-    const frame = JSON.stringify({ candidates: [{ content: { parts }, finishReason: "STOP" }] });
+    // An early finish arrives the way Gemini sends it: the text lands in one frame, and a
+    // later frame carries the reason with no content of its own. Splitting them matters —
+    // a reason bundled onto the same frame as the text would let a consumer that bails on
+    // the reason never see the text at all, which is not the situation being modelled.
+    const frames = [JSON.stringify({ candidates: [{ content: { parts } }] })];
+    frames.push(
+      JSON.stringify({ candidates: [{ content: { parts: [] }, finishReason: script.finishReason ?? "STOP" }] }),
+    );
     return {
       ok: true,
       status: 200,
       body: (async function* () {
-        yield Buffer.from(`data: ${frame}\n\n`);
+        for (const frame of frames) yield Buffer.from(`data: ${frame}\n\n`);
       })(),
     };
   };
@@ -540,6 +548,23 @@ async function collect(stream) {
   const frames = [];
   for await (const frame of stream) frames.push(frame);
   return frames;
+}
+
+/**
+ * The text a reader actually ends up with, by replaying the frames the way public/app.js
+ * does: `delta` appends, `reset` clears.
+ *
+ * Asserting on the last `delta` — which is what these tests used to do — cannot see the
+ * bug this exists to catch, because every individual delta is fine. The damage is in what
+ * they add up to on screen, and only a replay of the whole stream shows it.
+ */
+function readerSees(frames) {
+  let shown = "";
+  for (const frame of frames) {
+    if (frame.type === "delta") shown += frame.text;
+    if (frame.type === "reset") shown = "";
+  }
+  return shown;
 }
 
 test("the model searches, the sources are numbered, the answer is shown", async () => {
@@ -571,6 +596,131 @@ test("the model searches, the sources are numbered, the answer is shown", async 
   const responseTurn = sent[1].contents.at(-1);
   assert.equal(responseTurn.role, "user");
   assert.match(responseTurn.parts[0].functionResponse.response.result, /\[1\] Title 0/);
+});
+
+test("a guess written before the search does not survive next to the real answer", async () => {
+  // The model thinks out loud, searches, then answers properly. The preamble is not the
+  // answer — this layer already excluded it from the audit — so it must not be left on
+  // screen either, where it reads as the reply contradicting itself mid-sentence.
+  const { fetchImpl } = fakeGemini([
+    {
+      text: "Let me look that up. I think it was about $4 billion.",
+      calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }],
+    },
+    { text: "The bridge cost $2.1 billion, so the claim is false [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion, so the claim is false [1].");
+  assert.ok(!readerSees(frames).includes("$4 billion"), "the abandoned guess must be withdrawn");
+});
+
+test("an answer written before one last search is kept, not buried under an apology", async () => {
+  // The mirror image of the test above, and the reason the withdrawn text is held rather
+  // than dropped: here the pre-search text *was* the answer, and the model then spent its
+  // last round searching instead of restating it. Discarding it would end the turn by
+  // claiming there was no answer directly underneath the answer.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      text: "The bridge cost $2.1 billion, so the claim is false [1].",
+      calls: [{ name: "web_search", args: { query: "bridge opened", claim: "The bridge opened in 2011" } }],
+    },
+    { text: "" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion, so the claim is false [1].");
+  assert.ok(
+    !readerSees(frames).includes("did not get to an answer"),
+    "an answer was written; the turn must not deny it",
+  );
+});
+
+test("prose written alongside a refused, past-budget tool call is not left on screen", async () => {
+  // The budget-exhausted path reaches the same failure by a different route: the model
+  // writes a half-thought and asks for a search it cannot have, the call is refused rather
+  // than run — so no search frame marks it — and the next round writes a fresh answer.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "q1", claim: "A claim to check" } }] },
+    { calls: [{ name: "web_search", args: { query: "q2", claim: "A claim to check" } }] },
+    { calls: [{ name: "web_search", args: { query: "q3", claim: "A claim to check" } }] },
+    {
+      text: "I still need to confirm the second figure, so let me search again.",
+      calls: [{ name: "web_search", args: { query: "q4", claim: "A claim to check" } }],
+    },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [1].");
+  assert.ok(!readerSees(frames).includes("let me search again"), "the half-thought is withdrawn");
+});
+
+test("a stream that dies mid-answer keeps the text it wrote and its bibliography", async () => {
+  // Gemini ends turns on RECITATION or SAFETY partway through an answer without warning.
+  // The text that arrived is real and is kept — but so are its sources, which is the part
+  // that used to be lost: throwing from the stream skipped the bibliography, leaving a
+  // half-answer whose [1] markers pointed at nothing. The failure is still reported.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [1]. The claim is false", finishReason: "RECITATION" },
+  ]);
+
+  const frames = [];
+  let thrown = null;
+  try {
+    for await (const frame of verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    })) {
+      frames.push(frame);
+    }
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert.match(readerSees(frames), /The bridge cost \$2\.1 billion \[1\]\./);
+  const sources = frames.find((f) => f.type === "sources");
+  assert.ok(sources, "the bibliography must survive the failure");
+  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+  // Still an error — the reader is owed the reason it stopped, just not at the cost of
+  // everything that did arrive.
+  assert.match(thrown?.message ?? "", /RECITATION/);
 });
 
 test("an uncited answer is rejected, rewritten, and only the rewrite is shown", async () => {

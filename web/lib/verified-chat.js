@@ -200,8 +200,12 @@ function ledgerBlock(ledger) {
  * - `{type: "searching", searches}` — these searches have just been dispatched, all at
  *   once. Sent before any of them returns, so the UI can show the wait rather than a gap.
  * - `{type: "search", …}` — a search ran; `results` are its numbered sources, or `error`.
- * - `{type: "reset"}` — discard the text shown so far. Sent when the model starts a fresh
- *   round, so a "let me look that up" preamble doesn't sit above the real answer.
+ * - `{type: "reset", reason}` — discard the text shown so far, because it is no longer the
+ *   answer. `superseded` means the model wrote something and then moved on from it, so a
+ *   "let me look that up" preamble doesn't sit above the real answer; `citation-check`
+ *   means it failed the audit and is being rewritten. Consumers that show text **must**
+ *   honour this: text this layer has stopped counting but the screen keeps showing is what
+ *   a reader sees as a reply mangling itself. See `supersede`.
  * - `{type: "sources", sources}` — the bibliography, built from the ledger.
  * - `{type: "unverified", message}` — the answer failed the audit twice and is labelled.
  */
@@ -232,10 +236,45 @@ export async function* verifiedChat({
   // worse than showing a flawed answer, because it looks like the app broke. Held here so
   // there is always something to put back.
   let discarded = "";
+  // A stream that died *after* the model had already written something. Held rather than
+  // thrown on the spot — see the catch below — so the turn can still be finished.
+  let streamError = null;
+
+  /**
+   * Withdraw the text written so far, because the model has moved on from it.
+   *
+   * This is the fix for a reply that arrives and then appears to come apart. The rule
+   * that text before the last search is not the answer has always been enforced *here*,
+   * on the copy this function audits — but the browser was never told, so it went on
+   * showing text this layer had already stopped counting. The two then disagreed about
+   * what the answer was, and both ways that disagreement resolved looked, to a reader,
+   * exactly like the app mangling a reply that had already arrived:
+   *
+   * - An abandoned guess sat jammed against the real answer, unseparated —
+   *   "…probably 1887." immediately followed by "The Eiffel Tower was completed in
+   *   1889 [1]." One reply, reading as though it contradicted itself mid-sentence.
+   * - Worse, when the model wrote its whole verdict and *then* ran one last search, the
+   *   turn ended by appending "I ran the searches below but did not get to an answer"
+   *   directly underneath the answer it was denying the existence of.
+   *
+   * So the text is moved rather than kept or dropped: withdrawn from the screen, and held
+   * in `discarded` so the fallback at the end of this function can put it back when
+   * nothing better arrives. A discarded guess stays discarded; a real answer survives.
+   */
+  function* supersede() {
+    if (answer.trim()) {
+      discarded = answer;
+      yield { type: "reset", reason: "superseded" };
+    }
+    answer = "";
+  }
 
   for (let attempt = 0; ; attempt += 1) {
     answer = "";
     truncated = false;
+    // The highest round this attempt has seen begin. A round that starts while text is
+    // already on screen means that text was not the answer — see `supersede` below.
+    let lastRound = -1;
 
     // Only the first attempt searches. The repair round is a rewrite of an answer the
     // model can see, from sources quoted to it below — handing it the tool again invites
@@ -243,59 +282,94 @@ export async function* verifiedChat({
     // time twice over, and can end the turn on a search instead of on a verdict.
     const searchThisAttempt = enabled && attempt === 0;
 
-    for await (const frame of streamChat({
-      apiKey,
-      messages: conversation,
-      system,
-      signal,
-      fetchImpl,
-      tools: searchThisAttempt ? SEARCH_TOOLS : null,
-      toolRunner: searchThisAttempt ? toolRunner : null,
-      // The repair round must not re-attach the video: the bytes are already in the
-      // conversation the model is rewriting from, and re-attaching would re-download and
-      // re-upload the whole clip to correct a citation. Its sources travel as text below.
-      attachMedia: attempt === 0,
-      ...geminiOptions,
-    })) {
-      // The answer under audit is the text written *after* the last search. Anything
-      // before it is the model narrating its own process ("let me check that") — it is
-      // shown to the user as progress, but holding a "I'll look this up" line to the
-      // citation rule would fail every answer that thinks out loud before searching.
-      if (frame.type === "search") answer = "";
-      if (frame.type === "delta") answer += frame.text;
-      if (frame.type === "truncated") truncated = true;
-      // `streamChat` reports a round's calls without knowing what they mean; naming them
-      // as searches is this layer's job, since this is the layer that chose the tool.
-      if (frame.type === "tool_start") {
-        yield {
-          type: "searching",
-          searches: frame.calls
-            .filter((call) => call.name === "web_search")
-            .map((call) => ({
-              query: String(call.args?.query ?? ""),
-              claim: String(call.args?.claim ?? ""),
-            })),
-        };
-        continue;
+    try {
+      for await (const frame of streamChat({
+        apiKey,
+        messages: conversation,
+        system,
+        signal,
+        fetchImpl,
+        tools: searchThisAttempt ? SEARCH_TOOLS : null,
+        toolRunner: searchThisAttempt ? toolRunner : null,
+        // The repair round must not re-attach the video: the bytes are already in the
+        // conversation the model is rewriting from, and re-attaching would re-download and
+        // re-upload the whole clip to correct a citation. Its sources travel as text below.
+        attachMedia: attempt === 0,
+        ...geminiOptions,
+      })) {
+        // Text the model wrote and then moved on from — see `supersede` below. A search is
+        // one way that happens: the answer under audit is the text written *after* the last
+        // search, because anything before it is the model narrating its own process ("let
+        // me check that"), and holding a "I'll look this up" line to the citation rule
+        // would fail every answer that thinks out loud before searching.
+        if (frame.type === "search") yield* supersede();
+        // A fresh round beginning is the other way, and the general case. The model wrote
+        // something, the round ended for a reason that was not a search — it asked for a
+        // tool past its budget, which is refused rather than run — and the next round
+        // starts from the same conversation. What it writes there replaces what it wrote
+        // here.
+        if (frame.type === "stage" && frame.stage === "waiting" && frame.round > lastRound) {
+          lastRound = frame.round;
+          yield* supersede();
+        }
+        if (frame.type === "delta") answer += frame.text;
+        if (frame.type === "truncated") truncated = true;
+        // `streamChat` reports a round's calls without knowing what they mean; naming them
+        // as searches is this layer's job, since this is the layer that chose the tool.
+        if (frame.type === "tool_start") {
+          yield {
+            type: "searching",
+            searches: frame.calls
+              .filter((call) => call.name === "web_search")
+              .map((call) => ({
+                query: String(call.args?.query ?? ""),
+                claim: String(call.args?.claim ?? ""),
+              })),
+          };
+          continue;
+        }
+        yield frame;
       }
-      yield frame;
+    } catch (error) {
+      // The caller closing the tab is what they asked for, not a failure to dress up.
+      if (signal?.aborted) return;
+      // Nothing had arrived, so there is nothing to preserve: the error is the entire
+      // outcome of the turn, and it belongs to the caller to report.
+      if (!answer.trim()) throw error;
+      // Text was already on screen when the stream died — most often Gemini ending its turn
+      // on RECITATION or SAFETY partway through an answer, which it does without warning.
+      // Throwing from here would take the bibliography down with it and leave the reader a
+      // half-answer whose [1] markers point at nothing: the app would have thrown away the
+      // one thing that makes the surviving text checkable, which is the whole promise of
+      // this layer. So the failure is held, the turn is finished with its sources below,
+      // and it is re-thrown at the end once the reader has everything that did arrive.
+      streamError = error;
     }
 
     if (signal?.aborted) return;
-    if (!enabled) return;
+    if (!enabled) {
+      if (streamError) throw streamError;
+      return;
+    }
 
-    audit = auditAnswer(answer, ledger, { truncated });
+    // A stream that died mid-answer cut the text off exactly the way the token cap does, so
+    // the audit's last-sentence exemption applies for the same reason: the citation marker
+    // goes at the end of a sentence, and the end is what was lost.
+    audit = auditAnswer(answer, ledger, { truncated: truncated || Boolean(streamError) });
     // Cheap and local, so it is over before the frame is read — but a rejected answer is
     // about to be pulled off the screen, and "Checking citations" is what makes the next
     // few seconds legible rather than alarming.
-    if (!audit.ok && !truncated && attempt < maxRepairRounds) {
+    if (!audit.ok && !truncated && !streamError && attempt < maxRepairRounds) {
       yield { type: "stage", stage: "rewriting" };
     }
     // A truncated answer fails the audit almost by construction — it was cut off, and the
     // sentence it was cut off in is the one that would have carried the citation. Sending
     // it back for a rewrite spends a second full answer to arrive at the same cliff edge,
     // so the cap is reported honestly instead: the text that arrived is kept, and labelled.
-    if (audit.ok || truncated || attempt >= maxRepairRounds) break;
+    // A stream that died gets the same treatment for a blunter reason: the model just
+    // failed partway through an answer, and asking it to go again is as likely to fail the
+    // same way with the reader waiting through it a second time.
+    if (audit.ok || truncated || streamError || attempt >= maxRepairRounds) break;
 
     // Rejected. The UI is told to drop what it has shown before the rewrite starts, so a
     // failed answer is never left on screen next to the one that replaces it.
@@ -323,9 +397,13 @@ export async function* verifiedChat({
   // is indistinguishable from it. Both ways out below end the turn with words in it.
   if (!answer.trim()) {
     if (discarded.trim()) {
-      // The rewrite came back empty, so the answer that was withdrawn for it goes back up.
-      // It failed the check and is labelled as such below, which is a far more useful
-      // thing to hand a reader than a blank bubble.
+      // Something was withdrawn from the screen earlier in this turn and nothing came
+      // along to replace it, so it goes back up. Two ways to get here: a repair round
+      // that came back empty, or a model that wrote its answer and then spent its last
+      // round searching instead of restating it. Either way the withdrawn text is the
+      // only thing this turn produced, and it beats a blank bubble or the apology below —
+      // if it fails the citation check it is labelled as such, which is still far more
+      // useful than pretending there was no answer at all.
       answer = discarded;
       // Re-audited so the label and the bibliography describe the text actually on screen,
       // not the rewrite that never arrived.
@@ -364,4 +442,10 @@ export async function* verifiedChat({
       violations: audit.violations.slice(0, 10).map(({ type, message }) => ({ type, message })),
     };
   }
+
+  // Held back this whole time so everything above could reach the reader first. The turn is
+  // now as complete as it is going to get — the partial answer, its sources, its label —
+  // and the reader is still owed the reason it stopped, so the failure goes on to the
+  // caller to be reported as one.
+  if (streamError) throw streamError;
 }
