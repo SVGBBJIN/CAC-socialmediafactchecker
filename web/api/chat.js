@@ -127,6 +127,7 @@ export default async function handler(req, res) {
       system: SYSTEM_PROMPT,
       models: modelChainFromEnv(),
       maxOutputTokens: limits.maxOutputTokens,
+      thinkingBudgetTokens: limits.thinkingBudgetTokens,
       // How close this client is to its daily cap. Near it, the chain starts one model
       // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
       // exactly as it was.
@@ -135,6 +136,12 @@ export default async function handler(req, res) {
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);
+      if (frame.type === "truncated" && frame.totalTokens != null) {
+        // What THINKING_BUDGET_TOKENS is a guess about, made concrete: if thinking is most
+        // of `totalTokens`, the budget still needs to come down (or the model needs a
+        // shorter question); if it's the answer, MAX_OUTPUT_TOKENS is the one to raise.
+        trace(`truncated: ${frame.thoughtsTokens} thinking + ${frame.answerTokens} answer = ${frame.totalTokens}`);
+      }
       send(frame);
     }
 

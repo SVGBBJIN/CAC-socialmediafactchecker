@@ -60,8 +60,44 @@ export const REQUEST_TIMEOUT_MS = 0;
  * reasoning left it, and a fact-check that reads as three paragraphs can run into a cap
  * sized for ten — which arrives as a verdict cut off mid-sentence, right where the
  * citation would have gone.
+ *
+ * Raising this alone only raises the ceiling both draws from — a model that thinks more
+ * just spends the increase on thinking. `DEFAULT_THINKING_BUDGET_TOKENS` below is what
+ * actually reserves room for the answer; this cap is the outer bound on the two combined.
  */
-export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
+/**
+ * How many of those tokens a thinking model may spend on its internal reasoning per model
+ * call, via Gemini's `generationConfig.thinkingConfig.thinkingBudget`.
+ *
+ * This is the actual fix for a fact-check truncated mid-verdict, and raising
+ * `maxOutputTokens` alone is not: without it, the visible answer and the invisible
+ * reasoning draw from one shared pool, a model that thinks longer simply leaves less for
+ * the answer, and a bigger pool just moves where that runs out. Capping the reasoning
+ * specifically reserves the rest — `maxOutputTokens - thinkingBudgetTokens`, as a floor —
+ * for what the reader actually sees.
+ *
+ * Sent only to models known to support it (`supportsThinkingBudget`); the field does not
+ * exist on `gemini-2.0-flash`, and Gemini rejects an unrecognised name outright rather
+ * than ignoring it. Not verified against a live thinking-capable response as of writing —
+ * `isUnsupportedThinkingConfig` below exists as the fallback if that guess about which
+ * models accept the field turns out wrong, so a bad guess degrades to the next model in
+ * the chain rather than to a broken turn.
+ */
+export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
+
+/**
+ * Whether `model` is expected to accept `thinkingConfig.thinkingBudget`.
+ *
+ * The chain's thinking models are the "3" series and 2.5; "2.0" predates extended
+ * thinking and does not have a budget to cap. Matched on the version number rather than
+ * listed by name so a new preview ID slots in without a code change — the same reasoning
+ * `DEFAULT_MODEL_CHAIN` documents for not pinning IDs.
+ */
+export function supportsThinkingBudget(model) {
+  return !/(?:^|[^0-9])2\.0(?:[^0-9]|$)/.test(String(model));
+}
 
 /** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
 export const DEFAULT_MODEL_CHAIN = [
@@ -112,6 +148,9 @@ export class GeminiError extends Error {
  *   popular model in the chain is precisely the one most likely to be full. Treating it as
  *   terminal, as this used to, meant the single most common transient upstream failure
  *   killed the request outright while four models that would have answered went untried.
+ * - A 400 naming `thinkingConfig` as unknown: fall through. `supportsThinkingBudget` is a
+ *   guess about which models accept the field, made without a live response to check it
+ *   against — this is what a wrong guess costs instead of costing the whole chain.
  * - Everything else (401/`API_KEY_INVALID`, other 5xx) is terminal here — falling through
  *   would spend the same broken credential four more times, or hammer a genuine outage.
  */
@@ -123,6 +162,7 @@ export function shouldFallThrough(status, message = "") {
   if (isQuotaFailure(status, message)) return true;
   if (isOverloadedFailure(status, message)) return true;
   if (isContextLimitFailure(status, message)) return true;
+  if (isUnsupportedThinkingConfig(status, message)) return true;
   if (status !== 400) return false;
   const lowered = message.toLowerCase();
   return (
@@ -167,6 +207,19 @@ export function isOverloadedFailure(status, message = "") {
   if (status === 503) return true;
   if (status !== 500) return false;
   return /overload|unavailable|try again|capacity|busy/i.test(message);
+}
+
+/**
+ * Whether a 400 is Gemini refusing `thinkingConfig` as a field it doesn't recognise.
+ *
+ * The safety net for `supportsThinkingBudget` guessing wrong. Gemini's protobuf-JSON
+ * parser rejects an unknown field name outright ("Unknown name \"thinkingConfig\" ...")
+ * rather than ignoring it, so a model this app believes supports thinking but doesn't
+ * would otherwise fail the whole chain over one optional parameter.
+ */
+export function isUnsupportedThinkingConfig(status, message = "") {
+  if (status !== 400) return false;
+  return /thinking[_ ]?config/i.test(message);
 }
 
 /**
@@ -705,7 +758,23 @@ function* framesFromLine(line) {
   // frequently the one carrying the citation. Announced so the turn can be labelled
   // instead of quietly shipped as whole.
   if (finish === "MAX_TOKENS") {
-    yield { type: "truncated", reason: "max_output_tokens" };
+    // Gemini reports where the tokens actually went on the frame that carries the finish
+    // reason — `thoughtsTokenCount` against `candidatesTokenCount` is the real breakdown
+    // between reasoning and the visible reply, in place of guessing at one from outside.
+    // Worth keeping precisely because `thinkingBudgetTokens` is a guess about how the two
+    // trade off; this is how that guess gets checked against what actually happened.
+    const usage = frame?.usageMetadata;
+    yield {
+      type: "truncated",
+      reason: "max_output_tokens",
+      ...(usage
+        ? {
+            thoughtsTokens: usage.thoughtsTokenCount ?? 0,
+            answerTokens: usage.candidatesTokenCount ?? 0,
+            totalTokens: usage.totalTokenCount ?? null,
+          }
+        : {}),
+    };
     return;
   }
   if (finish && finish !== "STOP") {
@@ -866,6 +935,10 @@ export async function* streamChat({
   models = DEFAULT_MODEL_CHAIN,
   temperature = 0.7,
   maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+  // 0 or null opts out — sent as "don't include the field" rather than "thinkingBudget: 0",
+  // since 0 has its own meaning to Gemini (disable thinking) that not every model may
+  // accept, and this app has no live confirmation either way.
+  thinkingBudgetTokens = DEFAULT_THINKING_BUDGET_TOKENS,
   signal,
   fetchImpl = fetch,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
@@ -953,6 +1026,7 @@ export async function* streamChat({
         budgetPressure,
         round,
         media,
+        thinkingBudgetTokens,
         overloadSweeps,
         // Only forwarded when the caller supplied one, so `streamRound` keeps its own
         // default rather than being handed `undefined` and losing it.
@@ -1073,6 +1147,7 @@ async function* streamRound({
   budgetPressure,
   round = 0,
   media = false,
+  thinkingBudgetTokens = 0,
   overloadSweeps = OVERLOAD_SWEEPS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
@@ -1133,6 +1208,16 @@ async function* streamRound({
     // tens of seconds, and there is deliberately no header deadline, so nothing else
     // marks the time. Reported per attempt, so walking the chain is visible too.
     yield { type: "stage", stage: "waiting", model, round, media };
+
+    // Support for the field varies per model in the chain, so it is set (or removed)
+    // freshly for whichever model this attempt is about to call — mutated in place on the
+    // shared `requestBody` rather than cloned, since only one attempt is ever in flight
+    // and the object is rebuilt from scratch at the top of every round anyway.
+    if (thinkingBudgetTokens > 0 && supportsThinkingBudget(model)) {
+      requestBody.generationConfig.thinkingConfig = { thinkingBudget: thinkingBudgetTokens };
+    } else {
+      delete requestBody.generationConfig.thinkingConfig;
+    }
 
     let response;
     // No-ops unless a caller asked for a header deadline; there is no default one.

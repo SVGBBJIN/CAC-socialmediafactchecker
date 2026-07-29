@@ -190,15 +190,29 @@ Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is labelled instead of 
 shipped as if it were finished — a fact-check cut off mid-sentence reads like a verdict,
 and the sentence it was cut off in is usually the one carrying the citation.
 
-That last point is why the cap is 8192 and not the 4096 it started at. On a thinking model
-`maxOutputTokens` covers the reasoning as well as the reply, and the models at the head of
-the chain think before they search and again before they answer — so a number picked as
-"more prose than any fact-check needs" is not what the answer actually gets. It is also why
-a truncated answer's **final** sentence is exempt from the citation audit: its missing
-marker is explained by the cut, and reporting it as a citation failure stacks a second,
-more alarming banner on top of the one that already says the answer stops mid-thought.
-Every earlier sentence is still held to the rule, and an invented citation still fails
-wherever it appears.
+That last point is also why a truncated answer's **final** sentence is exempt from the
+citation audit: its missing marker is explained by the cut, and reporting it as a citation
+failure stacks a second, more alarming banner on top of the one that already says the
+answer stops mid-thought. Every earlier sentence is still held to the rule, and an
+invented citation still fails wherever it appears.
+
+**`MAX_OUTPUT_TOKENS` alone does not fix truncation, and raising it repeatedly is chasing
+the wrong number.** On a thinking model this cap covers the reasoning as well as the
+reply — one shared pool — and the models at the head of the chain think before they
+search and again before they answer. A bigger pool just gives the reasoning more room to
+spend; it does not reserve any of it for what the reader sees.
+
+`THINKING_BUDGET_TOKENS` is what actually does that, via Gemini's
+`thinkingConfig.thinkingBudget`. Capping the reasoning specifically guarantees
+`MAX_OUTPUT_TOKENS − THINKING_BUDGET_TOKENS` as a floor for the visible answer — the
+default, 4096 out of a 16384 total, aims to leave three-quarters of the budget for what
+gets shown. It is sent only to models believed to support it (the "3" series and 2.5, not
+`gemini-2.0-flash`), matched on the version number so a new preview ID doesn't need a code
+change; if that guess is wrong for some future model, Gemini's "unknown field" 400 is
+treated the same as an unsupported model — fall through to the next one, not fail the
+turn. That guess has not been checked against a live thinking-capable response. Set
+`THINKING_BUDGET_TOKENS=0` to turn the field off entirely rather than requesting a zero
+budget, which not every model may accept.
 
 ## Every claim carries a citation
 

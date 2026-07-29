@@ -17,10 +17,13 @@ import {
   isQuotaFailure,
   isOverloadedFailure,
   isContextLimitFailure,
+  isUnsupportedThinkingConfig,
+  supportsThinkingBudget,
   retryAfterMs,
   REQUEST_TIMEOUT_MS,
   resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_THINKING_BUDGET_TOKENS,
 } from "./lib/gemini.js";
 import {
   ModelHealth,
@@ -293,6 +296,32 @@ test("MAX_TOKENS keeps the text and says it was cut off; other finish reasons th
   );
 });
 
+test("a truncated answer reports where the tokens actually went, when Gemini says", async () => {
+  // What THINKING_BUDGET_TOKENS is a guess about, made checkable: this is the number that
+  // says whether a repeat truncation needs a smaller thinking budget or a bigger reply cap.
+  const withUsage = `data: ${JSON.stringify({
+    candidates: [{ content: { parts: [{ text: "cut off" }] }, finishReason: "MAX_TOKENS" }],
+    usageMetadata: { thoughtsTokenCount: 3000, candidatesTokenCount: 1096, totalTokenCount: 4096 },
+  })}\n\n`;
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([withUsage]),
+    }),
+  );
+
+  assert.deepEqual(frames.at(-1), {
+    type: "truncated",
+    reason: "max_output_tokens",
+    thoughtsTokens: 3000,
+    answerTokens: 1096,
+    totalTokens: 4096,
+  });
+});
+
 test("the API key travels as a header, never in the URL", async () => {
   let seen;
   await collect(
@@ -398,11 +427,21 @@ test("the token cap can be overridden per call", async () => {
 });
 
 test("MAX_OUTPUT_TOKENS from the environment feeds the guard config", () => {
-  assert.equal(guardConfig({}).maxOutputTokens, 8192);
+  assert.equal(guardConfig({}).maxOutputTokens, 16384);
   assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "256" }).maxOutputTokens, 256);
   // Garbage falls back to the default rather than producing NaN and disabling the cap.
-  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 8192);
-  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 8192);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "not a number" }).maxOutputTokens, 16384);
+  assert.equal(guardConfig({ MAX_OUTPUT_TOKENS: "-5" }).maxOutputTokens, 16384);
+});
+
+test("THINKING_BUDGET_TOKENS from the environment feeds the guard config", () => {
+  assert.equal(guardConfig({}).thinkingBudgetTokens, 4096);
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "1024" }).thinkingBudgetTokens, 1024);
+  // Unlike the other caps, 0 is a real value here — it turns the field off rather than
+  // being treated as "unset" and falling back to the default.
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "0" }).thinkingBudgetTokens, 0);
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "not a number" }).thinkingBudgetTokens, 4096);
+  assert.equal(guardConfig({ THINKING_BUDGET_TOKENS: "-5" }).thinkingBudgetTokens, 4096);
 });
 
 test("a video is attached once, at its first mention, not on every turn", () => {
@@ -591,6 +630,94 @@ test("fall-through rules", () => {
   // A broken credential must never be spent down the chain, whichever status carries it.
   assert.equal(shouldFallThrough(400, "API key not valid. Pass a valid API key."), false);
   assert.equal(shouldFallThrough(403, "API_KEY_INVALID"), false);
+  // A guess about which models accept thinkingConfig costs a fall-through when wrong,
+  // not the whole chain.
+  assert.equal(shouldFallThrough(400, 'Unknown name "thinkingConfig" at generation_config'), true);
+});
+
+test("thinking budget is offered to the models that should support it, not to 2.0", () => {
+  assert.equal(supportsThinkingBudget("gemini-3.6-flash"), true);
+  assert.equal(supportsThinkingBudget("gemini-3.5-flash"), true);
+  assert.equal(supportsThinkingBudget("gemini-3-flash-preview"), true);
+  assert.equal(supportsThinkingBudget("gemini-2.5-flash"), true);
+  assert.equal(supportsThinkingBudget("gemini-2.0-flash"), false);
+});
+
+test("an unknown thinkingConfig field is recognised however Gemini phrases it", () => {
+  assert.equal(isUnsupportedThinkingConfig(400, 'Unknown name "thinkingConfig"'), true);
+  assert.equal(isUnsupportedThinkingConfig(400, "thinking_config is not a valid field"), true);
+  assert.equal(isUnsupportedThinkingConfig(400, "malformed request"), false);
+  assert.equal(isUnsupportedThinkingConfig(404, "thinkingConfig"), false);
+});
+
+test("the reasoning budget is capped separately from the reply, and only for models that take it", async () => {
+  const sent = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      // One model that should get the field, one that shouldn't.
+      models: ["gemini-3.6-flash", "gemini-2.0-flash"],
+      thinkingBudgetTokens: 4096,
+      fetchImpl: async (url, options) => {
+        sent.push(JSON.parse(options.body));
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  assert.equal(sent.length, 1, "the preferred model answered; the second was never called");
+  assert.deepEqual(sent[0].generationConfig.thinkingConfig, { thinkingBudget: 4096 });
+  assert.equal(answerFrames(frames).at(-1).text, "ok");
+});
+
+test("thinkingBudgetTokens: 0 turns the field off rather than sending a zero budget", async () => {
+  let sent;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      thinkingBudgetTokens: 0,
+      fetchImpl: async (url, options) => {
+        sent = JSON.parse(options.body);
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+  assert.ok(!("thinkingConfig" in sent.generationConfig));
+});
+
+test("a model that rejects thinkingConfig outright is skipped, not fatal", async () => {
+  // The defensive fallback for `supportsThinkingBudget` guessing wrong about a given
+  // model: this app has no live confirmation either way, so a bad guess must degrade to
+  // the next model in the chain rather than take the whole turn down.
+  const tried = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      thinkingBudgetTokens: 4096,
+      fetchImpl: async (url) => {
+        tried.push(url);
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () =>
+              JSON.stringify({
+                error: { message: 'Invalid JSON payload: Unknown name "thinkingConfig" at generation_config' },
+              }),
+          };
+        }
+        return sseResponse([frame("answered anyway")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2);
+  assert.equal(answerFrames(frames).at(-1).text, "answered anyway");
 });
 
 test("quota and context failures are told apart from ordinary bad requests", () => {
