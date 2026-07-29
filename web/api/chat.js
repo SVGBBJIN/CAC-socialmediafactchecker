@@ -69,8 +69,9 @@ export default async function handler(req, res) {
   }
 
   let messages;
+  let usage = { pressure: 0 };
   try {
-    authorize(req, limits);
+    usage = authorize(req, limits) ?? usage;
     messages = validateMessages(await readBody(req), limits);
   } catch (error) {
     if (error instanceof GuardError) {
@@ -118,6 +119,10 @@ export default async function handler(req, res) {
       system: SYSTEM_PROMPT,
       models: modelChainFromEnv(),
       maxOutputTokens: limits.maxOutputTokens,
+      // How close this client is to its daily cap. Near it, the chain starts one model
+      // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
+      // exactly as it was.
+      budgetPressure: usage.pressure ?? 0,
       signal: controller.signal,
     })) {
       send(frame);

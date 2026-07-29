@@ -32,6 +32,10 @@ let conversations = load();
 let activeId = localStorage.getItem(ACTIVE_KEY);
 let inFlight = null;
 let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000 };
+// What the pill shows: the last `model` frame, or the server's degradation snapshot from
+// /api/config before any answer has arrived. Held here rather than read back off the DOM
+// so re-rendering the message list can't lose it.
+let modelState = null;
 
 /* ---------------- storage ---------------- */
 
@@ -139,6 +143,42 @@ function linkCitations(html, sources) {
   });
 }
 
+/**
+ * The model pill.
+ *
+ * It exists to answer one question — *what actually produced this answer* — and until now
+ * it only answered half of it. The chain steps down when the preferred model is out of
+ * quota or the day's budget is nearly spent, and a badge that reads `gemini-2.0-flash`
+ * with no explanation looks like a misconfiguration rather than a system working as
+ * designed. Degradation is a state worth seeing: it is temporary, it changes how much the
+ * answer is worth trusting, and it recovers on its own, so the reader wants to know both
+ * that it happened and roughly when it will stop.
+ *
+ * `state` is the server's `model` frame, or the `health` block from /api/config.
+ */
+function renderModelBadge(state) {
+  if (!state?.model) {
+    el.modelBadge.hidden = true;
+    return;
+  }
+  el.modelBadge.hidden = false;
+  el.modelBadge.textContent = state.degraded && state.label
+    ? `${state.model} · ${state.label}`
+    : state.model;
+  el.modelBadge.classList.toggle("degraded", Boolean(state.degraded));
+  // The note names both models and the recovery time; the pill has room for neither.
+  el.modelBadge.title = state.note || `Answering on ${state.model}.`;
+}
+
+/** The banner an answer earns by running into the output-token cap. */
+function truncatedElement() {
+  const wrap = document.createElement("div");
+  wrap.className = "truncated";
+  wrap.textContent =
+    "This answer hit the reply-length limit and stops mid-thought. Ask for the rest, or for a shorter version.";
+  return wrap;
+}
+
 /** The searches that were run, as chips above the answer. */
 function searchListElement(searches) {
   const wrap = document.createElement("div");
@@ -229,6 +269,7 @@ function messageElement(message, conversationId) {
   wrap.append(body);
   if (message.sources?.length) wrap.append(sourceListElement(message.sources));
   if (message.unverified) wrap.append(unverifiedElement(message.unverified));
+  if (message.truncated) wrap.append(truncatedElement());
 
   // `retryable` distinguishes "Gemini is overloaded, try again" from "that request was
   // malformed and will fail identically" — retrying the latter just burns another round
@@ -252,8 +293,12 @@ function renderMessages() {
   if (!conversation || conversation.messages.length === 0) {
     el.messages.append(el.emptyState);
     el.emptyState.hidden = false;
-    el.modelBadge.hidden = true;
+    // Nothing has answered yet, so there is no model to report — except a degradation,
+    // which is true of the next message the user sends and is worth showing before they
+    // send it.
+    renderModelBadge(modelState?.degraded ? modelState : null);
   } else {
+    renderModelBadge(modelState);
     el.emptyState.hidden = true;
     conversation.messages.forEach((message, index) => {
       // Only the last message gets a retry button. Retrying rebuilds the conversation
@@ -394,6 +439,13 @@ async function loadServerConfig() {
 
   setStatus(serverConfig.requiresPassword ? "Key on server · gated" : "Key on server", "ok");
 
+  // Only a degradation is worth showing before the first answer: naming the preferred
+  // model on a fresh page would be a promise the chain hasn't made yet.
+  if (serverConfig.health?.degraded) {
+    modelState = serverConfig.health;
+    renderModelBadge(modelState);
+  }
+
   if (serverConfig.requiresPassword && !sessionStorage.getItem(PASSPHRASE_KEY)) {
     el.passDialog.showModal();
   }
@@ -447,6 +499,7 @@ async function streamAnswer(conversationId) {
   const searches = [];
   let sources = [];
   let unverified = null;
+  let truncated = false;
 
   // Live containers for the evidence trail. Created up front and left empty so the
   // ordering — searches, answer, sources, warning — is fixed by the DOM rather than by
@@ -456,7 +509,11 @@ async function streamAnswer(conversationId) {
   bubble.insertBefore(searchesEl, body);
   let sourcesEl = document.createElement("div");
   let noticeEl = document.createElement("div");
-  bubble.append(sourcesEl, noticeEl);
+  // Its own slot rather than sharing `noticeEl`: a truncated answer usually fails the
+  // citation audit too — it was cut off before it could cite — and the two notices say
+  // different things, so one must not overwrite the other.
+  let truncatedEl = document.createElement("div");
+  bubble.append(sourcesEl, noticeEl, truncatedEl);
 
   /** Swap a placeholder for freshly rendered content, keeping the handle pointing at it. */
   const replace = (element, next) => {
@@ -540,8 +597,11 @@ async function streamAnswer(conversationId) {
         }
 
         if (frame.type === "model") {
-          el.modelBadge.textContent = frame.model;
-          el.modelBadge.hidden = false;
+          modelState = frame;
+          renderModelBadge(modelState);
+        } else if (frame.type === "truncated") {
+          truncated = true;
+          truncatedEl = replace(truncatedEl, truncatedElement());
         } else if (frame.type === "delta") {
           answer += frame.text;
           scheduleRender();
@@ -598,6 +658,7 @@ async function streamAnswer(conversationId) {
         searches: searches.length ? searches : undefined,
         sources: sources.length ? sources : undefined,
         unverified: unverified ?? undefined,
+        truncated: truncated || undefined,
       });
     }
     if (failed) target.messages.push({ role: "error", content: failed, retryable, restorePoint });

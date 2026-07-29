@@ -100,6 +100,7 @@ web/
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
+  lib/degradation.js  When to stop asking for the best model, and how the UI says so.
   lib/verified-chat.js  The fact-check turn: search tool, system prompt, citation audit.
   lib/search.js    Query → search provider → normalised, openable sources.
   lib/search-schema.js  JSON Schema for a query, and the Gemini tool declaration.
@@ -130,9 +131,36 @@ default `npm test` path stays dependency-free; `test:ui` exits with instructions
 isn't installed.
 
 `lib/gemini.js` mirrors the model chain in `Sources/SeerCore/Gemini/GeminiModel.swift` —
-Flash 3.6, then 3.5, 3-preview, 2.5, 2.0 — and falls through on availability errors
-(404/403) only. Model IDs get retired and key tiers differ; pinning one ID breaks in the
-field. See the comments in the Swift file for the full reasoning.
+Flash 3.6, then 3.5, 3-preview, 2.5, 2.0. Model IDs get retired and key tiers differ;
+pinning one ID breaks in the field. See the comments in the Swift file for the full
+reasoning.
+
+## Graceful degradation
+
+The chain steps down on its own and steps back up on its own. Four things move it:
+
+| Trigger | What happens | What the pill shows |
+| --- | --- | --- |
+| The model isn't available to this key (404/403) | Try the next model | `… · fallback` |
+| The model is out of quota (429, or `RESOURCE_EXHAUSTED`) | Try the next model, and **remember** — the exhausted one is skipped outright until its cooldown ends | `… · quota` |
+| The client is near its daily message cap | Start one model down the chain, to make the remaining messages go further | `… · conserving` |
+| The conversation is too long for the model | Try the next model; if none accept, say "start a new chat" rather than relaying token arithmetic | `… · long chat` |
+
+Two details worth knowing. Quota in Gemini is metered **per model**, which is why a 429 is
+a reason to try the next one rather than to fail the request — and why the 429 is worth
+remembering: the next request would otherwise re-learn it at the cost of a round trip, for
+as long as the quota window lasts. Cooldowns come from the server's own `Retry-After` or
+`retryDelay` where it sends one, are capped at 15 minutes, and expire by themselves — there
+is no flag anyone has to remember to flip back.
+
+The registry lives in `lib/degradation.js` and is process memory, with the same caveat as
+the rate limiter in `lib/guard.js`: under `node server.js` it is one shared registry; on
+Vercel it is per function instance, so a cold start re-learns from the first 429. That is
+one wasted round trip, which is exactly where this started.
+
+Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is now labelled instead of being
+shipped as if it were finished — a fact-check cut off mid-sentence reads like a verdict,
+and the sentence it was cut off in is usually the one carrying the citation.
 
 ## Every claim carries a citation
 

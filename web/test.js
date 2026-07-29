@@ -14,9 +14,13 @@ import {
   youTubeVideoID,
   findYouTubeVideoIDs,
   isInvalidKeyFailure,
+  isQuotaFailure,
+  isContextLimitFailure,
+  retryAfterMs,
   resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from "./lib/gemini.js";
+import { ModelHealth, planChain, healthSnapshot, MAX_COOLDOWN_MS } from "./lib/degradation.js";
 import {
   tikTokVideoID,
   isTikTokShortLink,
@@ -74,11 +78,17 @@ test("streams deltas in order and reports the model that answered", async () => 
     }),
   );
 
-  assert.deepEqual(frames, [
-    { type: "model", model: "gemini-3.6-flash" },
-    { type: "delta", text: "Hello" },
-    { type: "delta", text: " there" },
-  ]);
+  assert.deepEqual(
+    frames.map((f) => (f.type === "model" ? { type: f.type, model: f.model, degraded: f.degraded } : f)),
+    [
+      { type: "model", model: "gemini-3.6-flash", degraded: false },
+      { type: "delta", text: "Hello" },
+      { type: "delta", text: " there" },
+    ],
+  );
+  // The preferred model answered, so the badge has nothing to warn about.
+  assert.deepEqual(frames[0].reason, null);
+  assert.equal(frames[0].label, "");
 });
 
 test("reassembles a frame split across two network chunks", async () => {
@@ -119,7 +129,14 @@ test("falls through a 404 model to the next in the chain", async () => {
   );
 
   assert.equal(tried.length, 2);
-  assert.deepEqual(frames[0], { type: "model", model: "gemini-2.0-flash" });
+  assert.equal(frames[0].type, "model");
+  assert.equal(frames[0].model, "gemini-2.0-flash");
+  // The frame carries why, not just what: the badge has to be able to say that the answer
+  // came from the second model and that it wasn't the user's doing.
+  assert.equal(frames[0].degraded, true);
+  assert.equal(frames[0].preferred, "retired-model");
+  assert.equal(frames[0].reason, "unavailable");
+  assert.match(frames[0].note, /retired-model/);
 });
 
 test("a bad key is terminal, not a reason to try four more models", async () => {
@@ -227,7 +244,7 @@ test("a blocked prompt surfaces as an error, not as silence", async () => {
   );
 });
 
-test("MAX_TOKENS finishes cleanly; other finish reasons do not", async () => {
+test("MAX_TOKENS keeps the text and says it was cut off; other finish reasons throw", async () => {
   const ok = await collect(
     streamChat({
       apiKey: "k",
@@ -236,7 +253,10 @@ test("MAX_TOKENS finishes cleanly; other finish reasons do not", async () => {
       fetchImpl: async () => sseResponse([frame("cut off", { finishReason: "MAX_TOKENS" })]),
     }),
   );
-  assert.equal(ok.at(-1).text, "cut off");
+  // The tokens that arrived are kept — they're real — but the turn is announced as
+  // incomplete rather than passing for a finished answer.
+  assert.equal(ok.find((f) => f.type === "delta").text, "cut off");
+  assert.deepEqual(ok.at(-1), { type: "truncated", reason: "max_output_tokens" });
 
   await assert.rejects(
     collect(
@@ -534,8 +554,234 @@ test("fall-through rules", () => {
   assert.equal(shouldFallThrough(403, "no access"), true);
   assert.equal(shouldFallThrough(400, "model is not supported"), true);
   assert.equal(shouldFallThrough(400, "malformed request"), false);
-  assert.equal(shouldFallThrough(429, "quota"), false);
+  // Quota is per model, so a 429 is a reason to try the next one — not to fail the
+  // request while four models that would have answered go untried.
+  assert.equal(shouldFallThrough(429, "quota"), true);
+  assert.equal(shouldFallThrough(403, "RESOURCE_EXHAUSTED"), true);
+  assert.equal(shouldFallThrough(400, "input token count exceeds the maximum"), true);
   assert.equal(shouldFallThrough(500, "boom"), false);
+  // A broken credential must never be spent down the chain, whichever status carries it.
+  assert.equal(shouldFallThrough(400, "API key not valid. Pass a valid API key."), false);
+  assert.equal(shouldFallThrough(403, "API_KEY_INVALID"), false);
+});
+
+test("quota and context failures are told apart from ordinary bad requests", () => {
+  assert.equal(isQuotaFailure(429, ""), true);
+  assert.equal(isQuotaFailure(403, "Quota exceeded for quota metric"), true);
+  assert.equal(isQuotaFailure(400, "resource_exhausted"), true);
+  assert.equal(isQuotaFailure(400, "invalid argument"), false);
+  assert.equal(isQuotaFailure(500, "quota"), false, "a 5xx is an outage, not a quota");
+
+  assert.equal(isContextLimitFailure(400, "The input token count (1200000) exceeds the maximum"), true);
+  assert.equal(isContextLimitFailure(413, "request entity too large"), true);
+  assert.equal(isContextLimitFailure(400, "model is not supported"), false);
+});
+
+test("a Retry-After header and a retryDelay body both set the cooldown", () => {
+  const headers = (value) => ({ headers: { get: (name) => (name === "retry-after" ? value : null) } });
+  assert.equal(retryAfterMs(headers("30"), ""), 30_000);
+  assert.equal(retryAfterMs({}, '{"error":{"details":[{"retryDelay":"27s"}]}}'), 27_000);
+  assert.equal(retryAfterMs({}, "no delay here"), null);
+  // A daily quota can ask for hours. Honouring that verbatim would pin the process to the
+  // bottom of the chain on the strength of one response.
+  assert.equal(retryAfterMs(headers("86400"), ""), MAX_COOLDOWN_MS);
+});
+
+/* ---------------- Graceful degradation ---------------- */
+
+test("a rate-limited model falls through to the next one instead of failing the request", async () => {
+  const health = new ModelHealth();
+  const tried = [];
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      health,
+      fetchImpl: async (url) => {
+        tried.push(decodeURIComponent(url));
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 429,
+            headers: { get: (name) => (name === "retry-after" ? "45" : null) },
+            text: async () => JSON.stringify({ error: { message: "Quota exceeded" } }),
+          };
+        }
+        return sseResponse([frame("still answered")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2);
+  assert.equal(frames.at(-1).text, "still answered");
+
+  const announced = frames.find((f) => f.type === "model");
+  assert.equal(announced.model, "gemini-3.5-flash");
+  assert.equal(announced.degraded, true);
+  assert.equal(announced.reason, "quota");
+  assert.equal(announced.label, "quota");
+  assert.match(announced.note, /out of quota or rate-limited/);
+  // The server said 45 seconds, so that is what the reader is told to expect.
+  assert.match(announced.note, /about 45s/);
+});
+
+test("what one request learns about a quota, the next one acts on before sending", async () => {
+  const health = new ModelHealth();
+  health.markExhausted("gemini-3.6-flash", { reason: "quota", cooldownMs: 60_000 });
+
+  const tried = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      health,
+      fetchImpl: async (url) => {
+        tried.push(decodeURIComponent(url));
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  // The whole point: the exhausted model is not contacted at all. Re-learning the same
+  // 429 on every request for a minute is a round trip per request that buys nothing.
+  assert.equal(tried.length, 1);
+  assert.match(tried[0], /gemini-3\.5-flash/);
+  assert.equal(frames[0].degraded, true);
+  assert.equal(frames[0].reason, "quota");
+});
+
+test("a cooldown expires on its own, and a model that answers is marked healthy again", () => {
+  const health = new ModelHealth();
+  const now = Date.now();
+  health.markExhausted("a", { cooldownMs: 1000, now });
+
+  assert.equal(health.isAvailable("a", now + 500), false);
+  assert.equal(health.isAvailable("a", now + 1500), true, "recovery needs no operator action");
+
+  health.markExhausted("a", { cooldownMs: 60_000 });
+  health.markHealthy("a");
+  assert.equal(health.isAvailable("a"), true);
+});
+
+test("a longer cooldown is never shortened by a competing failure", () => {
+  const health = new ModelHealth();
+  const now = Date.now();
+  health.markExhausted("a", { cooldownMs: 300_000, now });
+  health.markExhausted("a", { cooldownMs: 1000, now });
+  assert.equal(health.isAvailable("a", now + 5000), false);
+});
+
+test("planning skips cooled models anywhere in the chain, but never plans an empty one", () => {
+  const health = new ModelHealth();
+  const models = ["a", "b", "c"];
+  health.markExhausted("b", { cooldownMs: 60_000 });
+
+  const plan = planChain({ models, health });
+  assert.deepEqual(plan.models, ["a", "c"]);
+  assert.equal(plan.degraded, false, "the preferred model still answers, so nothing is degraded");
+
+  for (const model of models) health.markExhausted(model, { cooldownMs: 60_000 });
+  const desperate = planChain({ models, health });
+  // Cooldowns are a heuristic built from one response each. Refusing to answer on the
+  // strength of them would turn a guess into an outage.
+  assert.deepEqual(desperate.models, models);
+  assert.equal(desperate.degraded, false);
+});
+
+test("nearing the daily message limit steps the chain down one place, and only one", () => {
+  const models = ["a", "b", "c"];
+  const health = new ModelHealth();
+
+  assert.deepEqual(planChain({ models, health, budgetPressure: 0.5 }).models, models);
+
+  const squeezed = planChain({ models, health, budgetPressure: 0.95 });
+  assert.deepEqual(squeezed.models, ["b", "c"]);
+  assert.equal(squeezed.degraded, true);
+  assert.equal(squeezed.reason, "budget");
+
+  // One step, not a jump to the oldest model in the list.
+  assert.deepEqual(planChain({ models: ["a"], health, budgetPressure: 1 }).models, ["a"]);
+});
+
+test("the rate limiter reports how much of the day is spent", () => {
+  resetRateLimits();
+  const now = Date.now();
+  const first = checkRateLimit("budget-ip", { ...limits, perMinute: 100, perDay: 4 }, now);
+  assert.equal(first.pressure, 0.25);
+  assert.equal(first.remainingToday, 3);
+});
+
+test("the config snapshot names both models, and stays quiet when nothing is wrong", () => {
+  const health = new ModelHealth();
+  const models = ["gemini-3.6-flash", "gemini-3.5-flash"];
+
+  assert.deepEqual(healthSnapshot({ models, health }), {
+    degraded: false,
+    model: "gemini-3.6-flash",
+    preferred: "gemini-3.6-flash",
+  });
+
+  health.markExhausted("gemini-3.6-flash", { reason: "quota", cooldownMs: 120_000 });
+  const degraded = healthSnapshot({ models, health });
+  assert.equal(degraded.degraded, true);
+  assert.equal(degraded.model, "gemini-3.5-flash");
+  assert.equal(degraded.preferred, "gemini-3.6-flash");
+  assert.equal(degraded.label, "quota");
+});
+
+test("a conversation too big for one model is tried on the next, then explained", async () => {
+  const health = new ModelHealth();
+  const tooLong = async () => ({
+    ok: false,
+    status: 400,
+    text: async () =>
+      JSON.stringify({ error: { message: "The input token count (2000000) exceeds the maximum" } }),
+  });
+
+  let calls = 0;
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b"],
+        health,
+        fetchImpl: async () => {
+          calls += 1;
+          return tooLong();
+        },
+      }),
+    ),
+    // Not Gemini's token arithmetic, which reads like a bug: something the user can act on.
+    (error) => error.status === 413 && /too long .*Start a new chat/i.test(error.message),
+  );
+  assert.equal(calls, 2, "the next model has a different context window — worth the try");
+});
+
+test("every model rate-limited fails as one exhausted chain, and is retryable", async () => {
+  const health = new ModelHealth();
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["a", "b"],
+        health,
+        fetchImpl: async () => ({
+          ok: false,
+          status: 429,
+          text: async () => JSON.stringify({ error: { message: "Quota exceeded" } }),
+        }),
+      }),
+    ),
+    (error) =>
+      error.status === 429 &&
+      error.retryable === true &&
+      /Every available Gemini model/.test(error.message),
+  );
 });
 
 test("error messages survive a non-JSON body", () => {

@@ -178,9 +178,11 @@ export async function* verifiedChat({
   let conversation = messages;
   let audit = null;
   let answer = "";
+  let truncated = false;
 
   for (let attempt = 0; ; attempt += 1) {
     answer = "";
+    truncated = false;
 
     for await (const frame of streamChat({
       apiKey,
@@ -202,6 +204,7 @@ export async function* verifiedChat({
       // citation rule would fail every answer that thinks out loud before searching.
       if (frame.type === "search") answer = "";
       if (frame.type === "delta") answer += frame.text;
+      if (frame.type === "truncated") truncated = true;
       yield frame;
     }
 
@@ -209,7 +212,11 @@ export async function* verifiedChat({
     if (!enabled) return;
 
     audit = auditAnswer(answer, ledger);
-    if (audit.ok || attempt >= maxRepairRounds) break;
+    // A truncated answer fails the audit almost by construction — it was cut off, and the
+    // sentence it was cut off in is the one that would have carried the citation. Sending
+    // it back for a rewrite spends a second full answer to arrive at the same cliff edge,
+    // so the cap is reported honestly instead: the text that arrived is kept, and labelled.
+    if (audit.ok || truncated || attempt >= maxRepairRounds) break;
 
     // Rejected. The UI is told to drop what it has shown before the rewrite starts, so a
     // failed answer is never left on screen next to the one that replaces it.

@@ -240,6 +240,18 @@ body {
   padding: 3px 9px;
   white-space: nowrap;
   flex: none;
+  /* Every state of this pill carries a `title` explaining it; say so, since the degraded
+     state is exactly when someone wants the longer version. */
+  cursor: help;
+}
+
+/* Amber, not red: a degraded answer is a real answer from further down the model chain,
+   not a failure. Red here would put a fact-check that is merely running on last year's
+   Flash next to the banner that means "this answer failed its citation check". */
+.model-badge.degraded {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .messages {
@@ -579,5 +591,16 @@ a.citation:hover {
   border-radius: var(--radius);
   padding: 8px 12px;
   color: var(--danger);
+  font-size: 13px;
+}
+
+/* Same shape as `.unverified`, one step down in severity. The text that arrived is sound;
+   there is just less of it than the model meant to write. */
+.truncated {
+  margin-top: 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  color: var(--accent);
   font-size: 13px;
 }

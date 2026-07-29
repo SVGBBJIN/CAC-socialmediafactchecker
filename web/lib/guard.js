@@ -104,7 +104,15 @@ export function checkRateLimit(key, limits, now = Date.now()) {
   }
 
   hits.push(now);
-  return { remainingToday: limits.perDay - hits.length };
+  return {
+    remainingToday: limits.perDay - hits.length,
+    // How much of the day's allowance this client has spent, 0–1. Read by the model
+    // planner: past a threshold the request is answered on a cheaper model, so the last
+    // messages of a heavy day still get answered instead of the good model burning
+    // through what's left. Reported rather than acted on here — this function's job is
+    // counting, and what to do about the count is a different decision.
+    pressure: hits.length / limits.perDay,
+  };
 }
 
 /** Test seam — the counters are module state, so tests need a way to start clean. */
