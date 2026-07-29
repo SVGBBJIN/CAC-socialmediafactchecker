@@ -248,6 +248,17 @@ tolerate. Set a key before anyone relies on it — see `.env.example`.
 
 ## Notes
 
+- **The model's turn is echoed back verbatim, signatures and all.** Thinking models
+  attach an opaque `thoughtSignature` to the parts they emit — `functionCall` parts
+  especially — and it has to travel back on the part it arrived on when that turn is
+  replayed. Rebuilding a call from its name and arguments drops it, and Gemini answers
+  that with a warning and worse tool use rather than an error: the model is asked to
+  continue reasoning whose thread it can no longer pick up. `ModelTurn` in `lib/gemini.js`
+  keeps parts in arrival order and merges two only when both are plain text with no
+  signature between them.
+- **Thinking summaries are echoed but not shown.** A `thought: true` part is the model's
+  working, not its answer; streaming it to the reader would put the model's musings in the
+  middle of a fact-check.
 - Conversations live in `localStorage`, per browser. Clearing site data clears them.
   Nothing is stored server-side.
 - Streaming uses SSE over `fetch`, not `EventSource`, because the request is a POST.

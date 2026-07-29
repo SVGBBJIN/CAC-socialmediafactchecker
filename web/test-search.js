@@ -465,8 +465,19 @@ function fakeGemini(rounds) {
     round += 1;
 
     const parts = [];
-    if (script.text) parts.push({ text: script.text });
-    for (const call of script.calls ?? []) parts.push({ functionCall: { name: call.name, args: call.args } });
+    for (const thought of script.thoughts ?? []) {
+      parts.push({ text: thought.text, thought: true, thoughtSignature: thought.signature });
+    }
+    if (script.text) {
+      parts.push(
+        script.textSignature ? { text: script.text, thoughtSignature: script.textSignature } : { text: script.text },
+      );
+    }
+    for (const call of script.calls ?? []) {
+      const part = { functionCall: { name: call.name, args: call.args } };
+      if (call.signature) part.thoughtSignature = call.signature;
+      parts.push(part);
+    }
 
     const frame = JSON.stringify({ candidates: [{ content: { parts }, finishReason: "STOP" }] });
     return {
@@ -615,6 +626,103 @@ test("search can be turned off, and then nothing is enforced", async () => {
   );
   assert.ok(!sent[0].tools);
   assert.ok(!frames.some((f) => f.type === "unverified" || f.type === "sources"));
+});
+
+test("a thought signature travels back on the part it arrived on", async () => {
+  // Thinking models attach an opaque signature to the parts they emit, and Gemini warns
+  // (and reasons worse) if the next request doesn't carry it back on the same part. It is
+  // a silent-degradation bug by default: nothing fails, the tool use just gets sloppier.
+  const { fetchImpl, sent } = fakeGemini([
+    {
+      thoughts: [{ text: "I should check the audit.", signature: "SIG-THOUGHT" }],
+      text: "Checking that now.",
+      textSignature: "SIG-TEXT",
+      calls: [
+        { name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" }, signature: "SIG-CALL" },
+      ],
+    },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachTikTok: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    }),
+  );
+
+  const echoed = sent[1].contents.find((c) => c.role === "model");
+  assert.deepEqual(echoed.parts, [
+    { text: "I should check the audit.", thought: true, thoughtSignature: "SIG-THOUGHT" },
+    { text: "Checking that now.", thoughtSignature: "SIG-TEXT" },
+    {
+      functionCall: { name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } },
+      thoughtSignature: "SIG-CALL",
+    },
+  ]);
+
+  // The thinking summary is echoed but never shown: it is the model's working, not its
+  // answer, and putting it in the reply would read as part of the fact-check.
+  const shown = frames.filter((f) => f.type === "delta").map((f) => f.text).join("");
+  assert.ok(!shown.includes("I should check"), shown);
+  assert.ok(shown.includes("Checking that now."), shown);
+});
+
+test("parallel calls keep their own signatures, in order", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "first claim", claim: "The first claim" }, signature: "SIG-A" },
+        { name: "web_search", args: { query: "second claim", claim: "The second claim" }, signature: "SIG-B" },
+      ],
+    },
+    { text: "Both check out [1]." },
+  ]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachTikTok: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  const echoed = sent[1].contents.find((c) => c.role === "model");
+  assert.deepEqual(echoed.parts.map((p) => p.thoughtSignature), ["SIG-A", "SIG-B"]);
+  // Each result is answered under the same name, in the order the calls were made.
+  assert.equal(sent[1].contents.at(-1).parts.length, 2);
+});
+
+test("text with no signature is still merged into one part", async () => {
+  // The un-signed case must not regress into one part per token.
+  const { fetchImpl, sent } = fakeGemini([
+    { text: "Looking into it.", calls: [{ name: "web_search", args: { query: "bridge cost", claim: "A claim here" } }] },
+    { text: "Confirmed [1]." },
+  ]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachTikTok: false,
+      searchImpl: async () => searchResult("A claim here", ["https://a.example/1"]),
+    }),
+  );
+
+  const echoed = sent[1].contents.find((c) => c.role === "model");
+  assert.deepEqual(echoed.parts, [
+    { text: "Looking into it." },
+    { functionCall: { name: "web_search", args: { query: "bridge cost", claim: "A claim here" } } },
+  ]);
 });
 
 test("the system prompt states where the model's facts come from", () => {

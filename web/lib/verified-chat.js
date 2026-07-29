@@ -212,6 +212,11 @@ export async function* verifiedChat({
     // failed answer is never left on screen next to the one that replaces it.
     yield { type: "reset", reason: "citation-check" };
 
+    // Note that this is a *new* conversation built from app-level messages, not a
+    // continuation of the turn that just failed: the tool-call history and its thought
+    // signatures are deliberately left behind. The model is being asked to rewrite an
+    // answer it can see, from sources quoted below it — not to resume the reasoning that
+    // produced the answer that was rejected.
     conversation = [
       ...messages,
       { role: "assistant", content: answer },

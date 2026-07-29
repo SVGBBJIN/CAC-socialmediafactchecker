@@ -507,14 +507,34 @@ function* framesFromLine(line) {
 
   const candidate = frame?.candidates?.[0];
   for (const part of candidate?.content?.parts ?? []) {
-    if (typeof part.text === "string" && part.text.length > 0) {
-      yield { type: "delta", text: part.text };
+    // Thinking models attach an opaque `thoughtSignature` to the parts they produce, and
+    // it has to travel back with the part it came on when that turn is replayed to the
+    // model — see the note on `partsFrom` below for what dropping it costs. Carried on
+    // every frame type, because which parts get one is the model's business, not ours.
+    const signature = part.thoughtSignature ?? part.thought_signature;
+
+    const hasText = typeof part.text === "string" && part.text.length > 0;
+    const call = part.functionCall ?? part.function_call;
+
+    // `signature` and `thought` are attached only when present, so the common frame — a
+    // plain token from a model that isn't thinking — keeps the shape every consumer of
+    // this stream already expects.
+    if (hasText || (signature && !call?.name)) {
+      const delta = { type: "delta", text: hasText ? part.text : "" };
+      if (signature) delta.signature = signature;
+      // `thought: true` marks a thinking summary rather than the answer. It still has to
+      // be echoed back, but showing it to the reader as if it were the reply would put
+      // the model's musings in the middle of a fact-check.
+      if (part.thought === true) delta.thought = true;
+      yield delta;
     }
+
     // A tool call arrives as a whole part, not a token at a time; `args` is already an
     // object here (Gemini sends structured arguments, not a JSON string like some APIs).
-    const call = part.functionCall ?? part.function_call;
     if (call?.name) {
-      yield { type: "function_call", call: { name: call.name, args: call.args ?? {} } };
+      const frame = { type: "function_call", call: { name: call.name, args: call.args ?? {} } };
+      if (signature) frame.signature = signature;
+      yield frame;
     }
   }
 
@@ -560,6 +580,57 @@ async function* parseSSE(body, deadline, idleTimeoutMs) {
  * answer.
  */
 export const MAX_TOOL_ROUNDS = 4;
+
+/**
+ * The model's own turn, reassembled from the stream so it can be sent back verbatim.
+ *
+ * Verbatim is the whole point, and the reason this is a class rather than a string join.
+ * Thinking models attach an opaque `thoughtSignature` to the parts they emit — most
+ * importantly to `functionCall` parts — and the next request has to carry each signature
+ * back **on the part it arrived on**. Rebuilding a call from just its name and arguments
+ * silently drops it, and Gemini answers that with a warning and degraded tool use: the
+ * model is being asked to continue a line of reasoning whose thread it can no longer pick
+ * up. It is exactly the kind of failure this codebase keeps running into — nothing
+ * errors, the answers just get worse.
+ *
+ * So parts are accumulated in arrival order, and a part is only merged into the one
+ * before it when both are plain text with no signature between them. Anything carrying a
+ * signature stays its own part, in its own place.
+ */
+class ModelTurn {
+  constructor() {
+    this._parts = [];
+  }
+
+  addText(text, signature, thought = false) {
+    if (!text && !signature) return;
+    const last = this._parts.at(-1);
+    // Merge only into an open text part: one with no signature of its own, and on the
+    // same side of the thinking/answer divide.
+    const mergeable =
+      last && typeof last.text === "string" && !last.thoughtSignature && Boolean(last.thought) === Boolean(thought);
+    if (mergeable) {
+      last.text += text;
+      if (signature) last.thoughtSignature = signature;
+      return;
+    }
+    const part = { text };
+    if (thought) part.thought = true;
+    if (signature) part.thoughtSignature = signature;
+    this._parts.push(part);
+  }
+
+  addCall(call, signature) {
+    const part = { functionCall: { name: call.name, args: call.args } };
+    if (signature) part.thoughtSignature = signature;
+    this._parts.push(part);
+  }
+
+  /** The parts, minus any that ended up empty and unsigned. */
+  parts() {
+    return this._parts.filter((part) => part.functionCall || part.text || part.thoughtSignature);
+  }
+}
 
 /**
  * Stream a chat completion, walking the model chain until one answers.
@@ -633,7 +704,7 @@ export async function* streamChat({
       if (useTools && round < maxToolRounds) requestBody.tools = tools;
 
       const calls = [];
-      const spoken = [];
+      const turn = new ModelTurn();
 
       for await (const frame of streamRound({
         requestBody,
@@ -646,6 +717,7 @@ export async function* streamChat({
       })) {
         if (frame.type === "function_call") {
           calls.push(frame.call);
+          turn.addCall(frame.call, frame.signature);
           continue;
         }
         if (frame.type === "model") {
@@ -655,7 +727,11 @@ export async function* streamChat({
           if (frame.model === announced) continue;
           announced = frame.model;
         }
-        if (frame.type === "delta") spoken.push(frame.text);
+        if (frame.type === "delta") {
+          turn.addText(frame.text, frame.signature, frame.thought);
+          // A thinking summary is part of the turn but not part of the answer.
+          if (frame.thought || frame.text.length === 0) continue;
+        }
         yield frame;
       }
 
@@ -664,13 +740,7 @@ export async function* streamChat({
       if (calls.length === 0 || !useTools) return;
       if (deadline.callerAborted) return;
 
-      // The model's own turn has to go back verbatim — text first, then the calls it made.
-      // Dropping the text would lose the reasoning the calls were made in service of.
-      const modelParts = [];
-      const said = spoken.join("");
-      if (said.trim()) modelParts.push({ text: said });
-      for (const call of calls) modelParts.push({ functionCall: { name: call.name, args: call.args } });
-      contents.push({ role: "model", parts: modelParts });
+      contents.push({ role: "model", parts: turn.parts() });
 
       const responseParts = [];
       for (const call of calls) {
