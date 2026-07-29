@@ -36,6 +36,8 @@ const PORT = Number(process.env.UI_TEST_PORT) || 3210;
 let script = [];
 let callIndex = 0;
 let requestBodies = [];
+/** Responses deliberately left open by a `hold` step, so the page sits mid-stream. */
+let heldResponses = [];
 /** What /api/config reports about the model chain, if anything. */
 let configHealth = null;
 
@@ -67,6 +69,14 @@ const server = createServer(async (req, res) => {
 
     res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
     for (const frame of step.frames) res.write(`data: ${JSON.stringify(frame)}\n\n`);
+    // `hold` leaves the response open, so the page stays mid-stream and the live bubble can
+    // be inspected. Without it every scripted turn completes instantly, and a completed turn
+    // re-renders from stored history — which is the right thing for history to show, and
+    // means anything that only exists *while* streaming cannot be observed after the fact.
+    if (step.hold) {
+      heldResponses.push(res);
+      return;
+    }
     return res.end();
   }
 
@@ -95,6 +105,11 @@ function scriptedAs(steps) {
   script = steps;
   callIndex = 0;
   requestBodies = [];
+}
+
+/** Close anything a `hold` step left open, letting the page finish its turn. */
+function releaseHeld() {
+  for (const res of heldResponses.splice(0)) res.end();
 }
 
 async function withPage(run) {
@@ -350,6 +365,100 @@ await withPage(async (page) => {
   await page.waitForSelector(".message.assistant .sources");
   const afterReload = await page.locator("a.citation").count();
   check("the evidence trail survives a reload", afterReload === 2, `count=${afterReload}`);
+});
+
+/* ---------------- the bibliography, sent before the answer ---------------- */
+
+// The state the reader is in while the answer is still streaming: the searches have landed
+// and the provisional bibliography is on screen, but the final one has not been sent. This
+// is what the early frame is for — the sources are readable during the wait, and the markers
+// in the text arriving are already links.
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      {
+        type: "search",
+        query: "bridge cost audit",
+        claim: "The bridge cost $4bn",
+        provider: "test",
+        results: [
+          { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" },
+          { n: 2, title: "Cost overrun coverage", url: "https://news.example/story", domain: "news.example" },
+        ],
+      },
+      {
+        type: "sources",
+        provisional: true,
+        sources: [
+          { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" },
+          { n: 2, title: "Cost overrun coverage", url: "https://news.example/story", domain: "news.example" },
+        ],
+      },
+      { type: "delta", text: "The bridge cost $2.1 billion [1]." },
+    ],
+    // Left open, so the assertions below see the turn as the reader does mid-answer.
+    hold: true,
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .sources");
+
+  const provisional = await page.locator(".sources.provisional").count();
+  check("a bibliography sent before the answer is marked provisional", provisional === 1, `count=${provisional}`);
+
+  const heading = (await page.locator(".sources-heading").innerText()).trim();
+  check("its heading says the sources are still being read", /reading them now/i.test(heading), heading);
+
+  // The point of sending it early: a marker in text that is still arriving already resolves.
+  const href = await page.locator("a.citation").first().getAttribute("href");
+  check(
+    "markers link while the answer is still streaming",
+    href === "https://audit.example/report",
+    String(href),
+  );
+
+  releaseHeld();
+});
+
+// …and once the final bibliography arrives it replaces the provisional one rather than
+// stacking a second list underneath it, narrowed to what the answer actually cited.
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      {
+        type: "sources",
+        provisional: true,
+        sources: [
+          { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" },
+          { n: 2, title: "Cost overrun coverage", url: "https://news.example/story", domain: "news.example" },
+        ],
+      },
+      { type: "delta", text: "The bridge cost $2.1 billion [1]." },
+      {
+        type: "sources",
+        sources: [
+          { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" },
+        ],
+      },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .sources");
+
+  const lists = await page.locator(".message.assistant .sources").count();
+  check("the final bibliography replaces the provisional one", lists === 1, `lists=${lists}`);
+
+  const stillProvisional = await page.locator(".sources.provisional").count();
+  check("and is no longer marked provisional", stillProvisional === 0, `count=${stillProvisional}`);
+
+  const items = await page.locator(".sources ol li").count();
+  check("narrowed to what the answer cited", items === 1, `count=${items}`);
 });
 
 scriptedAs([

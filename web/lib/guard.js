@@ -165,7 +165,17 @@ export function validateMessages(body, limits) {
   }
 
   // Keep the most recent turns. Older context is the cheapest thing to drop.
-  return cleaned.slice(-limits.maxTurns);
+  const trimmed = cleaned.slice(-limits.maxTurns);
+
+  // Gemini requires `contents` to open on a `user` turn. History alternates user/
+  // assistant, so cutting to an even `maxTurns` out of an odd-length conversation lands
+  // the slice on an orphaned assistant reply — its own question already dropped — and a
+  // request that starts on `model` fails outright rather than just losing some context.
+  // Dropping it here costs nothing worth keeping: a reply with no visible question above
+  // it, and the one entry `maxTurns` was already about to cut anyway.
+  while (trimmed.length > 0 && trimmed[0].role !== "user") trimmed.shift();
+
+  return trimmed;
 }
 
 /** Throws `GuardError` if the caller may not proceed. */

@@ -625,6 +625,15 @@ a.citation:hover {
   color: var(--text-dim);
   margin-bottom: 6px;
 }
+/* The bibliography sent before the answer exists: everything retrieved, not yet narrowed
+   to what was cited. Held back a little so it reads as evidence being gathered rather than
+   as a finished list — the reader can still open every link. */
+.sources.provisional {
+  border-top-style: dashed;
+}
+.sources.provisional .sources-heading {
+  font-style: italic;
+}
 .sources ol {
   margin: 0;
   padding-left: 1.4em;

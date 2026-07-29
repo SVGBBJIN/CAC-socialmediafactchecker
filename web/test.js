@@ -989,7 +989,38 @@ test("history is trimmed to MAX_TURNS, keeping the most recent", () => {
   messages.push({ role: "user", content: "latest" });
 
   const trimmed = validateMessages({ messages }, limits);
-  assert.equal(trimmed.length, limits.maxTurns);
+  assert.ok(trimmed.length <= limits.maxTurns);
+  assert.equal(trimmed.at(-1).content, "latest");
+});
+
+test("a trim that would cut the history open on an assistant turn drops it instead", () => {
+  // 11 messages, alternating and ending on the user: slicing the last 4 (an even
+  // MAX_TURNS) out of this odd-length history lands squarely on an orphaned assistant
+  // reply. Gemini rejects a `contents` array that opens on `model`, so it must not
+  // survive the trim even though `maxTurns` alone would have kept it.
+  const messages = Array.from({ length: 10 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    content: `m${i}`,
+  }));
+  messages.push({ role: "user", content: "latest" });
+
+  const trimmed = validateMessages({ messages }, limits);
+  assert.equal(trimmed[0].role, "user", "contents must open on a user turn");
+  assert.equal(trimmed.length, 3, "the orphaned assistant reply is dropped, not just the cut");
+});
+
+test("a trim that already lands on a user turn is untouched", () => {
+  // 9 messages alternating and ending on the user: an odd MAX_TURNS out of this history
+  // lands the cut on a user turn already, so nothing extra should be dropped.
+  const messages = Array.from({ length: 8 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    content: `m${i}`,
+  }));
+  messages.push({ role: "user", content: "latest" });
+
+  const trimmed = validateMessages({ messages }, { ...limits, maxTurns: 3 });
+  assert.equal(trimmed.length, 3);
+  assert.equal(trimmed[0].role, "user");
   assert.equal(trimmed.at(-1).content, "latest");
 });
 
@@ -1423,6 +1454,36 @@ test("only the first few clips in one message are fetched", async () => {
   const parts = toGeminiContents(messages, { tikTok })[0].parts;
   assert.equal(parts.filter((p) => p.inline_data).length, 2);
   assert.match(parts.at(-1).text, /only the first 2 TikTok videos/);
+});
+
+test("resolving and downloading two distinct clips overlaps instead of running in series", async () => {
+  const links = [1, 2].map((n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`);
+  const messages = [{ role: "user", content: links.join(" ") }];
+
+  let resolving = 0;
+  let maxConcurrentResolves = 0;
+  let downloading = 0;
+  let maxConcurrentDownloads = 0;
+
+  await resolveTikTokParts(messages, {
+    resolveImpl: async (link) => {
+      resolving += 1;
+      maxConcurrentResolves = Math.max(maxConcurrentResolves, resolving);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      resolving -= 1;
+      return resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link });
+    },
+    downloadImpl: async () => {
+      downloading += 1;
+      maxConcurrentDownloads = Math.max(maxConcurrentDownloads, downloading);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      downloading -= 1;
+      return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+    },
+  });
+
+  assert.equal(maxConcurrentResolves, 2, "both links should resolve at the same time");
+  assert.equal(maxConcurrentDownloads, 2, "both clips should download at the same time");
 });
 
 test("with no TikTok link, contents are byte-for-byte what they were before", async () => {

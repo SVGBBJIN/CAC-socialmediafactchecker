@@ -491,11 +491,37 @@ export async function resolveTikTokParts(
   }
   if (links.length === 0) return { attachments, cleanup };
 
+  // Resolving is metadata only — following a short link's redirect and reading the embed
+  // page — not the download itself, so every link is resolved at once rather than one
+  // after another. With the usual two-link paste this halves the wait before either
+  // download can even start.
+  const resolutions = await Promise.all(
+    links.map(async (link) => {
+      try {
+        return { link, resolved: await resolveImpl(link, { fetchImpl, signal }) };
+      } catch (error) {
+        return { link, error: error?.message || "the video could not be fetched" };
+      }
+    }),
+  );
+
+  // Which distinct videos are worth downloading, decided in link order now that every
+  // link's video ID is known. A short link and the canonical URL it redirects to are the
+  // same video — caught here rather than by URL, because that equality is only knowable
+  // after the redirect has been followed — so this is also where the cap is enforced,
+  // against distinct videos rather than distinct links.
   const byVideoID = new Map();
-
-  for (const link of links) {
-    if (signal?.aborted) break;
-
+  const toDownload = [];
+  for (const { link, resolved, error } of resolutions) {
+    if (error) {
+      attachments.set(link, { error });
+      continue;
+    }
+    const existing = byVideoID.get(resolved.videoID);
+    if (existing) {
+      attachments.set(link, existing);
+      continue;
+    }
     if (byVideoID.size >= maxAttachments) {
       attachments.set(link, {
         error: `only the first ${maxAttachments} TikTok video${
@@ -504,38 +530,34 @@ export async function resolveTikTokParts(
       });
       continue;
     }
-
-    try {
-      const resolved = await resolveImpl(link, { fetchImpl, signal });
-
-      // A short link and the canonical URL it redirects to are the same video. Caught
-      // here rather than by URL, because that equality is only knowable after the
-      // redirect has been followed.
-      const existing = byVideoID.get(resolved.videoID);
-      if (existing) {
-        attachments.set(link, existing);
-        continue;
-      }
-
-      const { bytes, mimeType } = await downloadImpl(resolved, { fetchImpl, signal });
-
-      let part;
-      if (bytes.length <= inlineByteLimit) {
-        part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
-      } else {
-        const file = await uploadImpl(bytes, mimeType, { apiKey, fetchImpl, signal });
-        uploads.push(file);
-        part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
-      }
-
-      const entry = { videoID: resolved.videoID, part, resolved };
-      byVideoID.set(resolved.videoID, entry);
-      attachments.set(link, entry);
-    } catch (error) {
-      if (signal?.aborted) break;
-      attachments.set(link, { error: error?.message || "the video could not be fetched" });
-    }
+    const entry = { videoID: resolved.videoID, resolved };
+    byVideoID.set(resolved.videoID, entry);
+    attachments.set(link, entry);
+    toDownload.push(entry);
   }
+
+  if (signal?.aborted || toDownload.length === 0) return { attachments, cleanup };
+
+  // The downloads (and any upload past the inline limit) run together too — this is the
+  // slow part of attaching a clip, and the part most worth overlapping. A failure is
+  // recorded on the entry itself, which every link sharing that video already points at,
+  // so a duplicate link never re-attempts a download its twin just watched fail.
+  await Promise.all(
+    toDownload.map(async (entry) => {
+      try {
+        const { bytes, mimeType } = await downloadImpl(entry.resolved, { fetchImpl, signal });
+        if (bytes.length <= inlineByteLimit) {
+          entry.part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
+        } else {
+          const file = await uploadImpl(bytes, mimeType, { apiKey, fetchImpl, signal });
+          uploads.push(file);
+          entry.part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
+        }
+      } catch (error) {
+        if (!signal?.aborted) entry.error = error?.message || "the video could not be fetched";
+      }
+    }),
+  );
 
   return { attachments, cleanup };
 }

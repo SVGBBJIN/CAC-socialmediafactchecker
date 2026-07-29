@@ -370,11 +370,3 @@ export function unverifiedNotice(violations) {
   }
   return `Unverified: ${reasons.join("; ")}. Treat the statements above as unchecked.`;
 }
-
-/** The bibliography, appended to the answer so every marker resolves for the reader. */
-export function sourceList(ledger, cited) {
-  const shown = cited?.length ? ledger.sources.filter((s) => cited.includes(s.n)) : ledger.sources;
-  if (shown.length === 0) return "";
-  const lines = shown.map((s) => `${s.n}. [${s.title}](${s.url}) — ${s.domain}`);
-  return `\n\n**Sources**\n\n${lines.join("\n")}\n`;
-}

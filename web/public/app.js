@@ -31,7 +31,7 @@ const el = {
 let conversations = load();
 let activeId = localStorage.getItem(ACTIVE_KEY);
 let inFlight = null;
-let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000 };
+let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000, maxTurns: 20 };
 // What the pill shows: the last `model` frame, or the server's degradation snapshot from
 // /api/config before any answer has arrived. Held here rather than read back off the DOM
 // so re-rendering the message list can't lose it.
@@ -300,14 +300,21 @@ function searchListElement(searches, pending = []) {
  *
  * Rendered from the ledger rather than from anything the model typed, which is what makes
  * it trustworthy: a page that no search returned cannot appear in this list.
+ *
+ * `provisional` marks the list sent while the searches were still landing, before the
+ * answer exists. It is everything retrieved rather than everything cited, and it is labelled
+ * as such: the final list is narrower, and a count that shrinks without explanation reads
+ * as sources going missing rather than as the answer having used fewer than it found.
  */
-function sourceListElement(sources) {
+function sourceListElement(sources, provisional = false) {
   const wrap = document.createElement("div");
-  wrap.className = "sources";
+  wrap.className = provisional ? "sources provisional" : "sources";
 
   const heading = document.createElement("div");
   heading.className = "sources-heading";
-  heading.textContent = `Sources (${sources.length}) — retrieved by the app, not written by the model`;
+  heading.textContent = provisional
+    ? `Sources found (${sources.length}) — retrieved by the app; reading them now`
+    : `Sources (${sources.length}) — retrieved by the app, not written by the model`;
   wrap.append(heading);
 
   const list = document.createElement("ol");
@@ -519,6 +526,10 @@ async function loadServerConfig() {
         Number.isFinite(received?.maxInputChars) && received.maxInputChars > 0
           ? received.maxInputChars
           : serverConfig.maxInputChars,
+      maxTurns:
+        Number.isFinite(received?.maxTurns) && received.maxTurns > 0
+          ? received.maxTurns
+          : serverConfig.maxTurns,
     };
   } catch {
     setStatus("Server unreachable", "bad");
@@ -575,10 +586,14 @@ async function streamAnswer(conversationId) {
   // exchange.
   const restorePoint = conversation.messages.length;
 
-  // Only real turns go upstream — a previous error bubble is UI, not context.
+  // Only real turns go upstream — a previous error bubble is UI, not context. Trimmed to
+  // the server's own MAX_TURNS before it ever leaves the browser: the server drops
+  // anything older on arrival regardless, so uploading it first only spends the reader's
+  // bandwidth — and the wait — on a video-heavy thread's history to have it thrown away.
   const history = conversation.messages
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({ role: m.role, content: m.content }))
+    .slice(-serverConfig.maxTurns);
 
   const bubble = messageElement({ role: "assistant", content: "" });
   const body = bubble.querySelector(".body");
@@ -750,9 +765,13 @@ async function streamAnswer(conversationId) {
           body.innerHTML = "";
         } else if (frame.type === "sources") {
           sources = frame.sources;
-          sourcesEl = replace(sourcesEl, sourceListElement(sources));
-          // Re-render so the markers in the finished answer become links.
+          sourcesEl = replace(sourcesEl, sourceListElement(sources, frame.provisional));
+          // Re-render so the markers become links. This is why the provisional list is
+          // worth sending: `linkCitations` can only turn `[3]` into a link if it is already
+          // holding source 3, so holding the bibliography back until the end left every
+          // marker as inert plain text for the whole of the stream.
           scheduleRender();
+          scrollToBottom();
         } else if (frame.type === "unverified") {
           unverified = frame;
           noticeEl = replace(noticeEl, unverifiedElement(frame));

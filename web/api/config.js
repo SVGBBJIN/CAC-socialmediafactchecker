@@ -21,6 +21,10 @@ export default async function handler(req, res) {
       requiresPassword: Boolean(limits.password),
       apiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
       maxInputChars: limits.maxInputChars,
+      // The server drops everything older than this anyway (see `validateMessages`), so
+      // telling the client lets it stop uploading history that would just be thrown away
+      // on arrival — the cost of a long, video-heavy thread otherwise paid on every turn.
+      maxTurns: limits.maxTurns,
       // Model names, not credentials — the same thing the badge already shows once an
       // answer arrives. Sent on load so a reader who opens the page mid-outage sees the
       // degradation immediately, rather than finding out by sending a message.
