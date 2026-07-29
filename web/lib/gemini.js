@@ -24,17 +24,28 @@ import {
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /**
- * How long to wait for response headers from one model before giving up on it, and how
- * long the stream may sit silent afterwards.
+ * How long the stream may sit silent before we give up on it.
  *
- * Both matter because there is no other ceiling: `fetch` without a signal waits
- * indefinitely, so a connection that opens and then stalls holds the request — and, on
- * Vercel, the function instance behind it — until the platform kills it. The two limits
- * are separate because they cover different things: headers come back in well under a
- * second, but the first token on a video Gemini has to watch legitimately takes a while.
+ * Reset by every chunk that arrives, so a long answer is fine and a dead connection is
+ * not. Generous because the first token on a video Gemini has to watch legitimately takes
+ * a while, and cutting that off looks identical to the model failing.
  */
-export const REQUEST_TIMEOUT_MS = 30_000;
 export const STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * How long to wait for response headers, or 0 for no limit — the default.
+ *
+ * There used to be a 30-second rule here. It is off by default now, which means the wait
+ * for headers is bounded by the caller and nothing else: `fetch` without a signal waits
+ * indefinitely, so a connection that opens and never answers holds the request, and on
+ * Vercel the function instance behind it, until the platform kills it. The browser
+ * disconnecting still ends it — `api/chat.js` aborts on `res.on("close")` — so the case
+ * this leaves unbounded is specifically a stalled upstream with a client still waiting.
+ *
+ * The mechanism is kept rather than deleted so a caller that wants a ceiling can pass
+ * `requestTimeoutMs` and get the same 504 as before.
+ */
+export const REQUEST_TIMEOUT_MS = 0;
 
 /**
  * Default ceiling on a single reply, in tokens. Applied even when the caller doesn't
@@ -902,6 +913,7 @@ async function* streamRound({
     const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
 
     let response;
+    // No-ops unless a caller asked for a header deadline; there is no default one.
     deadline.arm(requestTimeoutMs);
     try {
       response = await fetchImpl(url, {

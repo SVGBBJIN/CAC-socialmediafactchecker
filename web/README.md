@@ -259,9 +259,12 @@ looks like "search is broken" rather than "the key wasn't picked up". For the sa
   party's JSON blob; without the host allowlist in `lib/tiktok.js` the endpoint would
   fetch whatever that blob named, which is a request proxy pointed at our own network and
   reachable by anyone who can paste a link.
-- **Two timeouts.** 30s for response headers, and a 120s stall timeout that is reset by
-  every chunk received. Without them a connection that opens and then goes quiet holds
-  the request, and the function instance behind it, indefinitely.
+- **A 120s stall timeout**, reset by every chunk received, so a stream that goes quiet
+  mid-answer is cut loose rather than holding the request — and the function instance
+  behind it — indefinitely. There is deliberately no deadline on the *first* response:
+  waiting for headers is unbounded unless a caller passes `requestTimeoutMs`, so an
+  upstream that accepts a connection and never answers is bounded only by the browser
+  disconnecting or by the platform's own function timeout.
 - **A keep-alive every 15s.** Gemini's first token on a video it has to watch can take a
   while, and proxies close silent connections. Sent as an SSE comment, so the client's
   frame parser ignores it.

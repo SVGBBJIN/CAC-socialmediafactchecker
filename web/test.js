@@ -17,6 +17,7 @@ import {
   isQuotaFailure,
   isContextLimitFailure,
   retryAfterMs,
+  REQUEST_TIMEOUT_MS,
   resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from "./lib/gemini.js";
@@ -451,7 +452,13 @@ test("a final frame with no trailing newline is still delivered", () => {
   ).then((frames) => assert.deepEqual(frames.at(-1), { type: "delta", text: "tail" }));
 });
 
-test("a request that never gets response headers fails instead of hanging", async () => {
+// There is no header deadline by default any more. A caller that opts into one still
+// gets it, and still gets a 504 rather than a hang — which is what this covers.
+test("a caller that asks for a header deadline gets one", async () => {
+  // Guards the default itself: reinstating one here would silently reintroduce the rule
+  // that was removed, and the only symptom would be requests failing at the old ceiling.
+  assert.equal(REQUEST_TIMEOUT_MS, 0, "there is no default header deadline");
+
   await assert.rejects(
     collect(
       streamChat({
