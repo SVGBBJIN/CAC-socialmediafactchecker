@@ -28,6 +28,29 @@ export class SearchError extends Error {
 }
 
 /**
+ * Read a configuration value, ignoring how it was capitalised.
+ *
+ * Environment variables are case-sensitive everywhere this runs, and a key stored as
+ * `Tavily_API_key` is therefore invisible to a lookup for `TAVILY_API_KEY`. The cost of
+ * that mismatch is not an error — it is a silent fall-through to the keyless provider,
+ * which then gets blocked, and an operator who has configured a key correctly by every
+ * visible measure watching every search fail. Accepting any casing is cheaper than
+ * explaining the convention.
+ */
+export function readEnv(env, name) {
+  const direct = env[name];
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toLowerCase() === wanted && typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+/**
  * Which provider to use, from the environment.
  *
  * Order is by result quality, not preference: a keyed API returns structured results with
@@ -37,12 +60,12 @@ export class SearchError extends Error {
  * key is present.
  */
 export function providerFromEnv(env = process.env) {
-  const forced = (env.SEARCH_PROVIDER || "").trim().toLowerCase();
+  const forced = (readEnv(env, "SEARCH_PROVIDER") || "").toLowerCase();
   const candidates = [
-    { name: "brave", key: env.BRAVE_SEARCH_API_KEY },
-    { name: "tavily", key: env.TAVILY_API_KEY },
-    { name: "serper", key: env.SERPER_API_KEY },
-    { name: "google", key: env.GOOGLE_CSE_KEY, extra: env.GOOGLE_CSE_CX },
+    { name: "brave", key: readEnv(env, "BRAVE_SEARCH_API_KEY") },
+    { name: "tavily", key: readEnv(env, "TAVILY_API_KEY") },
+    { name: "serper", key: readEnv(env, "SERPER_API_KEY") },
+    { name: "google", key: readEnv(env, "GOOGLE_CSE_KEY"), extra: readEnv(env, "GOOGLE_CSE_CX") },
     { name: "duckduckgo", key: "keyless" },
   ];
 
@@ -228,9 +251,20 @@ const PROVIDERS = {
       query: queryText(query),
       max_results: Math.min(limit * 2, 20),
       search_depth: "basic",
+      // The key goes in the body as well as the header. Tavily moved from an `api_key`
+      // field to bearer auth, and which one an account is served by is not something this
+      // app can see; sending both means the request works either way, and neither form
+      // leaks it anywhere the other doesn't.
+      api_key: apiKey,
     };
     const days = freshnessFor("tavily", query.freshness);
-    if (days) payload.days = days;
+    if (days) {
+      payload.days = days;
+      // `days` is only honoured on the news topic — set on its own it is silently
+      // ignored, which would hand the model stale sources for a claim it explicitly
+      // asked to bound in time. Freshness was requested, so news it is.
+      payload.topic = "news";
+    }
 
     const body = await requestJSON(
       "https://api.tavily.com/search",

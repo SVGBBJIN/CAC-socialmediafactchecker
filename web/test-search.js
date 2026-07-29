@@ -25,7 +25,7 @@ import {
   repairInstruction,
   unverifiedNotice,
 } from "./lib/citations.js";
-import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
+import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
 
 /* ---------------- query schema ---------------- */
 
@@ -126,6 +126,24 @@ test("the provider is chosen by which key is configured", () => {
   );
 });
 
+test("a key is found however it was capitalised", () => {
+  // A key stored as `Tavily_API_key` is invisible to a case-sensitive lookup, and the
+  // symptom is not an error — it is a silent fall-through to the keyless provider, which
+  // then gets blocked. Every search fails for a reason that looks nothing like the cause.
+  assert.equal(providerFromEnv({ Tavily_API_key: "tvly-x" }).name, "tavily");
+  assert.equal(providerFromEnv({ tavily_api_key: "tvly-x" }).apiKey, "tvly-x");
+  assert.equal(providerFromEnv({ Brave_Search_Api_Key: " k " }).apiKey, "k");
+  assert.equal(providerFromEnv({ Search_Provider: "tavily", TAVILY_API_KEY: "k" }).name, "tavily");
+  // A variable that exists but is empty is not configuration.
+  assert.equal(providerFromEnv({ TAVILY_API_KEY: "   " }).name, "duckduckgo");
+});
+
+test("the search toggle is read the same tolerant way", () => {
+  assert.equal(searchEnabled({}), true);
+  assert.equal(searchEnabled({ WEB_SEARCH_ENABLED: "false" }), false);
+  assert.equal(searchEnabled({ Web_Search_Enabled: "FALSE" }), false);
+});
+
 test("SEARCH_PROVIDER naming an unconfigured provider fails loudly", () => {
   assert.throws(() => providerFromEnv({ SEARCH_PROVIDER: "brave" }), /API key is not configured/);
   assert.throws(() => providerFromEnv({ SEARCH_PROVIDER: "bing" }), /not one of/);
@@ -195,6 +213,33 @@ test("site: is folded into the query text", async () => {
     { env: { SERPER_API_KEY: "k" }, fetchImpl },
   );
   assert.equal(body.q, "measles cases site:cdc.gov");
+});
+
+test("Tavily is sent the key both ways, and freshness the way it is honoured", async () => {
+  let request;
+  const fetchImpl = async (url, options) => {
+    request = { url, headers: options.headers, body: JSON.parse(options.body) };
+    return jsonResponse({
+      results: [
+        { title: "Report", url: "https://gao.example/r", content: "text", published_date: "2026-07-01" },
+      ],
+    });
+  };
+
+  const result = await search(
+    { query: "measles cases", claim: "Measles cases tripled", freshness: "month" },
+    { env: { Tavily_API_key: "tvly-x" }, fetchImpl },
+  );
+
+  assert.equal(request.headers.authorization, "Bearer tvly-x");
+  // Tavily moved from an `api_key` body field to bearer auth; sending both means the
+  // request works whichever an account is served by.
+  assert.equal(request.body.api_key, "tvly-x");
+  assert.equal(request.body.days, 31);
+  // `days` is ignored unless the topic is news — set alone, it would silently return
+  // undated results for a claim that asked to be bounded in time.
+  assert.equal(request.body.topic, "news");
+  assert.deepEqual(result.results.map((r) => r.published), ["2026-07-01"]);
 });
 
 test("a rejected key is reported as configuration, not as something to retry", async () => {

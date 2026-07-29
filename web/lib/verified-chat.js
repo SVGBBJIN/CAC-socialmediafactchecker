@@ -18,7 +18,7 @@
 // page no search returned.
 
 import { streamChat } from "./gemini.js";
-import { search, SearchError } from "./search.js";
+import { search, readEnv, SearchError } from "./search.js";
 import { SEARCH_TOOLS, SearchQueryError } from "./search-schema.js";
 import {
   CitationLedger,
@@ -91,7 +91,10 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
 export const MAX_REPAIR_ROUNDS = 1;
 
 export function searchEnabled(env = process.env) {
-  return String(env.WEB_SEARCH_ENABLED ?? "true").toLowerCase() !== "false";
+  // Read case-insensitively, like the provider keys: an operator who typed
+  // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
+  // than either honouring it or complaining about it.
+  return (readEnv(env, "WEB_SEARCH_ENABLED") ?? "true").toLowerCase() !== "false";
 }
 
 /**

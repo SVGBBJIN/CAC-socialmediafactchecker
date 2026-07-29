@@ -202,6 +202,17 @@ markup" as an error rather than as an empty result. Telling the model a claim is
 unsupported when nothing was actually searched is the one failure this system cannot
 tolerate. Set a key before anyone relies on it — see `.env.example`.
 
+Key names are matched **case-insensitively**, so `Tavily_API_key` works as well as
+`TAVILY_API_KEY`. That is not tidiness: environment variables are case-sensitive, a key
+the app cannot see produces no error, and the resulting silent fall-through to DuckDuckGo
+looks like "search is broken" rather than "the key wasn't picked up". For the same reason
+`npm run dev` prints the provider it settled on at boot:
+
+```
+  search     tavily (key loaded)
+  search     duckduckgo — keyless fallback, blocked often. Set a key: see web/.env.example
+```
+
 ## What keeps a request bounded
 
 - **Video attachments are sent once each.** A YouTube link becomes a `file_data` part at
