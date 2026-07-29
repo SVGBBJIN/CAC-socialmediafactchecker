@@ -1425,6 +1425,36 @@ test("only the first few clips in one message are fetched", async () => {
   assert.match(parts.at(-1).text, /only the first 2 TikTok videos/);
 });
 
+test("resolving and downloading two distinct clips overlaps instead of running in series", async () => {
+  const links = [1, 2].map((n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`);
+  const messages = [{ role: "user", content: links.join(" ") }];
+
+  let resolving = 0;
+  let maxConcurrentResolves = 0;
+  let downloading = 0;
+  let maxConcurrentDownloads = 0;
+
+  await resolveTikTokParts(messages, {
+    resolveImpl: async (link) => {
+      resolving += 1;
+      maxConcurrentResolves = Math.max(maxConcurrentResolves, resolving);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      resolving -= 1;
+      return resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link });
+    },
+    downloadImpl: async () => {
+      downloading += 1;
+      maxConcurrentDownloads = Math.max(maxConcurrentDownloads, downloading);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      downloading -= 1;
+      return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+    },
+  });
+
+  assert.equal(maxConcurrentResolves, 2, "both links should resolve at the same time");
+  assert.equal(maxConcurrentDownloads, 2, "both clips should download at the same time");
+});
+
 test("with no TikTok link, contents are byte-for-byte what they were before", async () => {
   const messages = [{ role: "user", content: "hi" }];
   const tikTok = await resolveTikTokParts(messages, {
