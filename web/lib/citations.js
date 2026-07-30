@@ -260,6 +260,28 @@ const META_PATTERN =
   /^(?:here(?:'s| is| are)\b|i (?:searched|looked|checked|could not|couldn't|cannot|can't|don't|do not|wasn't|was not|found no)|let me\b|to summari[sz]e\b|in short\b|the (?:claim|video|post|clip|user)\b.{0,40}\b(?:asks?|says?|states?|claims?)\b|this (?:is|was) (?:a |an )?(?:mixed|complicated|nuanced)\b|note that\b|caveat\b|bottom line\b)/i;
 
 /**
+ * Self-reference and direct address: a sentence *about the conversation* rather than
+ * about the world, even when it happens to name something proper-noun-shaped — the
+ * app's own name, a platform it fetches video from, its own tools.
+ *
+ * This exists because of a sentence like "I'm Seer, a fact-checker." on a plain "hi": it
+ * carries no verdict, no attribution and no digit, but "Seer" is capitalised and not the
+ * sentence's first word, so the proper-noun fallback below used to wave it through as a
+ * checkable claim — with nothing retrieved yet to cite, which is what turned a greeting
+ * into a rejected answer, a rewrite, and an "Unverified: no search was run" banner. Same
+ * failure for "Send me a TikTok or YouTube link" — an instruction, not an assertion.
+ *
+ * Deliberately narrower than `META_PATTERN`: it is only consulted *after* the
+ * verdict/attribution/digit checks below have had their say, so a sentence that both
+ * introduces itself and states something real — "I found that the WHO withdrew its
+ * guidance," rare but possible — still needs its citation, via `ATTRIBUTION_PATTERN`.
+ * What this pattern removes is specifically the case where a bare proper noun was the
+ * *only* signal.
+ */
+const SELF_REFERENTIAL_PATTERN =
+  /^(?:i(?:'m| am|'ll| will)\b|(?:hi|hello|hey|hiya|greetings|welcome)\b|(?:paste|send|share|drop|provide|attach|give) (?:me )?(?:a |an |the )?.{0,30}\b(?:link|url|video|post|clip|claim|screenshot|statement)\b|feel free to\b|go ahead and\b|what (?:(?:claim|video|post|clip) )?would you like\b)/i;
+
+/**
  * Does this sentence assert something about the world that a reader could check?
  *
  * Deliberately not "every declarative sentence". An answer contains connective tissue —
@@ -279,6 +301,10 @@ export function isCheckableClaim(sentence) {
   if (VERDICT_PATTERN.test(withoutMarkers)) return true;
   if (ATTRIBUTION_PATTERN.test(withoutMarkers)) return true;
   if (/\d/.test(withoutMarkers)) return true; // Numbers, percentages, years, dates.
+
+  // See `SELF_REFERENTIAL_PATTERN`: checked here, after every other signal has had a
+  // chance to fire, so it only ever suppresses the proper-noun fallback immediately below.
+  if (SELF_REFERENTIAL_PATTERN.test(trimmed)) return false;
 
   // A capitalised word that isn't the first word of the sentence: a person, place,
   // organisation or product is being named, and naming one is making a claim about it.

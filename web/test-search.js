@@ -484,6 +484,37 @@ test("isCheckableClaim recognises what a reader could check", () => {
   assert.ok(!isCheckableClaim("It is complicated"));
 });
 
+test("isCheckableClaim does not mistake self-introduction or onboarding for a claim", () => {
+  // A plain "hi" used to come back rejected: the model's self-introduction ("I'm Seer, a
+  // fact-checker") carries no verdict, attribution or digit, but "Seer" is a capitalised
+  // word that isn't the sentence's first — enough to trip the proper-noun fallback and
+  // demand a citation nothing had been retrieved to support. That turned a greeting into
+  // a forced rewrite and an "Unverified: no search was run" banner.
+  assert.ok(!isCheckableClaim("I am Seer, a social-media fact-checker."));
+  assert.ok(!isCheckableClaim("I'm here to help you check claims in videos and posts."));
+  // Naming a platform while asking for a link is the same failure with a different noun.
+  assert.ok(!isCheckableClaim("Send me a TikTok or YouTube link and I will check the claims in it."));
+  assert.ok(!isCheckableClaim("Paste a link, post, or claim and I will look it up for you."));
+  assert.ok(!isCheckableClaim("Feel free to share the video and I will take a look."));
+  assert.ok(!isCheckableClaim("Hello there, I would be glad to fact-check something for you."));
+
+  // The exclusion is narrow: it only removes the bare proper-noun fallback. A sentence
+  // that introduces itself *and* attributes a real fact is still held to the rule, via
+  // ATTRIBUTION_PATTERN rather than the capitalised-word guess.
+  assert.ok(isCheckableClaim("I found that the World Health Organization withdrew its guidance."));
+  assert.ok(isCheckableClaim("I am confident the unemployment rate fell to 3.4% last quarter."));
+});
+
+test("a plain greeting passes the audit clean, with no sources and no rewrite", () => {
+  const ledger = new CitationLedger();
+  const audit = auditAnswer(
+    "Hi there! I'm Seer, a fact-checker. Paste a link, post, or claim you'd like me to " +
+      "check, and I'll look it up before giving you a verdict.",
+    ledger,
+  );
+  assert.deepEqual(audit, { ok: true, violations: [], cited: [], unused: [] });
+});
+
 test("the repair prompt names the failures and offers deletion as an out", () => {
   const ledger = ledgerOf(2);
   const audit = auditAnswer("The bridge cost $2.1 billion. See [9].", ledger);
@@ -600,6 +631,42 @@ test("the model searches, the sources are numbered, the answer is shown", async 
   const responseTurn = sent[1].contents.at(-1);
   assert.equal(responseTurn.role, "user");
   assert.match(responseTurn.parts[0].functionResponse.response.result, /\[1\] Title 0/);
+});
+
+test("a plain greeting is answered without being forced to search, and streams clean", async () => {
+  // web_search is offered every turn — the model is free to use it — but nothing in this
+  // app should *make* it search when there is nothing to check. A greeting used to fail
+  // that: the model's self-introduction tripped the citation audit, which reset the
+  // stream, forced a rewrite, and shipped an "Unverified: no search was run" banner on a
+  // "hi". None of that should happen when the answer never asserts a checkable fact.
+  const { fetchImpl, sent } = fakeGemini([
+    { text: "Hi there! I'm Seer, a fact-checker. Paste a link, post, or claim and I'll check it for you." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => {
+        throw new Error("web_search should not have been called for a greeting");
+      },
+    }),
+  );
+
+  assert.equal(sent.length, 1, "answered in one round — no repair, no forced follow-up call");
+  assert.ok(!frames.some((f) => f.type === "reset"), "nothing was written and then withdrawn");
+  assert.ok(!frames.some((f) => f.type === "unverified"), "no banner claiming search was skipped");
+  assert.ok(!frames.some((f) => f.type === "sources"), "no bibliography for an answer that cited nothing");
+  assert.equal(
+    readerSees(frames),
+    "Hi there! I'm Seer, a fact-checker. Paste a link, post, or claim and I'll check it for you.",
+  );
+
+  // The tool was still declared — on-demand means available, not withheld.
+  assert.equal(sent[0].tools[0].function_declarations[0].name, "web_search");
 });
 
 test("a guess written before the search does not survive next to the real answer", async () => {
