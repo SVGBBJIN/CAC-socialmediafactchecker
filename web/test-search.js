@@ -26,6 +26,7 @@ import {
   unverifiedNotice,
 } from "./lib/citations.js";
 import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
+import { PageFindError } from "./lib/page-find.js";
 
 /* ---------------- query schema ---------------- */
 
@@ -552,17 +553,20 @@ async function collect(stream) {
 
 /**
  * The text a reader actually ends up with, by replaying the frames the way public/app.js
- * does: `delta` appends, `reset` clears.
+ * does: `delta` appends, `reset` clears, `answer` replaces.
  *
  * Asserting on the last `delta` — which is what these tests used to do — cannot see the
  * bug this exists to catch, because every individual delta is fine. The damage is in what
- * they add up to on screen, and only a replay of the whole stream shows it.
+ * they add up to on screen, and only a replay of the whole stream shows it. `answer` is
+ * replayed here for the same reason: it is the citation cleanup's edit, so a test that
+ * ignored it would be asserting on text no reader is shown.
  */
 function readerSees(frames) {
   let shown = "";
   for (const frame of frames) {
     if (frame.type === "delta") shown += frame.text;
     if (frame.type === "reset") shown = "";
+    if (frame.type === "answer") shown = frame.text;
   }
   return shown;
 }
@@ -1259,4 +1263,351 @@ test("truncation excuses the last sentence and nothing else", () => {
     truncated: true,
   });
   assert.ok(invented.violations.some((v) => v.type === "unknown_source"));
+});
+
+/* ---------------- reading a page, and the links that come out ---------------- */
+
+/** A `find_in_page` stub returning one passage from whatever page it was pointed at. */
+function findResult(url, find, passages) {
+  return {
+    url,
+    find,
+    title: "Title 0",
+    passageCount: 12,
+    semantic: true,
+    passages: passages.map((text, index) => ({
+      text,
+      score: 0.9 - index * 0.1,
+      lexical: 0.8,
+      semantic: 0.9,
+      phrase: false,
+      matched: ["cost"],
+      position: index,
+    })),
+  };
+}
+
+test("the model reads a page a search returned and quotes it under the same number", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    {
+      calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }],
+    },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: {
+            url: "https://a.example/1",
+            find: "the final cost of the bridge",
+            claim: "The bridge cost $4bn",
+          },
+        },
+      ],
+    },
+    { text: "The final bill was $2.1 billion, not $4 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+      findImpl: async (query) =>
+        findResult(query.url, query.find, ["The final bill came to $2.1 billion."]),
+    }),
+  );
+
+  const find = frames.find((f) => f.type === "find");
+  assert.equal(find.n, 1, "reading a page reuses the page's number");
+  assert.equal(find.matches, 1);
+  assert.equal(find.domain, "a.example");
+
+  // Both tools were offered, and the passage went back to the model as source [1].
+  assert.deepEqual(
+    sent[0].tools[0].function_declarations.map((d) => d.name),
+    ["web_search", "find_in_page"],
+  );
+  const toolTurn = sent[2].contents.at(-1);
+  assert.match(toolTurn.parts[0].functionResponse.response.result, /\[1\] passage 1/);
+  assert.match(toolTurn.parts[0].functionResponse.response.result, /final bill came to \$2\.1 billion/);
+
+  // Reading a page creates no new source, so the links are still one.
+  const sources = frames.filter((f) => f.type === "sources").at(-1);
+  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+  // …and the passage rides along, so a fallback list can show the sentence the citation
+  // rests on without the reader opening anything.
+  assert.equal(sources.sources[0].quote, "The final bill came to $2.1 billion.");
+});
+
+test("a find on a page no search returned is refused, with a way forward", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: { url: "https://invented.example/x", find: "the cost", claim: "The bridge cost $4bn" },
+        },
+      ],
+    },
+    { text: "I could not check the cost against that page, so I am not going to say either way." },
+  ]);
+
+  let calls = 0;
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+      findImpl: async () => {
+        calls += 1;
+        return findResult("x", "y", []);
+      },
+    }),
+  );
+
+  assert.equal(calls, 0, "the page must never be fetched — it is not a retrieved source");
+  const find = frames.find((f) => f.type === "find");
+  assert.match(find.error, /not a retrieved source/);
+});
+
+test("a page that will not open is reported as a limit on the source, not a failed turn", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: { url: "https://a.example/1", find: "the cost", claim: "The bridge cost $4bn" },
+        },
+      ],
+    },
+    { text: "The search snippet puts the cost at $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+      findImpl: async () => {
+        throw new PageFindError("Could not open the page: HTTP 403.");
+      },
+    }),
+  );
+
+  // The turn still produced an answer, and the model was told what the source can support.
+  assert.match(readerSees(frames), /\$2\.1 billion \[1\]/);
+  const error = sent[2].contents.at(-1).parts[0].functionResponse.response.error;
+  assert.match(error, /HTTP 403/);
+  assert.match(error, /source \[1\]/);
+});
+
+test("the searching frame names the reads as well as the searches", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      calls: [
+        { name: "find_in_page", args: { url: "https://a.example/1", find: "the cost", claim: "The bridge cost $4bn" } },
+      ],
+    },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+      findImpl: async (query) => findResult(query.url, query.find, ["It cost $2.1 billion."]),
+    }),
+  );
+
+  const announcements = frames.filter((f) => f.type === "searching");
+  assert.deepEqual(announcements[0].searches.map((s) => s.query), ["bridge cost"]);
+  assert.deepEqual(announcements[0].reads, []);
+  assert.deepEqual(announcements[1].reads.map((r) => r.url), ["https://a.example/1"]);
+});
+
+/* ---------------- the links, inline first and listed as a fallback ---------------- */
+
+test("a clean cited answer sends its links without asking for them to be listed", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [1]. It opened in 2011 [2]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1", "https://b.example/2"]),
+    }),
+  );
+
+  const sources = frames.filter((f) => f.type === "sources").at(-1);
+  // The rows are always sent — they are what turns every `[n]` into a link — but the answer
+  // links them all itself, so the list underneath is not drawn.
+  assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
+  assert.equal(sources.fallback, false);
+});
+
+test("an answer that cites nothing gets every link listed instead", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    }),
+  );
+
+  const sources = frames.filter((f) => f.type === "sources").at(-1);
+  // No inline markers exist, so these pages would vanish entirely without the list.
+  assert.equal(sources.fallback, true);
+  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+});
+
+test("an answer that failed the citation check gets every link listed", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [1]. The contractor was fined $40 million in 2019." },
+    { text: "The bridge cost $2.1 billion [1]. The contractor was fined $40 million in 2019." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1", "https://b.example/2"]),
+    }),
+  );
+
+  assert.ok(frames.some((f) => f.type === "unverified"));
+  const sources = frames.filter((f) => f.type === "sources").at(-1);
+  // The reader is being asked to check something themselves, which is the one moment the
+  // full list beats the subset the text happens to link.
+  assert.equal(sources.fallback, true);
+  assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
+});
+
+test("redundant citations are cleaned out of the answer the reader is shown", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [2][2][3], not $4 billion [3][2]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () =>
+        searchResult("The bridge cost $4bn", [
+          "https://a.example/1",
+          "https://b.example/2",
+          "https://c.example/3",
+        ]),
+    }),
+  );
+
+  // Duplicates gone, and renumbered so the markers ascend from the first one read. The
+  // trailing group goes entirely: this is one sentence, and both its numbers are already
+  // cited a few words to the left.
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [1][2], not $4 billion.");
+
+  const sources = frames.filter((f) => f.type === "sources").at(-1);
+  assert.deepEqual(
+    sources.sources.map((s) => [s.n, s.url]),
+    [
+      [1, "https://b.example/2"],
+      [2, "https://c.example/3"],
+    ],
+  );
+  assert.equal(sources.fallback, false, "the answer links every source it kept");
+});
+
+test("cleanup never leaves a cited sentence bare, so the audit still passes", async () => {
+  // Two searches find the same page by two spellings of its URL, and the model cites both
+  // numbers on both sentences. Merging them must not empty either sentence's citation.
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } },
+        { name: "web_search", args: { query: "bridge price", claim: "The bridge cost $4bn" } },
+      ],
+    },
+    { text: "The bridge cost $2.1 billion [1][2]. It opened in 2011 [2][1]." },
+  ]);
+
+  const queries = ["https://a.example/story", "https://a.example/story?utm_source=x"];
+  let index = 0;
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", [queries[index++]]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [1]. It opened in 2011 [1].");
+  assert.ok(!frames.some((f) => f.type === "unverified"));
+});
+
+test("a flawed answer keeps the ledger's numbering, so its markers still point where written", async () => {
+  // The answer cites a source that does not exist. The banner is about to describe [9] by
+  // that name, and the full list is about to be printed — so nothing may be renumbered here,
+  // or the list and the text would disagree about which page is which.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The bridge cost $2.1 billion [2]. It opened in 2011 [9]." },
+    { text: "The bridge cost $2.1 billion [2]. It opened in 2011 [9]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1", "https://b.example/2"]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [2]. It opened in 2011 [9].");
+  const sources = frames.filter((f) => f.type === "sources").at(-1);
+  assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
+  assert.equal(sources.fallback, true);
+  assert.ok(frames.some((f) => f.type === "unverified"));
 });

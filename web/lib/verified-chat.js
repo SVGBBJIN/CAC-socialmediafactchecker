@@ -1,31 +1,37 @@
 // One turn of fact-checking, start to finish, with the citation rule enforced at the end.
 //
 // `streamChat` knows how to talk to Gemini and how to run a tool. It does not know what
-// the tool is for, and it does not know that this app refuses to publish an uncited
+// the tools are for, and it does not know that this app refuses to publish an uncited
 // claim. That policy lives here:
 //
-//   1. Give the model exactly one tool — `web_search` — and a ledger that numbers every
-//      source it retrieves.
+//   1. Give the model two tools — `web_search` to find pages and `find_in_page` to read
+//      one — and a ledger that numbers every source it retrieves.
 //   2. Stream the answer.
 //   3. Audit the answer against the ledger. If it asserts something it did not source, or
 //      cites a source that does not exist, **the answer is not shown**: the model is told
 //      what failed and made to write it again.
-//   4. Render the bibliography ourselves, from the ledger, so every marker in the answer
-//      resolves to a page that was actually fetched.
+//   4. Clean up the citations — merge markers that are secretly the same page, drop the
+//      ones that repeat, renumber what is left — and hand the links back with the answer.
 //
 // Step 4 is why the model is told not to write its own Sources list. A bibliography the
-// model types is a bibliography it can invent; one built from the ledger cannot contain a
-// page no search returned.
+// model types is a bibliography it can invent; the links this layer sends come from the
+// ledger and cannot name a page no search returned. They travel *with* the answer rather
+// than as a block underneath it, so a marker is a link where it is written; the list under
+// the answer is the fallback for the case where the inline links cannot carry the evidence
+// on their own — see `sourcesFrame`.
 
 import { streamChat } from "./gemini.js";
 import { search, readEnv, SearchError } from "./search.js";
-import { SEARCH_TOOLS, SearchQueryError } from "./search-schema.js";
+import { SearchQueryError } from "./search-schema.js";
+import { RESEARCH_TOOLS, validateFindQuery, FindQueryError } from "./find-schema.js";
+import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import {
   CitationLedger,
   auditAnswer,
   repairInstruction,
   unverifiedNotice,
 } from "./citations.js";
+import { cleanCitations } from "./citation-cleanup.js";
 
 /**
  * The system prompt.
@@ -42,11 +48,12 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "",
   "HOW YOU KNOW THINGS",
   "You have no reliable knowledge of the world of your own. Everything factual you assert",
-  "in this conversation you have found with the `web_search` tool during this turn — that",
-  "is the only channel through which outside fact reaches you, and each result it returns",
-  "arrives with a numbered citation marker. Your training data is not a source: it is",
-  "stale, it cannot be checked by the reader, and you are not permitted to cite it. If you",
-  "have not searched for something, you do not know it.",
+  "in this conversation you have found with your two research tools during this turn —",
+  "`web_search` to find pages, `find_in_page` to read one — and they are the only channel",
+  "through which outside fact reaches you. Each source arrives with a numbered citation",
+  "marker. Your training data is not a source: it is stale, it cannot be checked by the",
+  "reader, and you are not permitted to cite it. If you have not looked something up, you",
+  "do not know it.",
   "",
   "THE CITATION RULE",
   "Every sentence that asserts a fact, a verdict, a number, a date, or something a named",
@@ -59,8 +66,15 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "did not return. A fabricated citation is the worst thing you can produce here — worse",
   "than being wrong, because it looks checkable and is not.",
   "",
-  "Do not write a Sources or References list; the app renders one from the sources you",
-  "actually retrieved, and appends it under your answer.",
+  "Cite the one source that actually supports the sentence, or two where a second genuinely",
+  "corroborates it. Do not stack markers: [1][2][3][4] on one sentence is not four times the",
+  "evidence, it is four links the reader will not follow, and the app strips the redundant",
+  "ones before anyone sees them. A marker earns its place by being the source you would send",
+  "someone to.",
+  "",
+  "Do not write a Sources or References list. Every marker you write is turned into a link",
+  "to the page it names, right where you wrote it, so a list underneath repeats the whole",
+  "trail in plain text — and one you typed from memory is the one place a URL can be wrong.",
   "",
   "HOW TO CHECK",
   "Work in two passes: look everything up, then read it and write the answer.",
@@ -73,10 +87,11 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "'let me check that' line is a delay in front of the answer and nothing else. A turn that",
   "is nothing but tool calls is exactly right.",
   "",
-  "Second pass — once the results are in front of you, write the answer. Search again only",
-  "for a claim the first pass genuinely failed to settle, and again batch those together.",
-  "You have three rounds of searching in total, so a claim per search in the first round is",
-  "what makes the third round unnecessary.",
+  "Second pass — once the results are in front of you, read the sources that matter with",
+  "`find_in_page`, and search again only for a claim the first pass genuinely failed to",
+  "settle. Batch those together too. You have three rounds of tool calls in total, shared",
+  "between searching and reading, so a claim per search in the first round is what leaves you",
+  "a round to read the two sources the answer will actually rest on.",
   "",
   "Name the specific claim you are verifying in each call's `claim` argument, and search",
   "for the claim, not the topic. Where a claim turns on a number, a date or a quote, prefer",
@@ -84,6 +99,23 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "use the `site` argument to go straight to it when you know where it lives. Set",
   "`freshness` when a claim is about anything that moves. Do not repeat a query you have",
   "already run: it returns the same sources and costs the reader another wait.",
+  "",
+  "READING A SOURCE INSTEAD OF SEARCHING AGAIN",
+  "A search result's snippet is a fragment an engine chose for its own purposes. It is often",
+  "enough to see that a page is relevant and not enough to settle anything — the figure has",
+  "a caveat, the study has a margin of error, the quote has a sentence before it that changes",
+  "it. When that happens, do not fire off another search hoping for a better snippet. Call",
+  "`find_in_page` on the URL you already have and say what you are looking for; you get the",
+  "page's own passages back, quoted exactly, under the number that page already has.",
+  "",
+  "It matches by meaning, not just by wording, so describe the fact you need in plain words",
+  "— 'whether the agency revised the figure down, and by how much' — rather than guessing at",
+  "the page's phrasing. Where the claim turns on an exact number, date or quote, include it",
+  "verbatim as well: an exact hit outranks every paraphrase. Batch your finds into one turn",
+  "like your searches, and reading two pages properly beats searching six times.",
+  "",
+  "A find that comes back with nothing is a finding, not a failure: that page does not say",
+  "it. Do not cite the page for the claim anyway.",
   "",
   "If the search returns nothing that settles a claim, say exactly that. 'I could not find",
   "a source for this' is a complete and acceptable answer, and a far better one than a",
@@ -114,14 +146,15 @@ export function searchEnabled(env = process.env) {
 }
 
 /**
- * Run the `web_search` tool for one model call.
+ * Run the research tools for one model call.
  *
- * Every failure path returns a *result* rather than throwing: a bad argument, a dead key
- * and a search that finds nothing are all things the model has to be told about so it can
- * react — retry with a valid query, stop searching, or report that the claim could not be
- * checked. Throwing here would take down a whole answer over one bad query.
+ * Every failure path returns a *result* rather than throwing: a bad argument, a dead key, a
+ * page that 404s and a search that finds nothing are all things the model has to be told
+ * about so it can react — retry with a valid query, read a different source, or report that
+ * the claim could not be checked. Throwing here would take down a whole answer over one bad
+ * query.
  */
-function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl }) {
+function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl, findImpl, apiKey, pages }) {
   // Every search this turn has already run, by the query it ran. A model that asks the
   // same question twice — the same round, having listed a claim twice, or a later round
   // circling back to a result it didn't like — gets the same answer without a second
@@ -137,8 +170,22 @@ function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl }) {
     ]);
 
   return async (call, { signal: callSignal } = {}) => {
+    if (call.name === "find_in_page") {
+      return runFind(call, {
+        ledger,
+        apiKey,
+        fetchImpl,
+        pages,
+        findImpl,
+        signal: callSignal ?? signal,
+      });
+    }
     if (call.name !== "web_search") {
-      return { response: { error: `No such tool: ${call.name}. The only tool is web_search.` } };
+      return {
+        response: {
+          error: `No such tool: ${call.name}. The tools are web_search and find_in_page.`,
+        },
+      };
     }
 
     try {
@@ -184,17 +231,142 @@ function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl }) {
   };
 }
 
+/**
+ * Run one `find_in_page` call.
+ *
+ * The gate is the first thing that happens and it is not negotiable: the URL has to already
+ * be in the ledger. A find on any other page would put quotable text in front of the model
+ * that no search retrieved — an unnumbered source, which is to say an uncitable one — and
+ * the refusal is worded as an instruction because the model can act on it: search for the
+ * page, then read the result.
+ *
+ * Everything after that is reported to the model rather than thrown, including a page that
+ * will not open. A source whose page is unreadable is still a source; it just cannot support
+ * more than its snippet, and the model is told exactly that.
+ */
+async function runFind(call, { ledger, apiKey, fetchImpl, pages, findImpl, signal }) {
+  let query;
+  try {
+    query = validateFindQuery(call.args);
+  } catch (error) {
+    if (error instanceof FindQueryError) {
+      return { response: { error: error.message } };
+    }
+    throw error;
+  }
+
+  const entry = ledger.find(query.url);
+  if (!entry) {
+    return {
+      response: {
+        error:
+          `${query.url} is not one of the pages retrieved this turn, so it cannot be read or ` +
+          `cited. ${ledger.size === 0
+            ? "Run a web_search first, then read one of the pages it returns."
+            : `Read one of the URLs from a search result instead — you have [1]–[${ledger.size}].`}`,
+      },
+      frame: { type: "find", url: query.url, find: query.find, error: "not a retrieved source" },
+    };
+  }
+
+  try {
+    const result = await findImpl(query, { apiKey, fetchImpl, signal, cache: pages });
+    ledger.recordFind({ ...result, claim: query.claim });
+    return {
+      response: { result: CitationLedger.describeFind(entry, result) },
+      frame: {
+        type: "find",
+        url: query.url,
+        find: query.find,
+        claim: query.claim,
+        n: entry.n,
+        domain: entry.domain,
+        matches: result.passages.length,
+        passages: result.passages.length,
+        semantic: result.semantic,
+      },
+    };
+  } catch (error) {
+    if (error instanceof PageFindError) {
+      return {
+        response: { error: `${error.message} (source [${entry.n}], ${entry.url})` },
+        frame: {
+          type: "find",
+          url: query.url,
+          find: query.find,
+          n: entry.n,
+          domain: entry.domain,
+          error: error.message,
+        },
+      };
+    }
+    throw error;
+  }
+}
+
 /** The ledger as prompt text, for a round that has to see the sources without re-searching. */
 function ledgerBlock(ledger) {
   if (ledger.size === 0) return "No sources have been retrieved this turn.";
   return ledger.sources
-    .map((s) => `[${s.n}] ${s.title} — ${s.url}${s.snippet ? `\n    ${s.snippet}` : ""}`)
+    .map((s) => {
+      const lines = [`[${s.n}] ${s.title} — ${s.url}`];
+      if (s.snippet) lines.push(`    ${s.snippet}`);
+      // Passages a find pulled out of the page, quoted back. The repair round cannot search
+      // and cannot read, so this is the only way the page's own words survive into it — and
+      // they are the strongest evidence the turn produced. Without them a rewrite is forced
+      // back onto the snippets, which is how a correctly-sourced sentence gets softened into
+      // a vaguer one to earn its citation.
+      for (const passage of s.passages ?? []) lines.push(`    “${passage.text}”`);
+      return lines.join("\n");
+    })
     .join("\n");
 }
 
-/** The ledger as a `sources` frame, carrying only the fields the browser renders. */
+/**
+ * The ledger as a `sources` frame, carrying only the fields the browser renders.
+ *
+ * `quote` is the best passage a find pulled off the page, when one did. It is what makes a
+ * fallback link list worth reading rather than a row of domain names: the reader sees the
+ * sentence the citation rests on without opening anything.
+ */
 function sourceRows(sources) {
-  return sources.map(({ n, title, url, domain, published }) => ({ n, title, url, domain, published }));
+  return sources.map(({ n, title, url, domain, published, passages }) => ({
+    n,
+    title,
+    url,
+    domain,
+    published,
+    quote: passages?.[0]?.text ?? undefined,
+  }));
+}
+
+/**
+ * The final `sources` frame, and the decision about whether the links get *shown* as a list.
+ *
+ * The links are always sent. They are the record of what the turn retrieved, they are what
+ * the consumer needs to turn `[3]` into a link, and they are stored with the message so the
+ * answer stays checkable after a reload. What is no longer automatic is printing them out
+ * underneath the answer.
+ *
+ * A block of numbered entries under a finished answer was the right design when a marker was
+ * inert text and the list was the only way to resolve one. It is redundant now: every marker
+ * is a link where it stands, so the list repeats the whole evidence trail in a form nobody
+ * reads, and its length is what makes a two-source answer look like a literature review. So
+ * it is kept as the *fallback* — pasted in exactly when the inline links cannot carry the
+ * evidence by themselves:
+ *
+ * - **The answer cites nothing.** It never got past searching, or it was cut off before the
+ *   first marker. There are no inline links, and these pages were fetched on the reader's
+ *   behalf — they are the only evidence the turn produced, and they must not disappear
+ *   because no marker happens to point at them.
+ * - **The answer failed the audit, was truncated, or its stream died.** Something in it is
+ *   unverified or missing, so the reader is being asked to check it themselves — and that
+ *   is the one moment a complete list of everything retrieved is worth more than the tidy
+ *   subset the text happens to link.
+ */
+function sourcesFrame(rows, { cited, audit, truncated, streamError }) {
+  const flawed = Boolean(truncated || streamError || (audit && !audit.ok));
+  return { type: "sources", sources: rows, fallback: !cited || flawed };
 }
 
 /**
@@ -205,17 +377,26 @@ function sourceRows(sources) {
  * - `{type: "searching", searches}` — these searches have just been dispatched, all at
  *   once. Sent before any of them returns, so the UI can show the wait rather than a gap.
  * - `{type: "search", …}` — a search ran; `results` are its numbered sources, or `error`.
+ * - `{type: "find", url, find, n, matches}` — a page was read; `matches` is how many of its
+ *   passages spoke to the claim, or `error` says why it could not be read.
  * - `{type: "reset", reason}` — discard the text shown so far, because it is no longer the
  *   answer. `superseded` means the model wrote something and then moved on from it, so a
  *   "let me look that up" preamble doesn't sit above the real answer; `citation-check`
  *   means it failed the audit and is being rewritten. Consumers that show text **must**
  *   honour this: text this layer has stopped counting but the screen keeps showing is what
  *   a reader sees as a reply mangling itself. See `supersede`.
- * - `{type: "sources", sources, provisional}` — the bibliography, built from the ledger.
+ * - `{type: "sources", sources, provisional, fallback}` — the links, built from the ledger.
  *   Sent **as the searches land**, with `provisional: true` and the whole ledger, so the
  *   evidence is on screen and every `[n]` marker resolves to a link from the first token of
  *   the answer rather than only after the last one. Sent once more at the end without the
- *   flag, narrowed to what the answer actually cited; a consumer replaces on each one.
+ *   flag, narrowed and renumbered to what the answer actually cited; a consumer replaces on
+ *   each one. `fallback` says whether the links still need to be *shown* as a list — see
+ *   `sourcesFrame`, and note that a consumer must keep the rows either way, because they are
+ *   what turns a marker into a link.
+ * - `{type: "answer", text}` — the final text of the answer, with its citations cleaned up.
+ *   Replaces everything streamed as `delta` so far. Sent only when cleanup changed something,
+ *   which is why it is a replacement rather than the normal channel: the answer streams
+ *   token by token as the model writes it, and the tidy-up can only run once it is whole.
  * - `{type: "unverified", message}` — the answer failed the audit twice and is labelled.
  */
 export async function* verifiedChat({
@@ -225,14 +406,19 @@ export async function* verifiedChat({
   env = process.env,
   fetchImpl = fetch,
   searchImpl = search,
+  findImpl = findInPage,
   signal,
   maxRepairRounds = MAX_REPAIR_ROUNDS,
   ...geminiOptions
 }) {
   const enabled = searchEnabled(env);
   const ledger = new CitationLedger();
+  // One cache for the whole turn, so a second find on a page already open costs the ranking
+  // and nothing else. The model is expected to come back to a good source for another claim —
+  // that is the point of reading one rather than searching again.
+  const pages = new PageCache({ fetchImpl, signal });
   const toolRunner = enabled
-    ? makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl })
+    ? makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl, findImpl, apiKey, pages })
     : null;
 
   let conversation = messages;
@@ -302,7 +488,7 @@ export async function* verifiedChat({
         system,
         signal,
         fetchImpl,
-        tools: searchThisAttempt ? SEARCH_TOOLS : null,
+        tools: searchThisAttempt ? RESEARCH_TOOLS : null,
         toolRunner: searchThisAttempt ? toolRunner : null,
         // The repair round must not re-attach the video: the bytes are already in the
         // conversation the model is rewriting from, and re-attaching would re-download and
@@ -315,7 +501,7 @@ export async function* verifiedChat({
         // search, because anything before it is the model narrating its own process ("let
         // me check that"), and holding a "I'll look this up" line to the citation rule
         // would fail every answer that thinks out loud before searching.
-        if (frame.type === "search") yield* supersede();
+        if (frame.type === "search" || frame.type === "find") yield* supersede();
         // A fresh round beginning is the other way, and the general case. The model wrote
         // something, the round ended for a reason that was not a search — it asked for a
         // tool past its budget, which is refused rather than run — and the next round
@@ -328,7 +514,9 @@ export async function* verifiedChat({
         if (frame.type === "delta") answer += frame.text;
         if (frame.type === "truncated") truncated = true;
         // `streamChat` reports a round's calls without knowing what they mean; naming them
-        // as searches is this layer's job, since this is the layer that chose the tool.
+        // as searches and reads is this layer's job, since this is the layer that chose the
+        // tools. Both go out in one frame because the round dispatches them together and the
+        // reader is waiting on all of them at once.
         if (frame.type === "tool_start") {
           yield {
             type: "searching",
@@ -336,6 +524,13 @@ export async function* verifiedChat({
               .filter((call) => call.name === "web_search")
               .map((call) => ({
                 query: String(call.args?.query ?? ""),
+                claim: String(call.args?.claim ?? ""),
+              })),
+            reads: frame.calls
+              .filter((call) => call.name === "find_in_page")
+              .map((call) => ({
+                url: String(call.args?.url ?? ""),
+                find: String(call.args?.find ?? ""),
                 claim: String(call.args?.claim ?? ""),
               })),
           };
@@ -361,6 +556,12 @@ export async function* verifiedChat({
         // retrieved, and the frame at the end narrows it to what was actually used.
         if (frame.type === "search" && ledger.size > sentSources) {
           sentSources = ledger.size;
+          yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+        }
+        // A find retrieves no new source, so it does not move `sentSources` — but it does
+        // attach the page's own words to a source already on screen, and those quotes are
+        // the best thing the provisional list can show while the model is still reading.
+        if (frame.type === "find" && frame.matches > 0) {
           yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
         }
       }
@@ -454,21 +655,40 @@ export async function* verifiedChat({
     }
   }
 
+  // Citation cleanup, and the last thing done to the answer.
+  //
+  // It runs *after* the audit on purpose: the audit judges what the model wrote, and tidying
+  // first would mean auditing our own edit and reporting its mistakes as the model's. What
+  // is left to do here is what a copy editor does — merge two markers that turn out to be
+  // one page reached by two URLs, drop the ones that repeat inside a sentence, cap a runaway
+  // stack, and renumber so the markers ascend as they are read. Nothing is ever added, and a
+  // sentence that arrived with a citation keeps one; see lib/citation-cleanup.js.
   if (ledger.size > 0) {
-    // The final bibliography, replacing the provisional one sent while the searches were
-    // landing. It is what the answer cites: a page the answer never used is evidence that
-    // was gathered and not relied on, and listing it under a finished verdict implies a
-    // support it does not give.
-    //
-    // When the answer cites nothing at all — it was cut off, or it never got past searching
-    // — the whole ledger is shown instead of an empty list: those pages were fetched on the
-    // reader's behalf and are the only evidence the turn produced, so hiding them because no
-    // marker points at them throws away the one useful thing that happened.
-    const cited = audit?.cited ?? [];
-    yield {
-      type: "sources",
-      sources: sourceRows(ledger.sources.filter((s) => cited.length === 0 || cited.includes(s.n))),
-    };
+    // An answer the reader is being asked to check themselves — one that failed the audit,
+    // was cut off, or died mid-stream — gets every source listed, and therefore must keep the
+    // ledger's own numbering. Renumbering it would leave the list and the text disagreeing
+    // about which page is [2], and it is precisely the answers with something wrong in them
+    // where a marker must still point where the model pointed it: the fabricated `[9]` the
+    // "Unverified" banner is about to describe has to stay a `[9]`.
+    const flawed = Boolean(truncated || streamError || (audit && !audit.ok));
+    let rows = sourceRows(ledger.sources);
+    let cited = false;
+
+    if (answer.trim()) {
+      const cleaned = cleanCitations(answer, ledger, { renumber: !flawed });
+      if (cleaned.changed) {
+        answer = cleaned.text;
+        // A replacement rather than more deltas: the answer streamed token by token while it
+        // was being written, and this pass could only run once it was whole.
+        yield { type: "answer", text: answer };
+      }
+      if (cleaned.sources.length > 0 && !flawed) {
+        rows = sourceRows(cleaned.sources);
+        cited = true;
+      }
+    }
+
+    yield sourcesFrame(rows, { cited, audit, truncated, streamError });
   }
 
   if (audit && !audit.ok) {

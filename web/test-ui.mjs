@@ -346,23 +346,26 @@ const SEARCHED = {
 scriptedAs([SEARCHED]);
 await withPage(async (page) => {
   await send(page, "is this true?");
-  await page.waitForSelector(".message.assistant .sources");
+  await page.waitForSelector(".message.assistant a.citation");
 
   const chip = (await page.locator(".search-chip").innerText()).trim();
   check("the search that was run is shown", /bridge cost audit/.test(chip), chip);
-
-  const sources = await page.locator(".sources ol li").count();
-  check("the bibliography lists every retrieved source", sources === 2, `count=${sources}`);
 
   // The marker is a link to the page it cites — a citation the reader can't follow is
   // most of the way to no citation at all.
   const href = await page.locator("a.citation").first().getAttribute("href");
   check("citation markers link to their source", href === "https://audit.example/report", String(href));
 
-  // …and it survives a reload, or the answer becomes unauditable the moment the page
+  // The answer links every source it cites, so the list underneath is not drawn: it would
+  // repeat the whole evidence trail in the one form nobody reads. The rows are still held —
+  // that is what made the markers above into links.
+  const lists = await page.locator(".message.assistant .sources").count();
+  check("a fully-linked answer prints no source list", lists === 0, `lists=${lists}`);
+
+  // …and the links survive a reload, or the answer becomes unauditable the moment the page
   // refreshes.
   await page.reload();
-  await page.waitForSelector(".message.assistant .sources");
+  await page.waitForSelector(".message.assistant a.citation");
   const afterReload = await page.locator("a.citation").count();
   check("the evidence trail survives a reload", afterReload === 2, `count=${afterReload}`);
 });
@@ -422,8 +425,9 @@ await withPage(async (page) => {
   releaseHeld();
 });
 
-// …and once the final bibliography arrives it replaces the provisional one rather than
-// stacking a second list underneath it, narrowed to what the answer actually cited.
+// …and once the answer is finished the provisional list is withdrawn rather than left
+// stacked above a second one. Nothing replaces it here, because the answer links its own
+// source: the list existed to cover the wait, and the wait is over.
 scriptedAs([
   {
     frames: [
@@ -449,16 +453,53 @@ scriptedAs([
 ]);
 await withPage(async (page) => {
   await send(page, "is this true?");
-  await page.waitForSelector(".message.assistant .sources");
+  await page.waitForSelector(".message.assistant a.citation");
 
   const lists = await page.locator(".message.assistant .sources").count();
-  check("the final bibliography replaces the provisional one", lists === 1, `lists=${lists}`);
+  check("the provisional list is withdrawn, not stacked", lists === 0, `lists=${lists}`);
 
   const stillProvisional = await page.locator(".sources.provisional").count();
-  check("and is no longer marked provisional", stillProvisional === 0, `count=${stillProvisional}`);
+  check("and nothing is left marked provisional", stillProvisional === 0, `count=${stillProvisional}`);
+});
+
+// The fallback: the server says the answer's own links can't carry the evidence — here it
+// cited nothing at all — so every retrieved link is pasted in as a list instead.
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      { type: "delta", text: "I ran the searches below but did not get to an answer." },
+      {
+        type: "sources",
+        fallback: true,
+        sources: [
+          { n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example", quote: "The final bill came to $2.1 billion." },
+          { n: 2, title: "Cost overrun coverage", url: "https://news.example/story", domain: "news.example" },
+        ],
+      },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant .sources");
 
   const items = await page.locator(".sources ol li").count();
-  check("narrowed to what the answer cited", items === 1, `count=${items}`);
+  check("an unlinked answer gets every source listed", items === 2, `count=${items}`);
+
+  const heading = (await page.locator(".sources-heading").innerText()).trim();
+  check("the heading says why the list is there", /listed in full/i.test(heading), heading);
+
+  // A passage the page reader pulled off the source, so the list can be judged without
+  // opening anything.
+  const quote = (await page.locator(".source-quote").innerText()).trim();
+  check("a read passage is shown with its link", /final bill came to/.test(quote), quote);
+
+  await page.reload();
+  await page.waitForSelector(".message.assistant .sources");
+  const afterReload = await page.locator(".sources ol li").count();
+  check("the fallback list survives a reload", afterReload === 2, `count=${afterReload}`);
 });
 
 scriptedAs([
@@ -478,10 +519,56 @@ scriptedAs([
 ]);
 await withPage(async (page) => {
   await send(page, "is this true?");
-  await page.waitForSelector(".message.assistant .sources");
+  await page.waitForSelector(".message.assistant a.citation");
   const text = await page.locator(".message.assistant .body").last().innerText();
   check("a rejected answer is cleared from the screen", !text.includes("REJECTED"), text);
   check("the rewrite is what remains", text.includes("$2.1 billion"), text);
+});
+
+/* ---------------- reading a page, and the cleaned-up answer ---------------- */
+
+// A read is its own step in the evidence trail, and the citation cleanup arrives as a
+// replacement for the streamed text rather than as more of it.
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      { type: "searching", searches: [], reads: [{ url: "https://audit.example/report", find: "the final cost", claim: "It cost $4bn" }] },
+      {
+        type: "find",
+        url: "https://audit.example/report",
+        domain: "audit.example",
+        find: "the final cost",
+        claim: "It cost $4bn",
+        n: 1,
+        matches: 2,
+        semantic: true,
+      },
+      { type: "delta", text: "The bridge cost $2.1 billion [1][1]." },
+      { type: "answer", text: "The bridge cost $2.1 billion [1]." },
+      {
+        type: "sources",
+        sources: [{ n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" }],
+      },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "is this true?");
+  await page.waitForSelector(".message.assistant a.citation");
+
+  const chip = (await page.locator(".search-chip.read").innerText()).trim();
+  check("the page that was read is shown as a read", /Read audit\.example/.test(chip), chip);
+  check("with what was looked for and how much matched", /2 passages on/.test(chip), chip);
+
+  const text = await page.locator(".message.assistant .body").last().innerText();
+  check("the cleaned answer replaces the streamed one", text.includes("$2.1 billion [1]."), text);
+  check("and the duplicate marker is gone", !text.includes("[1][1]"), text);
+
+  await page.reload();
+  const afterReload = await page.locator(".message.assistant .body").last().innerText();
+  check("the cleaned answer is what gets stored", !afterReload.includes("[1][1]"), afterReload);
 });
 
 scriptedAs([

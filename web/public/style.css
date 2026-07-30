@@ -577,6 +577,14 @@ body {
   color: var(--danger);
   border-color: var(--danger);
 }
+/* Reading a page is a different act from finding one, so it gets a different chip. Marked
+   with a rule down one side rather than a colour: the trail is read as a sequence, and the
+   two kinds of step have to be tellable apart at a glance without either looking like the
+   failure state above. */
+.search-chip.read {
+  border-left: 3px solid var(--accent);
+  border-radius: 4px 999px 999px 4px;
+}
 /* A search that has been sent and not yet answered. Pulsing rather than static because
    the distinction it carries is "still happening", which a still chip cannot make. */
 .search-chip.pending {
@@ -646,6 +654,16 @@ a.citation:hover {
 }
 .source-domain {
   color: var(--text-dim);
+}
+/* The passage the page reader pulled off the page. Indented and quoted so it reads as the
+   source's own words rather than as the app's description of them. */
+.source-quote {
+  margin-top: 2px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .unverified {
