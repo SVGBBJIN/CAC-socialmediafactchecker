@@ -484,35 +484,93 @@ test("isCheckableClaim recognises what a reader could check", () => {
   assert.ok(!isCheckableClaim("It is complicated"));
 });
 
-test("isCheckableClaim does not mistake self-introduction or onboarding for a claim", () => {
-  // A plain "hi" used to come back rejected: the model's self-introduction ("I'm Seer, a
-  // fact-checker") carries no verdict, attribution or digit, but "Seer" is a capitalised
-  // word that isn't the sentence's first — enough to trip the proper-noun fallback and
-  // demand a citation nothing had been retrieved to support. That turned a greeting into
-  // a forced rewrite and an "Unverified: no search was run" banner.
-  assert.ok(!isCheckableClaim("I am Seer, a social-media fact-checker."));
-  assert.ok(!isCheckableClaim("I'm here to help you check claims in videos and posts."));
-  // Naming a platform while asking for a link is the same failure with a different noun.
-  assert.ok(!isCheckableClaim("Send me a TikTok or YouTube link and I will check the claims in it."));
-  assert.ok(!isCheckableClaim("Paste a link, post, or claim and I will look it up for you."));
-  assert.ok(!isCheckableClaim("Feel free to share the video and I will take a look."));
-  assert.ok(!isCheckableClaim("Hello there, I would be glad to fact-check something for you."));
+/**
+ * Greetings the model actually writes when there is nothing to check.
+ *
+ * A table rather than a handful of assertions, because the bug this guards was fixed once
+ * with a list of greeting phrasings and came straight back on the next wording. What
+ * separates these from a verdict is person and mood — they are written to the reader,
+ * not about the world — and the point of testing the whole spread is that no single one
+ * of them should ever need adding to a pattern by hand.
+ *
+ * Each of these used to end a plain "hi" with the answer withdrawn from the screen, a
+ * forced rewrite that could not cite anything, and **Unverified: no search was run**.
+ */
+const GREETING_SENTENCES = [
+  "I'm Seer, a social-media fact-checker.",
+  "Send me a TikTok, YouTube, or Instagram link and I'll check the claims in it.",
+  "You can also just type out a claim you've seen and I'll dig into it.",
+  "I'll read the video, list every claim it makes, and check each one against sources.",
+  "Just share the URL and I'll tell you whether it's accurate.",
+  "I can check TikTok, YouTube Shorts, Instagram Reels, and X posts.",
+  "Once you send a link, I'll watch the video and verify each claim with web sources.",
+  "I'm here to help you separate what's true from what's misleading online.",
+  "Supported platforms include TikTok, YouTube, and Instagram.",
+  "Paste a link, post, or claim you'd like me to check and I'll look it up.",
+  "Feel free to drop a URL whenever you're ready.",
+  "I don't have a claim to check yet, so there's nothing to verify.",
+  "Every verdict I give comes with sources you can open and read yourself.",
+  // Imperatives with no pronoun in them at all — the shape a first-person gate misses.
+  "Ask about any post going around and it gets verified properly.",
+  "Check any Instagram Reel and it gets verified against real sources.",
+  "Drop a TikTok link below to get started.",
+  "Try pasting a YouTube Shorts URL and see what comes back.",
+  "Thanks for stopping by, nothing has been submitted for review yet.",
+];
 
-  // The exclusion is narrow: it only removes the bare proper-noun fallback. A sentence
-  // that introduces itself *and* attributes a real fact is still held to the rule, via
-  // ATTRIBUTION_PATTERN rather than the capitalised-word guess.
-  assert.ok(isCheckableClaim("I found that the World Health Organization withdrew its guidance."));
-  assert.ok(isCheckableClaim("I am confident the unemployment rate fell to 3.4% last quarter."));
+/** Sentences that must keep needing a citation, whatever the greeting fix excludes. */
+const CLAIM_SENTENCES = [
+  "The World Health Organization withdrew the guidance.",
+  "The unemployment rate fell to 3.4% last quarter.",
+  "This claim is misleading in an important way.",
+  "According to the CDC, cases have not tripled.",
+  "The study found no link between the two.",
+  "Reuters reported that the bridge cost $2.1 billion.",
+  "Court records show the case was dismissed.",
+  "The figure is accurate but missing important context.",
+  "Hurricane Milton made landfall near Siesta Key.",
+  // First person is not a licence to assert: attribution and numbers are checked before
+  // the conversational gate precisely so these two still land.
+  "I found that the World Health Organization withdrew its guidance.",
+  "I am confident the unemployment rate fell to 3.4% last quarter.",
+  "The Federal Reserve held rates steady at its March meeting.",
+  "No evidence supports the assertion about vaccine microchips.",
+  "Snopes rated the meme false after reviewing the original footage.",
+];
+
+test("isCheckableClaim does not mistake a greeting for a set of uncited claims", () => {
+  for (const sentence of GREETING_SENTENCES) {
+    assert.ok(!isCheckableClaim(sentence), `should not need a citation: ${sentence}`);
+  }
 });
 
-test("a plain greeting passes the audit clean, with no sources and no rewrite", () => {
+test("isCheckableClaim still catches every shape of real assertion", () => {
+  for (const sentence of CLAIM_SENTENCES) {
+    assert.ok(isCheckableClaim(sentence), `should need a citation: ${sentence}`);
+  }
+});
+
+test("a whole greeting passes the audit clean, with no sources and no rewrite", () => {
+  // The audit run over the full reply, not sentence by sentence — this is the assertion
+  // that corresponds to what the reader saw: "hi" answered with an Unverified banner.
   const ledger = new CitationLedger();
   const audit = auditAnswer(
-    "Hi there! I'm Seer, a fact-checker. Paste a link, post, or claim you'd like me to " +
-      "check, and I'll look it up before giving you a verdict.",
+    `Hi there! ${GREETING_SENTENCES.join(" ")} What would you like me to check?`,
     ledger,
   );
   assert.deepEqual(audit, { ok: true, violations: [], cited: [], unused: [] });
+});
+
+test("an answer that states facts without searching is still caught", () => {
+  // The greeting fix must not become a way out of the rule the app exists to enforce.
+  const ledger = new CitationLedger();
+  const audit = auditAnswer(
+    "The unemployment rate fell to 3.4% last quarter. According to the CDC, cases have not tripled.",
+    ledger,
+  );
+  assert.equal(audit.ok, false);
+  assert.equal(audit.violations[0].type, "no_search");
+  assert.equal(audit.violations.filter((v) => v.type === "uncited_claim").length, 2);
 });
 
 test("the repair prompt names the failures and offers deletion as an out", () => {
@@ -639,9 +697,10 @@ test("a plain greeting is answered without being forced to search, and streams c
   // that: the model's self-introduction tripped the citation audit, which reset the
   // stream, forced a rewrite, and shipped an "Unverified: no search was run" banner on a
   // "hi". None of that should happen when the answer never asserts a checkable fact.
-  const { fetchImpl, sent } = fakeGemini([
-    { text: "Hi there! I'm Seer, a fact-checker. Paste a link, post, or claim and I'll check it for you." },
-  ]);
+  // The reply is the full spread of greeting shapes, not a hand-picked safe one: this is
+  // the test that would have caught the fix that only covered two phrasings.
+  const greeting = `Hi there! ${GREETING_SENTENCES.join(" ")} What would you like me to check?`;
+  const { fetchImpl, sent } = fakeGemini([{ text: greeting }]);
 
   const frames = await collect(
     verifiedChat({
@@ -660,10 +719,7 @@ test("a plain greeting is answered without being forced to search, and streams c
   assert.ok(!frames.some((f) => f.type === "reset"), "nothing was written and then withdrawn");
   assert.ok(!frames.some((f) => f.type === "unverified"), "no banner claiming search was skipped");
   assert.ok(!frames.some((f) => f.type === "sources"), "no bibliography for an answer that cited nothing");
-  assert.equal(
-    readerSees(frames),
-    "Hi there! I'm Seer, a fact-checker. Paste a link, post, or claim and I'll check it for you.",
-  );
+  assert.equal(readerSees(frames), greeting);
 
   // The tool was still declared — on-demand means available, not withheld.
   assert.equal(sent[0].tools[0].function_declarations[0].name, "web_search");

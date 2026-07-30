@@ -260,26 +260,62 @@ const META_PATTERN =
   /^(?:here(?:'s| is| are)\b|i (?:searched|looked|checked|could not|couldn't|cannot|can't|don't|do not|wasn't|was not|found no)|let me\b|to summari[sz]e\b|in short\b|the (?:claim|video|post|clip|user)\b.{0,40}\b(?:asks?|says?|states?|claims?)\b|this (?:is|was) (?:a |an )?(?:mixed|complicated|nuanced)\b|note that\b|caveat\b|bottom line\b)/i;
 
 /**
- * Self-reference and direct address: a sentence *about the conversation* rather than
- * about the world, even when it happens to name something proper-noun-shaped — the
- * app's own name, a platform it fetches video from, its own tools.
+ * Sentences addressed to the reader rather than made about the world.
  *
- * This exists because of a sentence like "I'm Seer, a fact-checker." on a plain "hi": it
- * carries no verdict, no attribution and no digit, but "Seer" is capitalised and not the
- * sentence's first word, so the proper-noun fallback below used to wave it through as a
- * checkable claim — with nothing retrieved yet to cite, which is what turned a greeting
- * into a rejected answer, a rewrite, and an "Unverified: no search was run" banner. Same
- * failure for "Send me a TikTok or YouTube link" — an instruction, not an assertion.
+ * A fact-check states things in the third person — *the agency withdrew the guidance*. An
+ * answer's conversational scaffolding does not: it is written in the first or second
+ * person, or as an imperative asking the reader for something. *I'm Seer, a fact-checker.*
+ * *Send me a link and I'll check it.* *Once you paste a claim, I'll verify each part.*
+ * None of those assert anything a reader could go and check, and none of them can be
+ * cited, because there is nothing in them to cite.
  *
- * Deliberately narrower than `META_PATTERN`: it is only consulted *after* the
- * verdict/attribution/digit checks below have had their say, so a sentence that both
- * introduces itself and states something real — "I found that the WHO withdrew its
- * guidance," rare but possible — still needs its citation, via `ATTRIBUTION_PATTERN`.
- * What this pattern removes is specifically the case where a bare proper noun was the
- * *only* signal.
+ * This is the fix for a plain "hi" coming back with **Unverified: no search was run**. The
+ * greeting the model writes is dense with exactly the words the weaker signals look for —
+ * *verify*, *accurate*, *true*, *TikTok*, *YouTube* — so the audit read a self-introduction
+ * as a set of uncited claims, rejected the answer, forced a rewrite that could not
+ * possibly cite anything, and shipped the banner. Person and mood are what actually
+ * separate the two cases, and unlike a list of greeting phrasings they do not need
+ * extending every time the model words itself differently.
+ *
+ * Consulted *after* attribution and numbers have had their say — see `isCheckableClaim`
+ * for why the order is load-bearing.
  */
-const SELF_REFERENTIAL_PATTERN =
-  /^(?:i(?:'m| am|'ll| will)\b|(?:hi|hello|hey|hiya|greetings|welcome)\b|(?:paste|send|share|drop|provide|attach|give) (?:me )?(?:a |an |the )?.{0,30}\b(?:link|url|video|post|clip|claim|screenshot|statement)\b|feel free to\b|go ahead and\b|what (?:(?:claim|video|post|clip) )?would you like\b)/i;
+const CONVERSATIONAL_PATTERN =
+  // First or second person, anywhere in the sentence.
+  /\b(?:i|i'm|i am|i'll|i will|i've|i'd|me|my|mine|we|we'll|we're|we've|our|you|you're|you'll|you've|your|yours|let's|let me)\b/i;
+
+/**
+ * An imperative opener: the sentence is a request to the reader, not a statement.
+ *
+ * Separate from `CONVERSATIONAL_PATTERN` because it is anchored — a sentence *starting*
+ * with one of these verbs is asking for something, whereas the same word mid-sentence
+ * ("the agency will ask for comment") is not. The list is common request verbs plus the
+ * greetings and acknowledgements that open a reply; it does not need to be exhaustive,
+ * because an imperative that slips through still has to trip a weak signal to matter, and
+ * a request for input rarely names an entity or rules on one.
+ */
+const IMPERATIVE_OPENER_PATTERN =
+  /^(?:send|paste|share|drop|upload|provide|attach|give|tell|show|try|ask|type|post|link|reply|message|submit|enter|add|use|pick|choose|start|head|grab|bring|check|look|note|remember|consider|feel free|go ahead|just|hi|hello|hey|hiya|welcome|thanks|thank you|sure|absolutely|of course|no problem|happy to|glad to|ready)\b/i;
+
+/**
+ * Proper nouns that are this app's own furniture rather than a subject it is ruling on.
+ *
+ * The last signal in `isCheckableClaim` is "a capitalised word that isn't the first word",
+ * standing in for *a named entity is being asserted about*. That reading breaks on the one
+ * subject this app names constantly without making any claim about it: the platforms it
+ * accepts links from, and its own name. *Supported platforms include TikTok, YouTube and
+ * Instagram* is a description of the app, not a finding about three companies.
+ *
+ * So a sentence whose only capitalised words come from this list does not reach the
+ * fallback. It can still be caught by every stronger signal above — *TikTok removed the
+ * video in March* has a date, *TikTok said it removed the video* has an attribution — so
+ * what this gives up is narrow: a bare third-person sentence about a platform and nothing
+ * else. What it buys is that the app can describe itself without failing its own audit.
+ */
+const APP_VOCABULARY = new Set([
+  "seer", "tiktok", "youtube", "instagram", "facebook", "twitter", "reddit", "threads",
+  "snapchat", "linkedin", "shorts", "reels", "gemini", "google", "ai", "url", "urls",
+]);
 
 /**
  * Does this sentence assert something about the world that a reader could check?
@@ -289,6 +325,14 @@ const SELF_REFERENTIAL_PATTERN =
  * teaches the model to staple markers onto sentences that don't carry facts, which
  * devalues the markers that do. The signals below are what a checkable assertion looks
  * like: a ruling, an attribution, a number, a date, or a named entity.
+ *
+ * **The order the signals are consulted in is the design, not an accident.** Attribution
+ * and numbers are the two that survive being written in the first person — *I found that
+ * the agency withdrew it*, *I'm confident the rate fell to 3.4%* — so they are asked
+ * first and can still return true for a sentence the conversational gate would otherwise
+ * have excluded. The verdict vocabulary is asked *after* that gate, because it is the
+ * signal a greeting trips: an offer to say *whether a claim is accurate* contains the same
+ * words as a ruling that one *is accurate*, and only person and mood tell them apart.
  */
 export function isCheckableClaim(sentence) {
   const trimmed = sentence.trim();
@@ -298,18 +342,25 @@ export function isCheckableClaim(sentence) {
 
   const withoutMarkers = trimmed.replace(MARKER_PATTERN, " ").replace(URL_PATTERN, " ");
 
-  if (VERDICT_PATTERN.test(withoutMarkers)) return true;
+  // The two signals strong enough to mean something even in a first-person sentence.
   if (ATTRIBUTION_PATTERN.test(withoutMarkers)) return true;
   if (/\d/.test(withoutMarkers)) return true; // Numbers, percentages, years, dates.
 
-  // See `SELF_REFERENTIAL_PATTERN`: checked here, after every other signal has had a
-  // chance to fire, so it only ever suppresses the proper-noun fallback immediately below.
-  if (SELF_REFERENTIAL_PATTERN.test(trimmed)) return false;
+  // Everything below here is a weak signal, and a weak signal in a sentence addressed to
+  // the reader is not a claim. See `CONVERSATIONAL_PATTERN`.
+  if (CONVERSATIONAL_PATTERN.test(withoutMarkers)) return false;
+  if (IMPERATIVE_OPENER_PATTERN.test(withoutMarkers)) return false;
+
+  if (VERDICT_PATTERN.test(withoutMarkers)) return true;
 
   // A capitalised word that isn't the first word of the sentence: a person, place,
-  // organisation or product is being named, and naming one is making a claim about it.
+  // organisation or product is being named, and naming one is making a claim about it —
+  // unless the only names in it are this app's own furniture. See `APP_VOCABULARY`.
   const words = withoutMarkers.split(/\s+/).slice(1);
-  return words.some((word) => /^[A-Z][a-zA-Z'’-]{2,}/.test(word));
+  return words.some((word) => {
+    if (!/^[A-Z][a-zA-Z'’-]{2,}/.test(word)) return false;
+    return !APP_VOCABULARY.has(word.replace(/[^A-Za-z]/g, "").toLowerCase());
+  });
 }
 
 /** Every citation number appearing in a piece of text. */
