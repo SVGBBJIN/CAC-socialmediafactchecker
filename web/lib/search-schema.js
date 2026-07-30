@@ -60,8 +60,11 @@ export const SEARCH_QUERY_SCHEMA = {
       type: "integer",
       minimum: 1,
       maximum: 10,
-      default: 5,
-      description: "How many results to return. Fewer, better sources beat more of them.",
+      default: 3,
+      description:
+        "How many results to return. Fewer, better sources beat more of them — raise this only " +
+        "for a claim where the first few results are likely to disagree and you need to see the " +
+        "spread.",
     },
   },
 };
