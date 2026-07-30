@@ -16,15 +16,7 @@ import {
   toGeminiSchema,
 } from "./lib/search-schema.js";
 import { search, providerFromEnv, unwrapDuckDuckGoURL, SearchError } from "./lib/search.js";
-import {
-  CitationLedger,
-  auditAnswer,
-  auditableSentences,
-  isCheckableClaim,
-  markersIn,
-  repairInstruction,
-  unverifiedNotice,
-} from "./lib/citations.js";
+import { CitationLedger, markersIn } from "./lib/citations.js";
 import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
 import { PageFindError } from "./lib/page-find.js";
 
@@ -391,198 +383,6 @@ function ledgerOf(count) {
   return ledger;
 }
 
-test("a cited answer passes", () => {
-  const ledger = ledgerOf(2);
-  const audit = auditAnswer(
-    "The clip claims the bridge cost $4 billion. The final figure was $2.1 billion [1]. " +
-      "The state auditor called the claim misleading [2].",
-    ledger,
-  );
-  assert.ok(audit.ok, JSON.stringify(audit.violations));
-  assert.deepEqual(audit.cited, [1, 2]);
-});
-
-test("an uncited verdict is a violation", () => {
-  const audit = auditAnswer("This is false. The bridge actually cost $2.1 billion.", ledgerOf(2));
-  assert.ok(!audit.ok);
-  assert.ok(audit.violations.some((v) => v.type === "uncited_claim"));
-});
-
-test("a citation to a source that was never retrieved is a violation", () => {
-  const audit = auditAnswer("The figure was $2.1 billion [7].", ledgerOf(2));
-  const violation = audit.violations.find((v) => v.type === "unknown_source");
-  assert.ok(violation);
-  assert.equal(violation.marker, 7);
-  assert.match(violation.message, /\[1\]–\[2\]/);
-});
-
-test("a URL the search never returned is a violation, however plausible", () => {
-  const audit = auditAnswer(
-    "The audit report is at https://gao.gov/reports/bridge-2026 [1].",
-    ledgerOf(2),
-  );
-  assert.ok(audit.violations.some((v) => v.type === "unknown_url"));
-});
-
-test("stating facts with no search at all is caught as its own failure", () => {
-  const audit = auditAnswer("The bridge cost $2.1 billion and opened in 2019.", new CitationLedger());
-  assert.equal(audit.violations[0].type, "no_search");
-});
-
-test("connective tissue does not need a citation", () => {
-  const audit = auditAnswer(
-    "Here's what I found. This is a mixed picture. The cost figure checks out [1].",
-    ledgerOf(1),
-  );
-  assert.ok(audit.ok, JSON.stringify(audit.violations));
-});
-
-test("describing the claim under review is not asserting it", () => {
-  // The subject of a fact-check is not evidence, and demanding a citation for "the video
-  // says X" would make it impossible to state what is being checked.
-  const audit = auditAnswer(
-    "The video claims that the vaccine was approved in three weeks. That is not what the " +
-      "approval record shows [1].",
-    ledgerOf(1),
-  );
-  assert.ok(audit.ok, JSON.stringify(audit.violations));
-});
-
-test("markers are read in every form the model writes them", () => {
-  assert.deepEqual(markersIn("a [1] b [2, 3] c [4][5] d"), [1, 2, 3, 4, 5]);
-  assert.deepEqual(markersIn("no markers here"), []);
-});
-
-test("code blocks, tables and the bibliography are not audited", () => {
-  const text = [
-    "The rate was 4.2% in March [1].",
-    "```",
-    "curl https://invented.example/api",
-    "```",
-    "| Year | Rate |",
-    "| 2025 | 4.2% |",
-    "",
-    "Sources",
-    "1. Bureau of Statistics — https://source1.example/p",
-  ].join("\n");
-  const audit = auditAnswer(text, ledgerOf(1));
-  assert.ok(audit.ok, JSON.stringify(audit.violations));
-});
-
-test("sentence splitting holds decimals and abbreviations together", () => {
-  const sentences = auditableSentences("The cost was $1.5 billion in 2019. It rose after that.");
-  assert.equal(sentences.length, 2);
-  assert.match(sentences[0], /\$1\.5 billion/);
-});
-
-test("isCheckableClaim recognises what a reader could check", () => {
-  assert.ok(isCheckableClaim("The unemployment rate fell to 3.4% last quarter"));
-  assert.ok(isCheckableClaim("The World Health Organization withdrew the guidance"));
-  assert.ok(isCheckableClaim("This claim is misleading in an important way"));
-  assert.ok(!isCheckableClaim("Here's what I found about it in the sources"));
-  assert.ok(!isCheckableClaim("So what does that actually mean for the viewer?"));
-  assert.ok(!isCheckableClaim("It is complicated"));
-});
-
-/**
- * Greetings the model actually writes when there is nothing to check.
- *
- * A table rather than a handful of assertions, because the bug this guards was fixed once
- * with a list of greeting phrasings and came straight back on the next wording. What
- * separates these from a verdict is person and mood — they are written to the reader,
- * not about the world — and the point of testing the whole spread is that no single one
- * of them should ever need adding to a pattern by hand.
- *
- * Each of these used to end a plain "hi" with the answer withdrawn from the screen, a
- * forced rewrite that could not cite anything, and **Unverified: no search was run**.
- */
-const GREETING_SENTENCES = [
-  "I'm Seer, a social-media fact-checker.",
-  "Send me a TikTok, YouTube, or Instagram link and I'll check the claims in it.",
-  "You can also just type out a claim you've seen and I'll dig into it.",
-  "I'll read the video, list every claim it makes, and check each one against sources.",
-  "Just share the URL and I'll tell you whether it's accurate.",
-  "I can check TikTok, YouTube Shorts, Instagram Reels, and X posts.",
-  "Once you send a link, I'll watch the video and verify each claim with web sources.",
-  "I'm here to help you separate what's true from what's misleading online.",
-  "Supported platforms include TikTok, YouTube, and Instagram.",
-  "Paste a link, post, or claim you'd like me to check and I'll look it up.",
-  "Feel free to drop a URL whenever you're ready.",
-  "I don't have a claim to check yet, so there's nothing to verify.",
-  "Every verdict I give comes with sources you can open and read yourself.",
-  // Imperatives with no pronoun in them at all — the shape a first-person gate misses.
-  "Ask about any post going around and it gets verified properly.",
-  "Check any Instagram Reel and it gets verified against real sources.",
-  "Drop a TikTok link below to get started.",
-  "Try pasting a YouTube Shorts URL and see what comes back.",
-  "Thanks for stopping by, nothing has been submitted for review yet.",
-];
-
-/** Sentences that must keep needing a citation, whatever the greeting fix excludes. */
-const CLAIM_SENTENCES = [
-  "The World Health Organization withdrew the guidance.",
-  "The unemployment rate fell to 3.4% last quarter.",
-  "This claim is misleading in an important way.",
-  "According to the CDC, cases have not tripled.",
-  "The study found no link between the two.",
-  "Reuters reported that the bridge cost $2.1 billion.",
-  "Court records show the case was dismissed.",
-  "The figure is accurate but missing important context.",
-  "Hurricane Milton made landfall near Siesta Key.",
-  // First person is not a licence to assert: attribution and numbers are checked before
-  // the conversational gate precisely so these two still land.
-  "I found that the World Health Organization withdrew its guidance.",
-  "I am confident the unemployment rate fell to 3.4% last quarter.",
-  "The Federal Reserve held rates steady at its March meeting.",
-  "No evidence supports the assertion about vaccine microchips.",
-  "Snopes rated the meme false after reviewing the original footage.",
-];
-
-test("isCheckableClaim does not mistake a greeting for a set of uncited claims", () => {
-  for (const sentence of GREETING_SENTENCES) {
-    assert.ok(!isCheckableClaim(sentence), `should not need a citation: ${sentence}`);
-  }
-});
-
-test("isCheckableClaim still catches every shape of real assertion", () => {
-  for (const sentence of CLAIM_SENTENCES) {
-    assert.ok(isCheckableClaim(sentence), `should need a citation: ${sentence}`);
-  }
-});
-
-test("a whole greeting passes the audit clean, with no sources and no rewrite", () => {
-  // The audit run over the full reply, not sentence by sentence — this is the assertion
-  // that corresponds to what the reader saw: "hi" answered with an Unverified banner.
-  const ledger = new CitationLedger();
-  const audit = auditAnswer(
-    `Hi there! ${GREETING_SENTENCES.join(" ")} What would you like me to check?`,
-    ledger,
-  );
-  assert.deepEqual(audit, { ok: true, violations: [], cited: [], unused: [] });
-});
-
-test("an answer that states facts without searching is still caught", () => {
-  // The greeting fix must not become a way out of the rule the app exists to enforce.
-  const ledger = new CitationLedger();
-  const audit = auditAnswer(
-    "The unemployment rate fell to 3.4% last quarter. According to the CDC, cases have not tripled.",
-    ledger,
-  );
-  assert.equal(audit.ok, false);
-  assert.equal(audit.violations[0].type, "no_search");
-  assert.equal(audit.violations.filter((v) => v.type === "uncited_claim").length, 2);
-});
-
-test("the repair prompt names the failures and offers deletion as an out", () => {
-  const ledger = ledgerOf(2);
-  const audit = auditAnswer("The bridge cost $2.1 billion. See [9].", ledger);
-  const prompt = repairInstruction(audit.violations, ledger);
-  assert.match(prompt, /\[9\] does not exist/);
-  assert.match(prompt, /delete the sentence/);
-  assert.match(prompt, /\[1\]–\[2\]/);
-  assert.match(unverifiedNotice(audit.violations), /never retrieved/);
-});
-
 /* ---------------- the turn, end to end ---------------- */
 
 /**
@@ -654,7 +454,10 @@ function readerSees(frames) {
   let shown = "";
   for (const frame of frames) {
     if (frame.type === "delta") shown += frame.text;
-    if (frame.type === "reset") shown = "";
+    // A paragraph boundary where the model stopped to use a tool. It adds a break; it
+    // never takes anything away, which is the whole difference from the `reset` frame it
+    // replaced. public/app.js does exactly this.
+    if (frame.type === "break") shown += "\n\n";
     if (frame.type === "answer") shown = frame.text;
   }
   return shown;
@@ -691,16 +494,26 @@ test("the model searches, the sources are numbered, the answer is shown", async 
   assert.match(responseTurn.parts[0].functionResponse.response.result, /\[1\] Title 0/);
 });
 
-test("a plain greeting is answered without being forced to search, and streams clean", async () => {
-  // web_search is offered every turn — the model is free to use it — but nothing in this
-  // app should *make* it search when there is nothing to check. A greeting used to fail
-  // that: the model's self-introduction tripped the citation audit, which reset the
-  // stream, forced a rewrite, and shipped an "Unverified: no search was run" banner on a
-  // "hi". None of that should happen when the answer never asserts a checkable fact.
-  // The reply is the full spread of greeting shapes, not a hand-picked safe one: this is
-  // the test that would have caught the fix that only covered two phrasings.
-  const greeting = `Hi there! ${GREETING_SENTENCES.join(" ")} What would you like me to check?`;
-  const { fetchImpl, sent } = fakeGemini([{ text: greeting }]);
+/**
+ * The reply the model actually writes to "hi" — the shape that used to break the app.
+ *
+ * Every sentence in it tripped the old sentence-level audit at least once: the
+ * self-introduction on its proper noun, the offer to say whether something is accurate on
+ * its verdict vocabulary, the platform list on its capitalised words. The answer streamed
+ * in, was pulled off the screen, came back rewritten, and arrived under a banner saying no
+ * search had been run. Nothing in this reply is a claim about the world, and no mechanism
+ * left in the app has an opinion about that either way.
+ */
+const GREETING_REPLY = [
+  "Hi there! I'm Seer, a social-media fact-checker.",
+  "Send me a TikTok, YouTube, or Instagram link and I'll check the claims in it.",
+  "Just share the URL and I'll tell you whether it's accurate.",
+  "Supported platforms include TikTok, YouTube, and Instagram.",
+  "What would you like me to check?",
+].join(" ");
+
+test("a plain greeting is answered as written, with no tool call and nothing withdrawn", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: GREETING_REPLY }]);
 
   const frames = await collect(
     verifiedChat({
@@ -716,19 +529,23 @@ test("a plain greeting is answered without being forced to search, and streams c
   );
 
   assert.equal(sent.length, 1, "answered in one round — no repair, no forced follow-up call");
-  assert.ok(!frames.some((f) => f.type === "reset"), "nothing was written and then withdrawn");
-  assert.ok(!frames.some((f) => f.type === "unverified"), "no banner claiming search was skipped");
+  assert.equal(readerSees(frames), GREETING_REPLY, "shown exactly as the model wrote it");
   assert.ok(!frames.some((f) => f.type === "sources"), "no bibliography for an answer that cited nothing");
-  assert.equal(readerSees(frames), greeting);
 
-  // The tool was still declared — on-demand means available, not withheld.
+  // The frames that used to make this turn come apart. None of them exists any more, and
+  // asserting on the names is the point: if either is ever reintroduced, this fails.
+  assert.ok(!frames.some((f) => f.type === "reset"), "nothing is ever un-drawn");
+  assert.ok(!frames.some((f) => f.type === "unverified"), "no banner about a search nobody needed");
+
+  // On-demand means available, not withheld: the tool was still declared.
   assert.equal(sent[0].tools[0].function_declarations[0].name, "web_search");
 });
 
-test("a guess written before the search does not survive next to the real answer", async () => {
-  // The model thinks out loud, searches, then answers properly. The preamble is not the
-  // answer — this layer already excluded it from the audit — so it must not be left on
-  // screen either, where it reads as the reply contradicting itself mid-sentence.
+test("a preamble written before the search is kept, separated from the answer", async () => {
+  // The model thinks out loud, searches, then answers properly. That preamble used to be
+  // erased mid-stream — text appearing and then vanishing, which is what "it cuts itself
+  // off" described. It is kept now: the search sits between the two in the evidence trail,
+  // and a paragraph break separates them in the prose. Nothing the reader saw is un-drawn.
   const { fetchImpl } = fakeGemini([
     {
       text: "Let me look that up. I think it was about $4 billion.",
@@ -748,8 +565,63 @@ test("a guess written before the search does not survive next to the real answer
     }),
   );
 
-  assert.equal(readerSees(frames), "The bridge cost $2.1 billion, so the claim is false [1].");
-  assert.ok(!readerSees(frames).includes("$4 billion"), "the abandoned guess must be withdrawn");
+  assert.equal(
+    readerSees(frames),
+    "Let me look that up. I think it was about $4 billion.\n\n" +
+      "The bridge cost $2.1 billion, so the claim is false [1].",
+  );
+  // The one thing the break has to guarantee: the two stretches never run together into
+  // a single paragraph that reads as one self-contradicting sentence.
+  assert.equal(frames.filter((f) => f.type === "break").length, 1);
+  assert.ok(!frames.some((f) => f.type === "reset"));
+});
+
+test("a turn that ends on a search leaves no trailing blank space under the answer", async () => {
+  // The break is emitted at the first token *after* the seam, not at the seam itself, so a
+  // model that writes its verdict and then searches one last time does not finish with a
+  // stranded blank line where the continuation never came.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "q", claim: "A claim" } }] },
+    {
+      text: "The bridge cost $2.1 billion [1].",
+      calls: [{ name: "web_search", args: { query: "q2", claim: "Another claim" } }],
+    },
+    { text: "" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [1].");
+});
+
+test("a model that writes its own paragraph break is not given a second one", async () => {
+  const { fetchImpl } = fakeGemini([
+    { text: "Checking that now.\n\n", calls: [{ name: "web_search", args: { query: "q", claim: "A claim" } }] },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, ["https://a.example/1"]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), "Checking that now.\n\nThe bridge cost $2.1 billion [1].");
+  assert.equal(frames.filter((f) => f.type === "break").length, 0);
 });
 
 test("an answer written before one last search is kept, not buried under an apology", async () => {
@@ -784,10 +656,11 @@ test("an answer written before one last search is kept, not buried under an apol
   );
 });
 
-test("prose written alongside a refused, past-budget tool call is not left on screen", async () => {
-  // The budget-exhausted path reaches the same failure by a different route: the model
-  // writes a half-thought and asks for a search it cannot have, the call is refused rather
-  // than run — so no search frame marks it — and the next round writes a fresh answer.
+test("prose written alongside a refused, past-budget tool call is kept and broken", async () => {
+  // The budget-exhausted path: the model writes a half-thought and asks for a search it
+  // cannot have, the call is refused rather than run — so no search frame marks it — and
+  // the next round writes the answer. The round boundary is the seam, and it gets a break
+  // for the same reason a search does.
   const { fetchImpl } = fakeGemini([
     { calls: [{ name: "web_search", args: { query: "q1", claim: "A claim to check" } }] },
     { calls: [{ name: "web_search", args: { query: "q2", claim: "A claim to check" } }] },
@@ -810,8 +683,12 @@ test("prose written alongside a refused, past-budget tool call is not left on sc
     }),
   );
 
-  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [1].");
-  assert.ok(!readerSees(frames).includes("let me search again"), "the half-thought is withdrawn");
+  assert.equal(
+    readerSees(frames),
+    "I still need to confirm the second figure, so let me search again.\n\n" +
+      "The bridge cost $2.1 billion [1].",
+  );
+  assert.ok(!frames.some((f) => f.type === "reset"));
 });
 
 test("the bibliography is sent while the searches land, before the answer is written", async () => {
@@ -913,63 +790,6 @@ test("a stream that dies mid-answer keeps the text it wrote and its bibliography
   // Still an error — the reader is owed the reason it stopped, just not at the cost of
   // everything that did arrive.
   assert.match(thrown?.message ?? "", /RECITATION/);
-});
-
-test("an uncited answer is rejected, rewritten, and only the rewrite is shown", async () => {
-  const { fetchImpl, sent } = fakeGemini([
-    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
-    { text: "The claim is false. The bridge cost $2.1 billion." },
-    { text: "The bridge cost $2.1 billion, so the claim is false [1]." },
-  ]);
-
-  const frames = await collect(
-    verifiedChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "Is this true?" }],
-      env: {},
-      fetchImpl,
-      attachMedia: false,
-      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
-    }),
-  );
-
-  const reset = frames.findIndex((f) => f.type === "reset");
-  assert.ok(reset > 0, "the failed answer must be withdrawn from the UI");
-  // Everything after the reset is the rewrite, and it passes.
-  assert.ok(!frames.some((f) => f.type === "unverified"));
-  assert.match(
-    frames.filter((f) => f.type === "delta").at(-1).text,
-    /\[1\]/,
-  );
-
-  // The rewrite request carried the correction and the ledger, and did not re-run a search.
-  const repairTurn = sent.at(-1).contents.at(-1);
-  assert.match(repairTurn.parts[0].text, /failed the citation check/);
-  assert.match(repairTurn.parts[0].text, /Sources retrieved this turn:/);
-});
-
-test("an answer that fails twice is shown, but labelled unverified", async () => {
-  const { fetchImpl } = fakeGemini([
-    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
-    { text: "The bridge cost $2.1 billion." },
-    { text: "The bridge cost $2.1 billion." },
-  ]);
-
-  const frames = await collect(
-    verifiedChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "Is this true?" }],
-      env: {},
-      fetchImpl,
-      attachMedia: false,
-      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
-    }),
-  );
-
-  const unverified = frames.find((f) => f.type === "unverified");
-  assert.ok(unverified);
-  assert.match(unverified.message, /no citation/i);
-  assert.ok(unverified.violations.length > 0);
 });
 
 test("a bad tool call is corrected by the model, not fatal to the turn", async () => {
@@ -1115,7 +935,23 @@ test("text with no signature is still merged into one part", async () => {
 test("the system prompt states where the model's facts come from", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /web_search/);
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Your training data is not a source/);
-  assert.match(FACT_CHECK_SYSTEM_PROMPT, /checked automatically after/);
+});
+
+test("the system prompt says a greeting needs no tool call", () => {
+  // The prompt is where the citation rule lives now, so it has to be honest about the
+  // turns the rule does not govern. Without this the model reaches for a search on "hi".
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Not every message is a fact-check/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Do not search to have searched/);
+});
+
+test("the system prompt no longer threatens a rewrite that cannot happen", () => {
+  // The repair round is gone. Telling the model its answer will be "rejected and you are
+  // made to rewrite it" would be instructing it against a mechanism that does not exist,
+  // and a stated consequence that never arrives is one the model learns to discount.
+  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /rejected and you are made to rewrite/i);
+  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /checked automatically after/i);
+  // What replaced it is the one consequence that is real, and it is stated.
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /deletes any marker/i);
 });
 
 /* ---------------- doing the looking up all at once ---------------- */
@@ -1266,56 +1102,6 @@ test("a model that keeps asking to search past its budget is made to answer, onc
   assert.ok(!frames.some((f) => f.type === "error"));
 });
 
-test("the rewrite round is a rewrite: no tools, and no second round of searching", async () => {
-  const { fetchImpl, sent } = fakeGemini([
-    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
-    { text: "The bridge cost $2.1 billion." },
-    { text: "The bridge cost $2.1 billion [1]." },
-  ]);
-
-  await collect(
-    verifiedChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "Is this true?" }],
-      env: {},
-      fetchImpl,
-      attachMedia: false,
-      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
-    }),
-  );
-
-  assert.ok(!sent.at(-1).tools, "the repair round must not be handed a tool it should not use");
-  assert.match(repairInstruction([{ message: "x" }], ledgerOf(1)), /cannot search again/i);
-});
-
-test("a rewrite that comes back empty puts the withdrawn answer back", async () => {
-  // The failed answer is cleared from the screen the moment the rewrite starts. If the
-  // rewrite then says nothing, the reader must not be left with sources over a blank.
-  const { fetchImpl } = fakeGemini([
-    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
-    { text: "The bridge cost $2.1 billion." },
-    { text: "" },
-  ]);
-
-  const frames = await collect(
-    verifiedChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "Is this true?" }],
-      env: {},
-      fetchImpl,
-      attachMedia: false,
-      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
-    }),
-  );
-
-  const reset = frames.findIndex((f) => f.type === "reset");
-  const restored = frames.map((f, i) => ({ f, i })).filter(({ f }) => f.type === "delta").at(-1);
-  assert.ok(restored.i > reset);
-  assert.equal(restored.f.text, "The bridge cost $2.1 billion.");
-  // Restored, not endorsed: it is the text that failed the check, and it says so.
-  assert.ok(frames.some((f) => f.type === "unverified"));
-});
-
 test("a turn that spends itself searching still ends with words, not a blank", async () => {
   // The model asks for a search every round and never writes anything. An empty answer
   // passes the citation audit trivially, so nothing else in the pipeline objects — this is
@@ -1342,51 +1128,6 @@ test("a turn that spends itself searching still ends with words, not a blank", a
 });
 
 /* ---------------- what the banners say ---------------- */
-
-test("the unverified notice agrees with itself about number", () => {
-  const one = unverifiedNotice([{ type: "uncited_claim" }]);
-  assert.match(one, /1 statement carries no citation/);
-  assert.ok(!/carry/.test(one), "one statement does not carry, it carries");
-
-  const many = unverifiedNotice([{ type: "uncited_claim" }, { type: "uncited_claim" }]);
-  assert.match(many, /2 statements carry no citation/);
-});
-
-test("a cut-off last sentence is not also reported as a citation failure", () => {
-  // Hitting the token cap already earns its own banner. The final sentence has no marker
-  // because the marker goes at the end and the end is what was cut off — calling that a
-  // citation failure puts a second, more alarming notice next to the one that explains it,
-  // and blames the model for the cap.
-  const ledger = ledgerOf(2);
-  const text = "The bridge cost $2.1 billion [1]. The contractor was fined in 2019 and the";
-
-  const whole = auditAnswer(text, ledger);
-  assert.equal(whole.ok, false, "unfinished or not, an uncited claim is one");
-  assert.equal(whole.violations.filter((v) => v.type === "uncited_claim").length, 1);
-
-  const cut = auditAnswer(text, ledger, { truncated: true });
-  assert.equal(cut.ok, true);
-  assert.deepEqual(cut.cited, [1], "the sentences that did finish are still audited");
-});
-
-test("truncation excuses the last sentence and nothing else", () => {
-  const ledger = ledgerOf(2);
-  // An uncited claim in the middle is not explained by the ending being cut off.
-  const audit = auditAnswer(
-    "The bridge cost $2.1 billion. The report was published in 2019 [2]. Costs rose again in",
-    ledger,
-    { truncated: true },
-  );
-  assert.equal(audit.ok, false);
-  assert.equal(audit.violations.filter((v) => v.type === "uncited_claim").length, 1);
-  assert.match(audit.violations[0].message, /2\.1 billion/);
-
-  // And a fabricated citation fails wherever it sits, cut off or not.
-  const invented = auditAnswer("The bridge cost $2.1 billion [9] and the", ledger, {
-    truncated: true,
-  });
-  assert.ok(invented.violations.some((v) => v.type === "unknown_source"));
-});
 
 /* ---------------- reading a page, and the links that come out ---------------- */
 
@@ -1756,11 +1497,13 @@ test("an answer that cites nothing gets every link listed instead", async () => 
   assert.deepEqual(sources.sources.map((s) => s.n), [1]);
 });
 
-test("an answer that failed the citation check gets every link listed", async () => {
+test("a truncated answer gets every link listed, not just the ones it reached", async () => {
+  // The reader is being asked to make their own judgement about a reply that stops
+  // mid-thought, which is the one moment the full list beats the subset the text happens
+  // to link — the sources it never got as far as citing are still what it was working from.
   const { fetchImpl } = fakeGemini([
     { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
-    { text: "The bridge cost $2.1 billion [1]. The contractor was fined $40 million in 2019." },
-    { text: "The bridge cost $2.1 billion [1]. The contractor was fined $40 million in 2019." },
+    { text: "The bridge cost $2.1 billion [1]. The contractor was fined", finishReason: "MAX_TOKENS" },
   ]);
 
   const frames = await collect(
@@ -1774,10 +1517,8 @@ test("an answer that failed the citation check gets every link listed", async ()
     }),
   );
 
-  assert.ok(frames.some((f) => f.type === "unverified"));
+  assert.ok(frames.some((f) => f.type === "truncated"));
   const sources = frames.filter((f) => f.type === "sources").at(-1);
-  // The reader is being asked to check something themselves, which is the one moment the
-  // full list beats the subset the text happens to link.
   assert.equal(sources.fallback, true);
   assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
 });
@@ -1850,13 +1591,13 @@ test("cleanup never leaves a cited sentence bare, so the audit still passes", as
   assert.ok(!frames.some((f) => f.type === "unverified"));
 });
 
-test("a flawed answer keeps the ledger's numbering, so its markers still point where written", async () => {
-  // The answer cites a source that does not exist. The banner is about to describe [9] by
-  // that name, and the full list is about to be printed — so nothing may be renumbered here,
-  // or the list and the text would disagree about which page is which.
+test("a fabricated marker is deleted from the answer the reader is shown", async () => {
+  // [9] names a source no search returned. It used to survive to the screen, described by
+  // an "Unverified" banner underneath it — an unopenable citation, published with a
+  // warning. Now it is simply removed, and the real marker beside it survives and is
+  // renumbered with everything else.
   const { fetchImpl } = fakeGemini([
     { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
-    { text: "The bridge cost $2.1 billion [2]. It opened in 2011 [9]." },
     { text: "The bridge cost $2.1 billion [2]. It opened in 2011 [9]." },
   ]);
 
@@ -1871,9 +1612,13 @@ test("a flawed answer keeps the ledger's numbering, so its markers still point w
     }),
   );
 
-  assert.equal(readerSees(frames), "The bridge cost $2.1 billion [2]. It opened in 2011 [9].");
+  const shown = readerSees(frames);
+  assert.ok(!shown.includes("[9]"), `the invented marker must not reach the reader: ${shown}`);
+  assert.equal(shown, "The bridge cost $2.1 billion [1]. It opened in 2011.");
+  assert.ok(!frames.some((f) => f.type === "unverified"));
+
+  // The sentence that lost its only marker is simply uncited, which is what it always was;
+  // the answer is not withdrawn over it, and the links still cover what it did cite.
   const sources = frames.filter((f) => f.type === "sources").at(-1);
-  assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
-  assert.equal(sources.fallback, true);
-  assert.ok(frames.some((f) => f.type === "unverified"));
+  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
 });

@@ -130,15 +130,34 @@ it is opt-in: try `medium` first, against clips whose claim is written rather th
 
 ## Every claim carries a citation
 
-The chat assistant has one tool — `web_search` — and is not permitted to assert a fact it
-did not retrieve with it. The system prompt says so; the app then *checks*, because a
-prompt is a request and this needs a guarantee. Search results are numbered into a ledger,
-and the finished answer is audited against it: a checkable sentence with no citation
-marker, a marker for a source that does not exist, or a URL no search returned all reject
-the answer, which is withdrawn from the screen and sent back to be rewritten. A rewrite
-that fails too is shown labelled `Unverified` rather than suppressed. The Sources list
-under each answer is rendered by the app from what was actually fetched, never typed by
-the model.
+The chat assistant has two research tools — `web_search` to find pages, `find_in_page` to
+read one — and is not permitted to assert a fact it did not retrieve with them. Search
+results are numbered into a ledger as they arrive, and that ledger is what a `[3]` in the
+answer addresses: the app renders the marker as a link to the page it names, and the
+Sources list under an answer is built from what was actually fetched, never typed by the
+model. Each search and each page read is shown as it happens, so the evidence trail is the
+record of how the answer was arrived at.
+
+The **ledger is the enforcement**. A marker naming a number the ledger does not have is a
+citation to a page that was never retrieved, and it is deleted before the answer is sent —
+the reader is never shown a citation that leads nowhere. Everything else is the prompt's
+job.
+
+**There used to be more, and it was removed on purpose.** An auditor split the finished
+answer into sentences, guessed which of them asserted a checkable fact, and rejected the
+whole answer when one of those carried no marker: the reply was withdrawn from the screen,
+the model was made to write it again, and the result was labelled `Unverified`. The guess
+was the problem, and improving it was not the fix. "Which sentences are claims?" was
+answered with verdict vocabulary, attribution verbs, digits and capitalised words — and a
+greeting trips all four. *I'll tell you whether it's accurate* has the verdict words; *Send
+me a TikTok link* has the proper noun. Typing `hi` produced an answer that streamed in,
+vanished, came back rewritten, and arrived under a banner announcing that no search had
+been run. Each narrowing of the heuristic was walked around by the next wording, because no
+regex separates an offer to check something from a ruling on it.
+
+What is left is not a weaker guarantee so much as a differently-shaped one: the exact check
+stayed and now *removes* the bad marker instead of reporting it, and the guess is gone.
+Nothing the server sends ever asks the browser to un-draw something it has already shown.
 
 The same search path runs from the terminal, so a citation can be reproduced rather than
 taken on trust:
@@ -150,7 +169,7 @@ cd web && npm run search -- --claim "Measles cases tripled in 2026" \
 
 It works with no configuration (DuckDuckGo, best-effort) and properly with any one of
 Brave, Tavily, Serper or Google Programmable Search. [web/README.md](web/README.md#every-claim-carries-a-citation)
-has the rules, the query schema, and what is deliberately *not* audited.
+has the rules, the query schema, and how the ledger is built.
 
 It ingests video the same two ways the Swift pipeline does, for the same reasons. A
 **YouTube** link is handed to Gemini as a URL and Gemini watches it itself. A **TikTok**

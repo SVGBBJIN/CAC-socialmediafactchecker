@@ -113,15 +113,15 @@ web/
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
   lib/degradation.js  When to stop asking for the best model, and how the UI says so.
-  lib/verified-chat.js  The fact-check turn: both research tools, system prompt, audit.
+  lib/verified-chat.js  The fact-check turn: both research tools, system prompt, frames.
   lib/search.js    Query → search provider → normalised, openable sources.
   lib/search-schema.js  JSON Schema for a query, and the Gemini tool declaration.
   lib/page-find.js Ctrl+F by meaning: fetch a retrieved page, rank its passages.
   lib/fuzzy.js     The lexical half of that ranking — IDF, trigrams, proximity.
   lib/embeddings.js  The semantic half. Optional; a failure degrades the ranking only.
   lib/find-schema.js  JSON Schema for a find, and both tool declarations together.
-  lib/citations.js The ledger, and the audit that decides if an answer may be shown.
-  lib/citation-cleanup.js  Merge, dedupe, cap and renumber the markers after the audit.
+  lib/citations.js The ledger: every source the model may cite, numbered as retrieved.
+  lib/citation-cleanup.js  Merge, dedupe, cap, renumber, and delete invented markers.
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
@@ -130,7 +130,7 @@ web/
   bin/find.mjs     Run one in-page find from the terminal, with both scores shown.
   server.js        Local dev server. Mounts the same handlers Vercel runs.
   test.js          Unit tests. No network, no dependencies.
-  test-search.js   Tests for search, the schema, and the citation audit.
+  test-search.js   Tests for search, the schema, and the turn end to end.
   test-find.js     Tests for the in-page find and the fuzzy matching under it.
   test-cleanup.js  Tests for citation cleanup — what it removes, and what it must not.
   test-ui.mjs      Browser tests for app.js. Opt-in — see below.
@@ -198,11 +198,10 @@ Separately, an answer that runs into `MAX_OUTPUT_TOKENS` is labelled instead of 
 shipped as if it were finished — a fact-check cut off mid-sentence reads like a verdict,
 and the sentence it was cut off in is usually the one carrying the citation.
 
-That last point is also why a truncated answer's **final** sentence is exempt from the
-citation audit: its missing marker is explained by the cut, and reporting it as a citation
-failure stacks a second, more alarming banner on top of the one that already says the
-answer stops mid-thought. Every earlier sentence is still held to the rule, and an
-invented citation still fails wherever it appears.
+A truncated answer also keeps the ledger's own numbering rather than being renumbered to
+what it cited, and its full source list is printed underneath: the reader is being asked to
+make their own judgement about a reply that stops mid-thought, and the sources it never got
+as far as citing are still what it was working from.
 
 **`MAX_OUTPUT_TOKENS` alone does not fix truncation, and raising it repeatedly is chasing
 the wrong number.** On a thinking model this cap covers the reasoning as well as the
@@ -228,37 +227,54 @@ The assistant has two tools — `web_search` to find pages and `find_in_page` to
 and one rule enforced in code: **it may not assert a fact it did not retrieve.**
 
 The system prompt (`lib/verified-chat.js`) states plainly that everything factual the
-model says in a turn was found with that tool during that turn, that its training data is
+model says in a turn was found with those tools during that turn, that its training data is
 not a source and cannot be cited, and that every sentence carrying a verdict, a number, a
-date or an attribution must end with a marker — `[3]` — for a source it actually
-retrieved. Then the app checks, because a prompt is a request and this needs a guarantee:
+date or an attribution must end with a marker — `[3]` — for a source it actually retrieved.
+It also says the part that keeps the rule honest: **not every message is a fact-check**, and
+a greeting or a question about what the app does wants a plain reply and no tool call.
+
+Three things back that up, and all three are exact — none of them guesses at what a sentence
+is doing:
 
 1. **The tools are the only door.** Each result comes back numbered by a ledger, and those
    numbers are the entire set of citations the model is permitted to write. Reading a page
    creates no new number: `find_in_page` may only open a URL the ledger already holds, and
    its passages come back under that page's existing marker.
-2. **The finished answer is audited** against that ledger before it is allowed to stand —
-   `lib/citations.js`. Three ways to fail: a checkable sentence with no marker, a marker
-   for a source that does not exist, and a URL no search returned.
-3. **A failed answer is withdrawn, not patched.** The model is told which sentences failed
-   and made to write the whole thing again; the browser is told to clear what it has shown
-   so a rejected answer never sits above its replacement. The rewrite round carries **no
-   tools** — searching is over by then, and a round that goes looking again resets the
-   answer under audit and can end the turn on a search instead of a verdict — so the
-   repair prompt offers two ways out and no others: cite it, or delete the sentence.
-4. **If the rewrite fails too, the answer is shown carrying a warning.** Suppressing it
-   entirely would hide a failure the reader is better off seeing labelled. If the rewrite
-   comes back *empty*, the withdrawn answer goes back up under that same warning: the
-   screen was cleared for a replacement that never arrived, and sources over a blank space
-   look like a broken app rather than a failed check.
-5. **The links are rendered by the app, from the ledger.** The model is told not to write a
+2. **A marker the ledger cannot resolve is deleted** before the answer is sent —
+   `lib/citation-cleanup.js`. An invented `[9]` names a page that was never retrieved, so it
+   would render as a citation the reader cannot open, and that is the worst thing this app
+   can produce. The sentence keeps any real markers it had; one whose *only* marker was
+   invented comes out uncited, which is what it always was.
+3. **The links are rendered by the app, from the ledger.** The model is told not to write a
    source list. One the model types is one it can invent; links built from retrieved results
-   cannot name a page that was never fetched. They now travel *with* the answer — every `[3]`
+   cannot name a page that was never fetched. They travel *with* the answer — every `[3]`
    is a link where it stands — and the list under the answer is only a fallback. See "Links
    inline, list as a fallback".
-6. **Redundant citations are cleaned out before the answer is shown**, by
-   `lib/citation-cleanup.js`, running after the audit so the audit judges what the model
-   wrote rather than our edit of it. See "Cleaning up the citations".
+
+Alongside that, every search and every page read is shown as it happens, so the reader
+watches the evidence being gathered rather than being handed a verdict and asked to trust
+the process behind it.
+
+### The audit that used to be here
+
+There was a fourth item: the finished answer was split into sentences, each was guessed to
+be a claim or not, and an answer with an unmarked claim in it was **withdrawn from the
+screen**, rewritten by the model, and labelled `Unverified` if the rewrite failed too.
+
+It is gone, and the reason is the guess. "Which sentences are claims?" was answered with
+verdict vocabulary, attribution verbs, digits and capitalised words, and those are not
+exclusive to claims. *I'll tell you whether it's accurate* has the verdict words. *Send me a
+TikTok link* has the proper noun. So typing `hi` produced a reply that streamed in, vanished
+mid-read, came back rewritten, and arrived under a banner announcing that no search had been
+run — on a greeting. Every narrowing of the heuristic was walked around by the model's next
+wording, because no regex tells an offer to check something from a ruling on it.
+
+Deleting it is not a weakening so much as a change of shape. The exact half — *is this
+marker a source we retrieved?* — stayed, and now removes the bad marker rather than
+reporting it, which reaches the outcome the banner was for without publishing the
+fabrication first. The guessing half is what a reader does, and the app now gives them what
+they need to do it: the searches as they run, the passages that were read, and the sources
+under the answer.
 
 ### Saying what it is doing
 
@@ -308,10 +324,11 @@ results and write the verdict. The runtime is what makes that pay off:
   stop, a model that keeps calling is an unbounded number of model calls the reader is
   sitting through.
 
-What is *not* audited, deliberately: connective tissue ("here's what I found"), quoted
-descriptions of the claim under review — the video is the subject, not evidence — code
-blocks, and tables. Demanding a marker on those teaches the model to sprinkle citations
-where they mean nothing, which devalues the ones that carry weight.
+Nothing here demands a marker on connective tissue ("here's what I found"), on quoted
+descriptions of the claim under review — the video is the subject, not evidence — or on code
+and tables. That used to be a list of exemptions carved out of an auditor; it is now simply
+what the prompt asks for, which is the same outcome without a regex deciding which sentence
+is which.
 
 ### Ctrl+F, by meaning as well as by wording
 
@@ -351,15 +368,16 @@ tests. Comments were stripped before elements, and Wikipedia's embedded JSON con
 characters `<!--`, so the strip ran to the next `-->` and took a `</script>` with it —
 kilobytes of raw wikitext then ranked as the fourth-best passage. And a page's own footnote
 markers, `[ 108 ]`, collide with this app's citation syntax: the model is told to quote
-verbatim, so quoting one would put `[108]` in the answer, where the audit reads it as a
-citation of a source that does not exist and fails the answer for fabricating one. The
-page's footnote numbers are stripped; the citation is the page.
+verbatim, so quoting one would put `[108]` in the answer — where cleanup reads it as a
+citation of a source that does not exist and deletes it, taking a chunk out of the quotation
+on the way. The page's footnote numbers are stripped before ranking; the citation is the
+page.
 
 ### Cleaning up the citations
 
-The audit in `lib/citations.js` is deliberately indifferent to how *many* markers a sentence
-carries, because a checker that punishes over-citation teaches a model to under-cite, and
-under-citing is the worse failure. What it lets through reads like this:
+Nothing asks the model to cite *sparingly*, and nothing should: a rule that punished extra
+markers would teach it to use fewer, and under-citing is by far the worse failure. So the
+answers arrive reading like this:
 
     The agency revised the figure down to 4.2% [1][2][3]. That was published in March
     [1][3][2], after the review closed [2][2].
@@ -388,14 +406,13 @@ don't. `lib/citation-cleanup.js` does what a copy editor does, in this order:
    — a heading that goes on to say something is not a bibliography, and cutting an answer
    short to tidy it would be far worse than leaving a list in.
 
-Three rules hold over all of it. It runs **after** the audit, so the audit judges what the
-model wrote rather than our edit of it. It **never invents a marker and never leaves a
-claim bare** — only a marker another marker on the same sentence makes redundant is removed,
-so a sentence that arrived cited leaves cited. And a **fabricated** marker is left exactly
-where it was written: deleting `[9]` would erase the evidence for the "Unverified" banner
-the reader is about to be shown, leaving an answer that looks clean and is not. For the same
-reason, an answer that failed the audit, was truncated, or died mid-stream is **not**
-renumbered — its markers must still point where the model pointed them.
+Three rules hold over all of it. It **never invents a marker, and never takes the last real
+one off a sentence** — every removal is either a marker another marker on the same sentence
+makes redundant, or one that pointed at nothing to begin with. It **only ever changes
+markers**: the prose comes out byte-identical apart from them and the whitespace a removed
+marker leaves behind. And an answer that was **truncated or died mid-stream is not
+renumbered** — its full source list is printed, so the list and the text have to agree about
+which page is `[2]`.
 
 Code is excluded from every pass, fenced and inline: `rows[1]` in a sample is an array
 index, and this is the one layer that rewrites the answer rather than only reading it.
@@ -410,7 +427,7 @@ printing the list underneath as well repeats the whole evidence trail in the for
 reads, and its length is what made a two-source answer look like a literature review.
 
 The links are still saved for every answer and stored with the message: they are what
-resolves the markers, and an answer whose links vanished on reload would be unauditable.
+resolves the markers, and an answer whose links vanished on reload could not be checked.
 What changed is that *printing* them is now conditional, on exactly the cases where the
 inline links cannot carry the evidence alone:
 
@@ -420,9 +437,10 @@ inline links cannot carry the evidence alone:
 - **The answer cites nothing** — it never got past searching, or was cut off before the
   first marker. Those pages were fetched on the reader's behalf and must not vanish because
   no marker happens to point at them.
-- **The answer is flawed** — it failed the audit, hit the token cap, or its stream died.
-  Whenever the reader is being asked to check something themselves, they get everything that
-  was retrieved, in the ledger's own numbering so the list and the text agree.
+- **The answer is incomplete** — it hit the token cap, or its stream died. Whenever the
+  reader is being asked to make their own judgement about a reply that stops mid-thought,
+  they get everything that was retrieved, in the ledger's own numbering so the list and the
+  text agree.
 
 A passage the page reader pulled off a source rides along with its link, so the fallback
 list shows the sentence the citation rests on rather than a row of domain names.
@@ -523,10 +541,9 @@ looks like "search is broken" rather than "the key wasn't picked up". For the sa
   searches, so the cap bounds latency and spend at once. Past it the tools are *withdrawn*
   rather than refused — a model told not to use a tool it can still see will often try
   anyway; a model with no tool declared answers with what it has.
-- **One repair round, not a loop.** An answer that fails the citation audit twice is
-  shown with a warning rather than regenerated again. Two failures are a signal that the
-  evidence isn't there, and a retry loop over an expensive call is a worse answer to that
-  than a labelled one.
+- **The answer is never regenerated.** There is no repair round: a turn is one pass, so a
+  message costs what its tool rounds cost and no more. The old citation audit could double
+  that — a full second answer, for a verdict the reader had already watched arrive.
 - **A 15s ceiling on each search**, independent of the Gemini timeouts. A hung search
   otherwise holds the whole chat request open behind it.
 - **Replies are capped in tokens, not just requests in messages.** Every other cap in

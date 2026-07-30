@@ -1,23 +1,37 @@
-// The rule this file exists to enforce: **no claim without a citation, and no citation
-// without a source that was actually retrieved.**
+// The ledger: every source the model is allowed to cite, numbered as it comes back from
+// the research tools.
 //
-// A system prompt asking for citations gets citations most of the time. Most of the time
-// is the wrong bar for a fact-checker, and the failure is invisible — a fabricated `[3]`
-// looks exactly like a real one, and an uncited verdict reads more confident than a cited
-// one, not less. So the prompt is the instruction and this is the check: every source the
-// model is allowed to cite is recorded in a ledger as it comes back from the search tool,
-// and the finished answer is audited against that ledger before the turn is allowed to end.
+// A marker is an address, and this is what it addresses. `[4]` means one specific page for
+// the whole turn, because the number is assigned here, once, when the page is retrieved —
+// the model never sees a source that isn't in this ledger, since the numbered entries
+// returned by `record` *are* the tool's output. That is what lets `lib/citation-cleanup.js`
+// turn a marker into a link and drop one that points nowhere.
 //
-// Two failure modes are caught here, and they are different crimes:
+// ## What used to be here, and why it isn't
 //
-//   - **Uncited claim** — an assertion with no marker. The reader cannot check it.
-//   - **Unknown source** — a `[7]` when seven sources were never retrieved, or a bare URL
-//     no search returned. The reader *thinks* they can check it. This is the worse one.
+// This file also held an auditor: it split the finished answer into sentences, guessed
+// which of them asserted a checkable fact, and rejected the whole answer when one of those
+// carried no marker — pulling the reply off the screen, forcing a rewrite, and labelling
+// the result *Unverified*.
+//
+// The guess was the problem, and it was not fixable by improving the guess. "Which
+// sentences are claims?" was answered with verdict vocabulary, attribution verbs, digits
+// and capitalised words, and the shapes that trip those are not only claims. A greeting
+// does: *I'll tell you whether it's accurate* has the verdict words, *Send me a TikTok
+// link* has the proper noun. So typing "hi" got an answer that streamed in, vanished, came
+// back rewritten, and carried a banner saying no search had been run. Each fix narrowed the
+// heuristic and the next wording walked round it, because a regex cannot tell an offer to
+// check something from a ruling on it.
+//
+// What replaced it costs nothing and cannot misfire: markers are matched against this
+// ledger exactly, and one that names a source that was never retrieved is **removed from
+// the answer** rather than reported as a crime. The reader is never shown a citation that
+// leads nowhere, which is the outcome the audit existed to produce — reached by deleting
+// four words instead of an answer. The searches themselves are shown as they run, and the
+// sources are listed under the reply, so the evidence is on screen either way.
 
 /** Markers look like `[1]`, `[1, 2]` or `[1][2]`. Captured together, split after. */
 const MARKER_PATTERN = /\[(\d+(?:\s*[,;]\s*\d+)*)\]/g;
-
-const URL_PATTERN = /https?:\/\/[^\s<>()[\]"']+/g;
 
 /**
  * The sources the model may cite, numbered in the order they were retrieved.
@@ -196,173 +210,6 @@ export class CitationLedger {
   }
 }
 
-/**
- * Split into sentences, skipping the parts of an answer that aren't prose.
- *
- * Fenced code, the Sources list at the end, and markdown headings are excluded: none of
- * them are places a claim gets made, and auditing them produces noise that trains the
- * model to sprinkle markers where they mean nothing.
- */
-/**
- * Where one sentence ends and the next begins.
- *
- * Whitespace after the terminator is required, which is what keeps `$1.5 billion` and
- * `4.2%` in one piece — a decimal point has no space after it. The abbreviations are the
- * remaining case that does have a space after the period; splitting on "Dr. Fauci" would
- * cut a sentence in half and leave both halves under the length floor, i.e. silently
- * unaudited. That is the failure mode to fear here: a splitter that produces fragments
- * doesn't report anything, it just stops checking.
- */
-const SENTENCE_BREAK =
-  /(?<=[.!?])(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Sen|Rep|Gov|Gen|St|Jr|Sr|vs|etc|al|Inc|Ltd|Co|No|Fig|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.)(?<!\b[A-Z]\.)["')\]]?\s+(?=["'(\[]?[A-Z0-9])/;
-
-/** Fenced code is not prose: neither its URLs nor its brackets are citations. */
-function stripCode(text) {
-  return String(text).replace(/```[\s\S]*?(?:```|$)/g, " ").replace(/`[^`\n]*`/g, " ");
-}
-
-export function auditableSentences(text) {
-  const withoutCode = stripCode(text);
-
-  // Everything from a "Sources"/"References" heading onward is the bibliography.
-  const bibliography = withoutCode.search(/^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:sources|references|citations)(?:\*\*)?\s*:?\s*$/im);
-  const body = bibliography === -1 ? withoutCode : withoutCode.slice(0, bibliography);
-
-  const sentences = [];
-  for (const rawLine of body.split("\n")) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    if (/^#{1,6}\s/.test(line)) continue; // Heading.
-    if (/^\|/.test(line)) continue; // Table row — cells aren't sentences.
-    if (/^>\s/.test(line)) continue; // Blockquote: quoted material, attributed by its lead-in.
-
-    // Strip a list marker or a bold label so the sentence starts where the claim does.
-    const content = line.replace(/^(?:[-*+]|\d+[.)])\s+/, "");
-
-    for (const part of content.split(SENTENCE_BREAK)) {
-      const sentence = part.trim();
-      if (sentence) sentences.push(sentence);
-    }
-  }
-  return sentences;
-}
-
-/** Verdict vocabulary — the words that turn a sentence into a ruling. */
-const VERDICT_PATTERN =
-  /\b(?:true|false|misleading|accurate|inaccurate|incorrect|correct|debunked|unfounded|baseless|verified|confirms?|confirmed|refutes?|refuted|contradicts?|no evidence|does not support|out of context|misrepresents?|fabricated|exaggerat\w+)\b/i;
-
-/** Attribution — a sentence putting words in someone's mouth needs a source most of all. */
-const ATTRIBUTION_PATTERN =
-  /\b(?:according to|reported|reports|said|says|stated|announced|found that|study|research|data|survey|poll|records?|court|ruling|filed|testified)\b/i;
-
-/** Meta and hedging: sentences about the *answer* rather than about the world. */
-const META_PATTERN =
-  /^(?:here(?:'s| is| are)\b|i (?:searched|looked|checked|could not|couldn't|cannot|can't|don't|do not|wasn't|was not|found no)|let me\b|to summari[sz]e\b|in short\b|the (?:claim|video|post|clip|user)\b.{0,40}\b(?:asks?|says?|states?|claims?)\b|this (?:is|was) (?:a |an )?(?:mixed|complicated|nuanced)\b|note that\b|caveat\b|bottom line\b)/i;
-
-/**
- * Sentences addressed to the reader rather than made about the world.
- *
- * A fact-check states things in the third person — *the agency withdrew the guidance*. An
- * answer's conversational scaffolding does not: it is written in the first or second
- * person, or as an imperative asking the reader for something. *I'm Seer, a fact-checker.*
- * *Send me a link and I'll check it.* *Once you paste a claim, I'll verify each part.*
- * None of those assert anything a reader could go and check, and none of them can be
- * cited, because there is nothing in them to cite.
- *
- * This is the fix for a plain "hi" coming back with **Unverified: no search was run**. The
- * greeting the model writes is dense with exactly the words the weaker signals look for —
- * *verify*, *accurate*, *true*, *TikTok*, *YouTube* — so the audit read a self-introduction
- * as a set of uncited claims, rejected the answer, forced a rewrite that could not
- * possibly cite anything, and shipped the banner. Person and mood are what actually
- * separate the two cases, and unlike a list of greeting phrasings they do not need
- * extending every time the model words itself differently.
- *
- * Consulted *after* attribution and numbers have had their say — see `isCheckableClaim`
- * for why the order is load-bearing.
- */
-const CONVERSATIONAL_PATTERN =
-  // First or second person, anywhere in the sentence.
-  /\b(?:i|i'm|i am|i'll|i will|i've|i'd|me|my|mine|we|we'll|we're|we've|our|you|you're|you'll|you've|your|yours|let's|let me)\b/i;
-
-/**
- * An imperative opener: the sentence is a request to the reader, not a statement.
- *
- * Separate from `CONVERSATIONAL_PATTERN` because it is anchored — a sentence *starting*
- * with one of these verbs is asking for something, whereas the same word mid-sentence
- * ("the agency will ask for comment") is not. The list is common request verbs plus the
- * greetings and acknowledgements that open a reply; it does not need to be exhaustive,
- * because an imperative that slips through still has to trip a weak signal to matter, and
- * a request for input rarely names an entity or rules on one.
- */
-const IMPERATIVE_OPENER_PATTERN =
-  /^(?:send|paste|share|drop|upload|provide|attach|give|tell|show|try|ask|type|post|link|reply|message|submit|enter|add|use|pick|choose|start|head|grab|bring|check|look|note|remember|consider|feel free|go ahead|just|hi|hello|hey|hiya|welcome|thanks|thank you|sure|absolutely|of course|no problem|happy to|glad to|ready)\b/i;
-
-/**
- * Proper nouns that are this app's own furniture rather than a subject it is ruling on.
- *
- * The last signal in `isCheckableClaim` is "a capitalised word that isn't the first word",
- * standing in for *a named entity is being asserted about*. That reading breaks on the one
- * subject this app names constantly without making any claim about it: the platforms it
- * accepts links from, and its own name. *Supported platforms include TikTok, YouTube and
- * Instagram* is a description of the app, not a finding about three companies.
- *
- * So a sentence whose only capitalised words come from this list does not reach the
- * fallback. It can still be caught by every stronger signal above — *TikTok removed the
- * video in March* has a date, *TikTok said it removed the video* has an attribution — so
- * what this gives up is narrow: a bare third-person sentence about a platform and nothing
- * else. What it buys is that the app can describe itself without failing its own audit.
- */
-const APP_VOCABULARY = new Set([
-  "seer", "tiktok", "youtube", "instagram", "facebook", "twitter", "reddit", "threads",
-  "snapchat", "linkedin", "shorts", "reels", "gemini", "google", "ai", "url", "urls",
-]);
-
-/**
- * Does this sentence assert something about the world that a reader could check?
- *
- * Deliberately not "every declarative sentence". An answer contains connective tissue —
- * "Here's what I found.", "The picture is mixed." — and demanding a citation on those
- * teaches the model to staple markers onto sentences that don't carry facts, which
- * devalues the markers that do. The signals below are what a checkable assertion looks
- * like: a ruling, an attribution, a number, a date, or a named entity.
- *
- * **The order the signals are consulted in is the design, not an accident.** Attribution
- * and numbers are the two that survive being written in the first person — *I found that
- * the agency withdrew it*, *I'm confident the rate fell to 3.4%* — so they are asked
- * first and can still return true for a sentence the conversational gate would otherwise
- * have excluded. The verdict vocabulary is asked *after* that gate, because it is the
- * signal a greeting trips: an offer to say *whether a claim is accurate* contains the same
- * words as a ruling that one *is accurate*, and only person and mood tell them apart.
- */
-export function isCheckableClaim(sentence) {
-  const trimmed = sentence.trim();
-  if (trimmed.length < 25) return false;
-  if (trimmed.endsWith("?")) return false; // A question asserts nothing.
-  if (META_PATTERN.test(trimmed)) return false;
-
-  const withoutMarkers = trimmed.replace(MARKER_PATTERN, " ").replace(URL_PATTERN, " ");
-
-  // The two signals strong enough to mean something even in a first-person sentence.
-  if (ATTRIBUTION_PATTERN.test(withoutMarkers)) return true;
-  if (/\d/.test(withoutMarkers)) return true; // Numbers, percentages, years, dates.
-
-  // Everything below here is a weak signal, and a weak signal in a sentence addressed to
-  // the reader is not a claim. See `CONVERSATIONAL_PATTERN`.
-  if (CONVERSATIONAL_PATTERN.test(withoutMarkers)) return false;
-  if (IMPERATIVE_OPENER_PATTERN.test(withoutMarkers)) return false;
-
-  if (VERDICT_PATTERN.test(withoutMarkers)) return true;
-
-  // A capitalised word that isn't the first word of the sentence: a person, place,
-  // organisation or product is being named, and naming one is making a claim about it —
-  // unless the only names in it are this app's own furniture. See `APP_VOCABULARY`.
-  const words = withoutMarkers.split(/\s+/).slice(1);
-  return words.some((word) => {
-    if (!/^[A-Z][a-zA-Z'’-]{2,}/.test(word)) return false;
-    return !APP_VOCABULARY.has(word.replace(/[^A-Za-z]/g, "").toLowerCase());
-  });
-}
-
 /** Every citation number appearing in a piece of text. */
 export function markersIn(text) {
   const numbers = [];
@@ -373,166 +220,4 @@ export function markersIn(text) {
     }
   }
   return numbers;
-}
-
-/**
- * Hold a finished answer to the ledger.
- *
- * @returns `{ok, violations, cited, unused}`. `violations` is ordered worst-first, since
- *   the repair prompt built from it is read top-down and a fabricated citation is the
- *   thing most worth fixing.
- */
-export function auditAnswer(text, ledger, { truncated = false } = {}) {
-  const violations = [];
-  const cited = new Set();
-  // Code samples are excluded from every check below, including the URL one: a `curl` line
-  // in an example is not a source being cited, and flagging it would fail answers for
-  // showing their working.
-  const answer = stripCode(text ?? "");
-
-  // Fabricated numbers, checked over the whole answer including its Sources list — a
-  // bibliography entry numbered beyond the ledger is as invented as one in the prose.
-  const unknownNumbers = new Set();
-  for (const n of markersIn(answer)) {
-    if (ledger.has(n)) cited.add(n);
-    else unknownNumbers.add(n);
-  }
-  for (const n of [...unknownNumbers].sort((a, b) => a - b)) {
-    violations.push({
-      type: "unknown_source",
-      marker: n,
-      message:
-        `[${n}] does not exist. ${ledger.size === 0
-          ? "No sources have been retrieved in this turn."
-          : `Sources [1]–[${ledger.size}] are the only ones retrieved.`}`,
-    });
-  }
-
-  // Bare URLs the search never returned. A plausible-looking link is the easiest thing
-  // for a model to invent and the hardest thing for a reader to doubt.
-  const unknownURLs = new Set();
-  for (const match of answer.matchAll(URL_PATTERN)) {
-    const url = match[0].replace(/[.,;:)\]]+$/, "");
-    if (!ledger.hasURL(url)) unknownURLs.add(url);
-  }
-  for (const url of unknownURLs) {
-    violations.push({
-      type: "unknown_url",
-      url,
-      message: `${url} was not returned by any search this turn. Link only to retrieved sources.`,
-    });
-  }
-
-  // Uncited assertions.
-  //
-  // When the answer was cut off at the token cap, its final sentence is exempt. Not out of
-  // leniency — it is the one sentence whose missing citation is *explained*, because the
-  // marker goes at the end and the end is what got truncated. Reporting it as a citation
-  // failure puts a second, more alarming banner next to the one that already says the
-  // answer stops mid-thought, and blames the model for the cap. Every other sentence is
-  // still held to the rule, and a fabricated citation still fails wherever it appears.
-  const sentences = auditableSentences(answer);
-  const exempt = truncated ? sentences.length - 1 : -1;
-  const uncited = [];
-  for (const [index, sentence] of sentences.entries()) {
-    if (index === exempt) continue;
-    if (!isCheckableClaim(sentence)) continue;
-    if (markersIn(sentence).length > 0) continue;
-    uncited.push(sentence);
-  }
-  for (const sentence of uncited) {
-    violations.push({
-      type: "uncited_claim",
-      sentence,
-      message: `No citation: "${truncate(sentence, 160)}"`,
-    });
-  }
-
-  if (ledger.size === 0 && uncited.length > 0) {
-    violations.unshift({
-      type: "no_search",
-      message:
-        "This answer states facts but the web_search tool was never called, so nothing in " +
-        "it is verified.",
-    });
-  }
-
-  return {
-    ok: violations.length === 0,
-    violations,
-    cited: [...cited].sort((a, b) => a - b),
-    unused: ledger.sources.filter((s) => !cited.has(s.n)).map((s) => s.n),
-  };
-}
-
-function truncate(text, max) {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-/**
- * The correction handed back to the model when an answer fails the audit.
- *
- * Written as an instruction with the specific offending sentences in it, because "add
- * citations" produces a reshuffle and "this sentence has no source" produces a fix. It
- * offers two legitimate ways out, and the second matters most: if no source supports the
- * sentence, delete the sentence. An answer that says less is the correct outcome of a
- * failed verification, not a worse one.
- *
- * Searching is deliberately not among the options. This round has no tools — it is a
- * rewrite of an answer the model can see, from sources quoted underneath it — and offering
- * a way out that isn't there would produce a turn that asks for a search and never
- * answers.
- */
-export function repairInstruction(violations, ledger) {
-  const lines = [
-    "STOP. Your previous answer failed the citation check and was not shown to the user.",
-    "",
-    "Problems found:",
-  ];
-  for (const violation of violations.slice(0, 12)) {
-    lines.push(`- ${violation.message}`);
-  }
-  if (violations.length > 12) lines.push(`- …and ${violations.length - 12} more.`);
-
-  lines.push(
-    "",
-    "Rewrite the whole answer. Every sentence that asserts a fact, a verdict, a number, a " +
-      "date or something a named person or organisation said must end with a citation " +
-      "marker for a source you actually retrieved.",
-    ledger.size > 0
-      ? `Valid markers this turn: [1]–[${ledger.size}]. Never write any other number, and never link to a URL that was not returned by a search.`
-      : "You have retrieved no sources at all, so there is nothing you may assert about the world. Say so.",
-    "",
-    "You cannot search again — searching is over for this turn. So if a sentence has no " +
-      "source behind it, you have two options and only two: attribute it explicitly to the " +
-      "video or post being checked (which is the subject, not evidence), or delete the " +
-      "sentence. Saying less is the right answer when the evidence is not there.",
-    "",
-    "Output only the rewritten answer. Do not mention this correction.",
-  );
-  return lines.join("\n");
-}
-
-/**
- * What the user sees when even the repair round failed.
- *
- * The answer still gets shown — a silently withheld reply is worse than a flagged one, and
- * the model may well be right — but it is shown carrying the label the check earned it.
- * The failure is never allowed to be invisible.
- */
-export function unverifiedNotice(violations) {
-  const kinds = new Set(violations.map((v) => v.type));
-  const reasons = [];
-  if (kinds.has("no_search")) reasons.push("no search was run");
-  if (kinds.has("unknown_source") || kinds.has("unknown_url")) {
-    reasons.push("it cites sources that were never retrieved");
-  }
-  if (kinds.has("uncited_claim")) {
-    const count = violations.filter((v) => v.type === "uncited_claim").length;
-    // The verb agrees too. Pluralising the noun and leaving "carry" gave "1 statement
-    // carry no citation" — a small thing, on the one banner in the app whose whole job is
-    // to be believed.
-    reasons.push(count === 1 ? "1 statement carries no citation" : `${count} statements carry no citation`);
-  }
-  return `Unverified: ${reasons.join("; ")}. Treat the statements above as unchecked.`;
 }
