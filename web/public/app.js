@@ -271,11 +271,25 @@ function truncatedElement() {
  * and concludes the app has hung. A chip that says what is being looked up turns the same
  * seconds into visible progress.
  */
-function searchListElement(searches, pending = []) {
+function searchListElement(searches, pending = [], pendingReads = []) {
   const wrap = document.createElement("div");
   wrap.className = "searches";
   for (const item of searches) {
     const chip = document.createElement("div");
+    if (item.type === "find") {
+      // A read is a different act from a search and is labelled as one. It is also the step
+      // that most needs saying out loud: opening a page and scanning it is the slowest thing
+      // the server does, and an unlabelled pause there is indistinguishable from a hang.
+      chip.className = item.error ? "search-chip failed" : "search-chip read";
+      chip.textContent = item.error
+        ? `Couldn’t read ${item.domain || item.url} — ${item.error}`
+        : item.matches > 0
+          ? `Read ${item.domain || item.url} · ${item.matches} passage${item.matches === 1 ? "" : "s"} on “${item.find}”`
+          : `Read ${item.domain || item.url} · nothing on “${item.find}”`;
+      if (item.claim) chip.title = `Checking: ${item.claim}`;
+      wrap.append(chip);
+      continue;
+    }
     chip.className = item.error ? "search-chip failed" : "search-chip";
     chip.textContent = item.error
       ? `Search failed: ${item.query || "(invalid query)"} — ${item.error}`
@@ -292,21 +306,45 @@ function searchListElement(searches, pending = []) {
     if (item.claim) chip.title = `Checking: ${item.claim}`;
     wrap.append(chip);
   }
+  for (const item of pendingReads) {
+    const chip = document.createElement("div");
+    chip.className = "search-chip pending read";
+    chip.textContent = `Reading ${domainOf(item.url)} for “${item.find}”…`;
+    if (item.claim) chip.title = `Checking: ${item.claim}`;
+    wrap.append(chip);
+  }
   return wrap;
 }
 
+/** Host of a URL, for a chip that has no room for the whole thing. */
+function domainOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
 /**
- * The bibliography, built by the server from what the search tool actually returned.
+ * The links, listed out.
  *
- * Rendered from the ledger rather than from anything the model typed, which is what makes
- * it trustworthy: a page that no search returned cannot appear in this list.
+ * This used to print under every answer, and it no longer does. Every `[3]` in the answer is
+ * now a link to source 3 where it stands — see `linkCitations` — so a numbered list
+ * underneath repeats the entire evidence trail in the one form nobody reads, and its length
+ * is what made a two-source answer look like a literature review. The links themselves are
+ * still kept for every answer, stored with the message and used to resolve the markers; what
+ * changed is that printing them is now conditional.
  *
- * `provisional` marks the list sent while the searches were still landing, before the
- * answer exists. It is everything retrieved rather than everything cited, and it is labelled
- * as such: the final list is narrower, and a count that shrinks without explanation reads
- * as sources going missing rather than as the answer having used fewer than it found.
+ * Two conditions, and each is a case where the inline links cannot do the job alone:
+ *
+ * - `provisional` — the list sent while the searches are still landing. There is no answer
+ *   yet, so there are no inline markers to be links, and this is the reader's only view of
+ *   the evidence during the longest silence in the turn.
+ * - `fallback` — the server says the finished answer's own links are not enough: it cited
+ *   nothing, or it was cut off, or it failed the citation check. Whenever the reader is
+ *   being asked to check something themselves, they get everything that was retrieved.
  */
-function sourceListElement(sources, provisional = false) {
+function sourceListElement(sources, { provisional = false, fallback = false } = {}) {
   const wrap = document.createElement("div");
   wrap.className = provisional ? "sources provisional" : "sources";
 
@@ -314,7 +352,9 @@ function sourceListElement(sources, provisional = false) {
   heading.className = "sources-heading";
   heading.textContent = provisional
     ? `Sources found (${sources.length}) — retrieved by the app; reading them now`
-    : `Sources (${sources.length}) — retrieved by the app, not written by the model`;
+    : fallback
+      ? `Every source retrieved (${sources.length}) — listed in full because the answer above does not link them all`
+      : `Sources (${sources.length}) — retrieved by the app, not written by the model`;
   wrap.append(heading);
 
   const list = document.createElement("ol");
@@ -330,6 +370,15 @@ function sourceListElement(sources, provisional = false) {
     domain.className = "source-domain";
     domain.textContent = ` ${source.domain}`;
     item.append(link, domain);
+    // The passage the page reader pulled off this page, when there is one. It is the
+    // sentence the citation actually rests on, and showing it is the difference between a
+    // list of domain names and a list the reader can judge without opening anything.
+    if (source.quote) {
+      const quote = document.createElement("div");
+      quote.className = "source-quote";
+      quote.textContent = `“${source.quote}”`;
+      item.append(quote);
+    }
     list.append(item);
   }
   wrap.append(list);
@@ -372,7 +421,12 @@ function messageElement(message, conversationId) {
   // moment the page refreshed.
   if (message.searches?.length) wrap.append(searchListElement(message.searches));
   wrap.append(body);
-  if (message.sources?.length) wrap.append(sourceListElement(message.sources));
+  // The links are stored with every answer and used above to resolve its markers; the list
+  // is printed only when the server said the inline links could not carry the evidence on
+  // their own. See `sourceListElement`.
+  if (message.sources?.length && message.sourcesFallback) {
+    wrap.append(sourceListElement(message.sources, { fallback: true }));
+  }
   if (message.unverified) wrap.append(unverifiedElement(message.unverified));
   if (message.truncated) wrap.append(truncatedElement());
 
@@ -612,7 +666,10 @@ async function streamAnswer(conversationId) {
   const searches = [];
   // Dispatched but not yet returned, in the order the server will report them.
   let pendingSearches = [];
+  // Pages the server has opened but not finished scanning, shown for the same reason.
+  let pendingReads = [];
   let sources = [];
+  let sourcesFallback = false;
   let unverified = null;
   let truncated = false;
 
@@ -748,15 +805,30 @@ async function streamAnswer(conversationId) {
           scheduleRender();
         } else if (frame.type === "searching") {
           pendingSearches = frame.searches ?? [];
-          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches));
+          pendingReads = frame.reads ?? [];
+          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches, pendingReads));
           scrollToBottom();
         } else if (frame.type === "search") {
           searches.push(frame);
           // Results come back in the order the round dispatched them, so the oldest
           // outstanding chip is the one this frame just resolved.
           pendingSearches = pendingSearches.slice(1);
-          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches));
+          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches, pendingReads));
           scrollToBottom();
+        } else if (frame.type === "find") {
+          // A page was read. Filed in the same trail as the searches, in the order the
+          // server did the work, because that order is the story of how the answer was
+          // arrived at: searched, then read the two that mattered.
+          searches.push(frame);
+          pendingReads = pendingReads.slice(1);
+          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches, pendingReads));
+          scrollToBottom();
+        } else if (frame.type === "answer") {
+          // The finished answer, with its citations tidied. It replaces everything streamed
+          // so far rather than adding to it — the tidy-up can only run on a whole answer, so
+          // it necessarily arrives after the last token of the untidied one.
+          answer = frame.text;
+          scheduleRender();
         } else if (frame.type === "reset") {
           // The server rejected what it had written and is starting again. Clearing the
           // bubble is the point: a failed answer must not be left on screen above its
@@ -765,7 +837,16 @@ async function streamAnswer(conversationId) {
           body.innerHTML = "";
         } else if (frame.type === "sources") {
           sources = frame.sources;
-          sourcesEl = replace(sourcesEl, sourceListElement(sources, frame.provisional));
+          // Held whether or not the list is drawn: these rows are what turn every `[n]` in
+          // the answer into a link, which is the whole point of not drawing the list.
+          sourcesFallback = Boolean(frame.fallback);
+          const show = frame.provisional || sourcesFallback;
+          sourcesEl = replace(
+            sourcesEl,
+            show
+              ? sourceListElement(sources, { provisional: frame.provisional, fallback: sourcesFallback })
+              : document.createElement("div"),
+          );
           // Re-render so the markers become links. This is why the provisional list is
           // worth sending: `linkCitations` can only turn `[3]` into a link if it is already
           // holding source 3, so holding the bibliography back until the end left every
@@ -790,8 +871,9 @@ async function streamAnswer(conversationId) {
     // Whatever was still in flight when the stream ended is not in flight any more —
     // a "Searching…" chip left spinning under a finished answer says the app is still
     // working when it has stopped, which is the one thing the chip exists to prevent.
-    if (pendingSearches.length > 0) {
+    if (pendingSearches.length > 0 || pendingReads.length > 0) {
       pendingSearches = [];
+      pendingReads = [];
       searchesEl = replace(searchesEl, searchListElement(searches));
     }
     // Flushed synchronously rather than left to a pending rAF: the bubble has to show
@@ -817,6 +899,9 @@ async function streamAnswer(conversationId) {
         content: answer,
         searches: searches.length ? searches : undefined,
         sources: sources.length ? sources : undefined,
+        // Whether the list was printed under the answer, so a reload renders the same thing
+        // rather than quietly deciding for itself.
+        sourcesFallback: sourcesFallback || undefined,
         unverified: unverified ?? undefined,
         truncated: truncated || undefined,
       });

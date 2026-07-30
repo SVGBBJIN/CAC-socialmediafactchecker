@@ -30,6 +30,7 @@ export class CitationLedger {
   constructor() {
     this.sources = [];
     this.searches = [];
+    this.finds = [];
     this.byURL = new Map();
   }
 
@@ -73,6 +74,52 @@ export class CitationLedger {
     return entries;
   }
 
+  /**
+   * The ledger entry for a URL, or `undefined`.
+   *
+   * This is the gate on `find_in_page`: the page reader is only allowed to open a page some
+   * search already returned, so the passages it quotes hang off a source that already has a
+   * number. A find on an arbitrary URL would hand the model quotable text with no entry
+   * here — citable by no marker, and therefore uncitable — which is the hole the ledger
+   * exists to close.
+   */
+  find(url) {
+    const raw = String(url ?? "").trim();
+    return this.byURL.get(raw) ?? this.byURL.get(raw.replace(/[.,;:)\]]+$/, ""));
+  }
+
+  /**
+   * File the passages one in-page find pulled out of a source.
+   *
+   * They are kept on the source rather than only shown to the model because they are the
+   * strongest thing this app ever holds about a citation: not "this page was returned for
+   * this query" but "this page says these words". The claim is recorded too, exactly as a
+   * search's is — reading a page to check a claim is checking it.
+   *
+   * @returns the source entry, now carrying `passages`.
+   */
+  recordFind(findResult) {
+    const entry = this.find(findResult.url);
+    if (!entry) return undefined;
+    if (!entry.claims.includes(findResult.claim)) entry.claims.push(findResult.claim);
+    entry.passages ??= [];
+    for (const passage of findResult.passages ?? []) {
+      // The same paragraph can be the best answer to two different questions about a page.
+      // Filed once.
+      if (!entry.passages.some((existing) => existing.text === passage.text)) {
+        entry.passages.push({ text: passage.text, score: passage.score, find: findResult.find });
+      }
+    }
+    this.finds.push({
+      url: findResult.url,
+      find: findResult.find,
+      claim: findResult.claim,
+      n: entry.n,
+      passageCount: findResult.passages?.length ?? 0,
+    });
+    return entry;
+  }
+
   has(n) {
     return n >= 1 && n <= this.sources.length;
   }
@@ -103,6 +150,48 @@ export class CitationLedger {
         entries.length === 1 ? "[1] refers" : `[${entries[0].n}]–[${entries.at(-1).n}] refer`
       } to the pages above and to nothing else. Do not cite a number outside the range you ` +
       `have been given, and do not state anything these sources do not support.`
+    );
+  }
+
+  /**
+   * One find's passages, as the model reads them.
+   *
+   * Written to make the passages the evidence and the marker their address. Two details
+   * carry weight:
+   *
+   * - Every passage is prefixed with the *same* number, the one the page already had. A
+   *   find retrieves no new source — it reads one — so it must not look like it produced
+   *   one, or the model will cite the reading separately from the page.
+   * - An empty result is stated as a finding about the page rather than as a failure, and
+   *   the model is told which ranking produced it. "Not on this page" from both halves of
+   *   the ranking is worth acting on; from the lexical half alone it is worth one more
+   *   query with different wording before concluding anything.
+   */
+  static describeFind(entry, findResult) {
+    const where = `[${entry.n}] ${entry.title} — ${entry.url}`;
+    if (findResult.passages.length === 0) {
+      return (
+        `Nothing on ${where} matches "${findResult.find}". The page was read in full ` +
+        `(${findResult.passageCount} passages${findResult.semantic ? ", ranked by meaning and by wording" : ", ranked by wording only — the semantic ranking was unavailable"}).\n\n` +
+        `This is a real finding about the page, not an error: it does not say what you were ` +
+        `looking for. Do not cite [${entry.n}] for that claim.` +
+        (findResult.semantic ? "" : " If the claim may be phrased very differently on the page, one search with other wording is worth a try.")
+      );
+    }
+
+    const lines = findResult.passages.map(
+      (passage, index) =>
+        `[${entry.n}] passage ${index + 1} (relevance ${passage.score}${passage.phrase ? ", exact phrase match" : ""}):\n    “${passage.text}”`,
+    );
+    return (
+      `Read ${where}\nLooking for: "${findResult.find}"\n` +
+      `${findResult.passages.length} of ${findResult.passageCount} passages match${
+        findResult.semantic ? "" : " (ranked by wording only — the semantic ranking was unavailable)"
+      }.\n\n${lines.join("\n\n")}\n\n` +
+      `This is the page's own text, quoted exactly. Cite it as [${entry.n}] — reading a page ` +
+      `does not create a new source, so do not give it a new number. Quote it directly where ` +
+      `the wording matters, and if these passages do not settle the claim, say so rather ` +
+      `than reading more into them than they say.`
     );
   }
 }

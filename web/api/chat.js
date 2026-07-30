@@ -136,6 +136,13 @@ export default async function handler(req, res) {
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);
+      if (frame.type === "find") {
+        trace(
+          frame.error
+            ? `read failed: ${frame.url} — ${frame.error}`
+            : `read: ${frame.url} — ${frame.matches} passage(s) for "${frame.find}"${frame.semantic ? "" : " (lexical only)"}`,
+        );
+      }
       if (frame.type === "truncated" && frame.totalTokens != null) {
         // What THINKING_BUDGET_TOKENS is a guess about, made concrete: if thinking is most
         // of `totalTokens`, the budget still needs to come down (or the model needs a

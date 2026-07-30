@@ -113,18 +113,26 @@ web/
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
   lib/degradation.js  When to stop asking for the best model, and how the UI says so.
-  lib/verified-chat.js  The fact-check turn: search tool, system prompt, citation audit.
+  lib/verified-chat.js  The fact-check turn: both research tools, system prompt, audit.
   lib/search.js    Query → search provider → normalised, openable sources.
   lib/search-schema.js  JSON Schema for a query, and the Gemini tool declaration.
+  lib/page-find.js Ctrl+F by meaning: fetch a retrieved page, rank its passages.
+  lib/fuzzy.js     The lexical half of that ranking — IDF, trigrams, proximity.
+  lib/embeddings.js  The semantic half. Optional; a failure degrades the ranking only.
+  lib/find-schema.js  JSON Schema for a find, and both tool declarations together.
   lib/citations.js The ledger, and the audit that decides if an answer may be shown.
+  lib/citation-cleanup.js  Merge, dedupe, cap and renumber the markers after the audit.
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
   bin/search.mjs   Run one search from the terminal, through the same code path.
+  bin/find.mjs     Run one in-page find from the terminal, with both scores shown.
   server.js        Local dev server. Mounts the same handlers Vercel runs.
   test.js          Unit tests. No network, no dependencies.
   test-search.js   Tests for search, the schema, and the citation audit.
+  test-find.js     Tests for the in-page find and the fuzzy matching under it.
+  test-cleanup.js  Tests for citation cleanup — what it removes, and what it must not.
   test-ui.mjs      Browser tests for app.js. Opt-in — see below.
 ```
 
@@ -216,8 +224,8 @@ budget, which not every model may accept.
 
 ## Every claim carries a citation
 
-The assistant has one tool, `web_search`, and one rule enforced in code: **it may not
-assert a fact it did not retrieve.**
+The assistant has two tools — `web_search` to find pages and `find_in_page` to read one —
+and one rule enforced in code: **it may not assert a fact it did not retrieve.**
 
 The system prompt (`lib/verified-chat.js`) states plainly that everything factual the
 model says in a turn was found with that tool during that turn, that its training data is
@@ -225,8 +233,10 @@ not a source and cannot be cited, and that every sentence carrying a verdict, a 
 date or an attribution must end with a marker — `[3]` — for a source it actually
 retrieved. Then the app checks, because a prompt is a request and this needs a guarantee:
 
-1. **The tool is the only door.** Each result comes back numbered by a ledger, and those
-   numbers are the entire set of citations the model is permitted to write.
+1. **The tools are the only door.** Each result comes back numbered by a ledger, and those
+   numbers are the entire set of citations the model is permitted to write. Reading a page
+   creates no new number: `find_in_page` may only open a URL the ledger already holds, and
+   its passages come back under that page's existing marker.
 2. **The finished answer is audited** against that ledger before it is allowed to stand —
    `lib/citations.js`. Three ways to fail: a checkable sentence with no marker, a marker
    for a source that does not exist, and a URL no search returned.
@@ -241,9 +251,14 @@ retrieved. Then the app checks, because a prompt is a request and this needs a g
    comes back *empty*, the withdrawn answer goes back up under that same warning: the
    screen was cleared for a replacement that never arrived, and sources over a blank space
    look like a broken app rather than a failed check.
-5. **The bibliography is rendered by the app, from the ledger.** The model is told not to
-   write one. A source list the model types is a source list it can invent; one built from
-   retrieved results cannot contain a page that was never fetched.
+5. **The links are rendered by the app, from the ledger.** The model is told not to write a
+   source list. One the model types is one it can invent; links built from retrieved results
+   cannot name a page that was never fetched. They now travel *with* the answer — every `[3]`
+   is a link where it stands — and the list under the answer is only a fallback. See "Links
+   inline, list as a fallback".
+6. **Redundant citations are cleaned out before the answer is shown**, by
+   `lib/citation-cleanup.js`, running after the audit so the audit judges what the model
+   wrote rather than our edit of it. See "Cleaning up the citations".
 
 ### Saying what it is doing
 
@@ -287,9 +302,9 @@ results and write the verdict. The runtime is what makes that pay off:
   deadline. Later rounds get a note saying the clip was watched earlier instead. The TikTok
   path was already guarded; the YouTube one was not, because the attachment happens in
   `toGeminiContents` rather than in the code that does the fetching.
-- **Three rounds of searching, then the tools are withdrawn.** A model that asks anyway is
-  told once, in the conversation, to answer from what it has; if it asks again the turn
-  ends. Withdrawing a declaration is a hint, and a hint is not a ceiling — without the hard
+- **Three rounds of tool calls, shared between searching and reading, then the tools are
+  withdrawn.** A model that asks anyway is told once, in the conversation, to answer from
+  what it has; if it asks again the turn ends. Withdrawing a declaration is a hint, and a hint is not a ceiling — without the hard
   stop, a model that keeps calling is an unbounded number of model calls the reader is
   sitting through.
 
@@ -297,6 +312,134 @@ What is *not* audited, deliberately: connective tissue ("here's what I found"), 
 descriptions of the claim under review — the video is the subject, not evidence — code
 blocks, and tables. Demanding a marker on those teaches the model to sprinkle citations
 where they mean nothing, which devalues the ones that carry weight.
+
+### Ctrl+F, by meaning as well as by wording
+
+A search result is a *page*, described by a snippet an engine wrote for its own purposes.
+Verifying a claim from snippets is verifying it from advertising copy: the snippet says the
+study found an increase, and the page says the increase was inside the margin of error. The
+model then either cites the snippet and is subtly wrong, or burns a round firing three more
+searches hoping for a better snippet — and both of those are how an over-cited or uncited
+answer happens.
+
+So `find_in_page` opens the page. It takes a URL the ledger already holds and a plain-words
+description of what is wanted, and returns the passages that address it, quoted exactly,
+under the number that page already has. One find on the right source beats three more
+searches, and it lets the model quote the source instead of paraphrasing a snippet.
+
+The ranking is hybrid because the two halves fail in opposite directions:
+
+- **Fuzzy lexical** (`lib/fuzzy.js`) finds the number, the name and the date. Token overlap
+  weighted by IDF, so a word in every passage cannot decide the ranking; trigram similarity
+  with a shared-stem floor, so *vaccine* matches *vaccination*; thousands separators folded,
+  so `1,200,000` matches `1200000`; and a proximity bonus, so matches in one sentence beat
+  the same words scattered down the page. A verbatim phrase hit outranks every paraphrase,
+  which is what stops three half-matches beating the passage that prints the figure.
+- **Semantic** (`lib/embeddings.js`) finds the passage that means the right thing in the
+  wrong words — *coverage declined* for a claim about *rates falling*. It is **optional**:
+  every failure path returns "no vectors", the find drops to lexical scoring alone, and the
+  model is told which ranking it got, because "not on this page" from half a ranking
+  deserves less confidence than from both. Only the lexically plausible passages are
+  embedded, one batch per page, capped and timed out.
+
+Absence is a first-class result. "Nothing on this page matches" comes back as a finding
+about the page — *do not cite it for that claim* — not as an error, because a fact-checker
+that reads a failed lookup as evidence of absence is the worst outcome available here.
+
+Two bugs found by pointing `bin/find.mjs` at a live Wikipedia page, both now pinned by
+tests. Comments were stripped before elements, and Wikipedia's embedded JSON contains the
+characters `<!--`, so the strip ran to the next `-->` and took a `</script>` with it —
+kilobytes of raw wikitext then ranked as the fourth-best passage. And a page's own footnote
+markers, `[ 108 ]`, collide with this app's citation syntax: the model is told to quote
+verbatim, so quoting one would put `[108]` in the answer, where the audit reads it as a
+citation of a source that does not exist and fails the answer for fabricating one. The
+page's footnote numbers are stripped; the citation is the page.
+
+### Cleaning up the citations
+
+The audit in `lib/citations.js` is deliberately indifferent to how *many* markers a sentence
+carries, because a checker that punishes over-citation teaches a model to under-cite, and
+under-citing is the worse failure. What it lets through reads like this:
+
+    The agency revised the figure down to 4.2% [1][2][3]. That was published in March
+    [1][3][2], after the review closed [2][2].
+
+Every marker is real. Collectively they are noise: they push the eye off the sentence, they
+imply three independent confirmations where there is one page found by three queries, and
+they make the one marker that adds a second source indistinguishable from the two that
+don't. `lib/citation-cleanup.js` does what a copy editor does, in this order:
+
+1. **Merge what is secretly one page.** Two searches returning the same article by two
+   spellings of its URL — `?utm_source=`, an AMP path, a trailing slash, a fragment — are
+   numbered separately by the ledger, and a sentence citing both reads as corroboration.
+   Canonicalised and merged to the lower number. Meaningful query strings are kept: `?id=`
+   on a docket is the page's identity, and merging those would fuse two documents into one
+   citation.
+2. **Drop what repeats, per sentence.** A number repeated in a *later* sentence is not
+   redundant — that sentence needs its own source — so the scope is one sentence, and a list
+   item is its own sentence.
+3. **Cap a runaway stack** at three, the point past which extra markers are not
+   corroboration but everything the model read attached to the sentence it read it for.
+4. **Renumber** to what the answer actually cites, in the order it cites them, so the
+   markers ascend as they are read and there are no gaps left by sources gathered and not
+   used. It is a rename applied to the text and the link list from one mapping, so a marker
+   cannot end up pointing at a different page than it did a moment ago.
+5. **Strip a source list the model typed anyway**, but only when the tail is mostly entries
+   — a heading that goes on to say something is not a bibliography, and cutting an answer
+   short to tidy it would be far worse than leaving a list in.
+
+Three rules hold over all of it. It runs **after** the audit, so the audit judges what the
+model wrote rather than our edit of it. It **never invents a marker and never leaves a
+claim bare** — only a marker another marker on the same sentence makes redundant is removed,
+so a sentence that arrived cited leaves cited. And a **fabricated** marker is left exactly
+where it was written: deleting `[9]` would erase the evidence for the "Unverified" banner
+the reader is about to be shown, leaving an answer that looks clean and is not. For the same
+reason, an answer that failed the audit, was truncated, or died mid-stream is **not**
+renumbered — its markers must still point where the model pointed them.
+
+Code is excluded from every pass, fenced and inline: `rows[1]` in a sample is an array
+index, and this is the one layer that rewrites the answer rather than only reading it.
+
+### Links inline, list as a fallback
+
+The numbered list under every answer was the right design when a marker was inert text and
+the list was the only way to resolve one. Markers are links now — `linkCitations` in
+`public/app.js` turns each `[3]` into a link to source 3, from the first token of the
+stream, which is why the link rows are sent as the searches land rather than at the end. So
+printing the list underneath as well repeats the whole evidence trail in the form nobody
+reads, and its length is what made a two-source answer look like a literature review.
+
+The links are still saved for every answer and stored with the message: they are what
+resolves the markers, and an answer whose links vanished on reload would be unauditable.
+What changed is that *printing* them is now conditional, on exactly the cases where the
+inline links cannot carry the evidence alone:
+
+- **While the searches are still landing** — there is no answer yet, so there are no inline
+  markers to be links, and this is the reader's only view of the evidence during the longest
+  silence in the turn.
+- **The answer cites nothing** — it never got past searching, or was cut off before the
+  first marker. Those pages were fetched on the reader's behalf and must not vanish because
+  no marker happens to point at them.
+- **The answer is flawed** — it failed the audit, hit the token cap, or its stream died.
+  Whenever the reader is being asked to check something themselves, they get everything that
+  was retrieved, in the ledger's own numbering so the list and the text agree.
+
+A passage the page reader pulled off a source rides along with its link, so the fallback
+list shows the sentence the citation rests on rather than a row of domain names.
+
+### Finding inside a page from the terminal
+
+```bash
+npm run find -- --url https://www.cdc.gov/measles/cases.html \
+                --find "how many cases were reported in 2026"
+npm run find -- --url <url> --find "…" --show-scores   # both halves of every score
+npm run find -- --url <url> --find "…" --lexical       # no embeddings, as a keyless deploy runs
+npm run find -- --url <url> --passages                 # what the splitter produced
+```
+
+A ranking is the hardest kind of bug to see from a chat answer: when a fact-check misses a
+figure that is plainly on the page, the fetch, the splitter, the lexical floor and a quietly
+unavailable semantic half all look identical from outside. `--show-scores` separates them.
 
 ### Searching from the terminal
 
