@@ -88,6 +88,77 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
 
 /**
+ * The same cap, for a round that still has its tools — which is to say, a round whose job
+ * is to *decide what to look up*, not to write the answer.
+ *
+ * This is the single largest avoidable wait in a video fact-check. A turn about a
+ * short-form clip runs up to `MAX_TOOL_ROUNDS` model calls, and until now every one of
+ * them was handed the full 4096-token reasoning budget — including the first, whose entire
+ * output is a list of search calls. A thinking model given room to deliberate will use it:
+ * the reader waits through thousands of tokens of invisible reasoning, at Flash's output
+ * rate, before the first search is even dispatched, and then waits through it again on the
+ * next round. The budget is a ceiling rather than a target, so this costs nothing on a
+ * round that was going to be brief anyway; what it removes is the rambling one.
+ *
+ * The *answering* round — the one past the tool budget, where `tools` is withdrawn — keeps
+ * the full budget, because that is the round where reasoning turns into the verdict and
+ * where cutting it short would show. Enumerating the claims in a clip and naming a query
+ * per claim is a shallower task than weighing what came back, and it is budgeted like one.
+ *
+ * Never raises the caller's cap: the value actually sent is the smaller of the two, so
+ * `THINKING_BUDGET_TOKENS=512` still means 512 everywhere.
+ */
+export const DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS = 1024;
+
+/**
+ * How much of a video Gemini is asked to look at, per frame.
+ *
+ * `generationConfig.mediaResolution` trades visual detail for tokens, and video is where
+ * that trade is worth naming: a clip is sampled at a frame a second, so a 45-second TikTok
+ * arrives as ~45 images. At the default that is several thousand input tokens the model
+ * has to read before it can say anything — on every round of the turn, since the clip
+ * stays in the conversation — and it is the largest single contributor to the gap between
+ * pasting a link and seeing the first search.
+ *
+ * Deliberately **not** on by default, even though `low` is the biggest remaining speed
+ * lever in this file. On short-form video the claim frequently lives in an on-screen text
+ * card rather than in the audio — the system prompt says so in as many words — and reading
+ * small text off a frame is exactly what resolution buys. Trading it away silently would
+ * make the app faster at the thing it exists to do badly, so the choice is the operator's:
+ * set `GEMINI_MEDIA_RESOLUTION=low` (or `medium`) and measure it against clips you care
+ * about.
+ */
+export const MEDIA_RESOLUTIONS = {
+  low: "MEDIA_RESOLUTION_LOW",
+  medium: "MEDIA_RESOLUTION_MEDIUM",
+  high: "MEDIA_RESOLUTION_HIGH",
+};
+
+/**
+ * Read `GEMINI_MEDIA_RESOLUTION` into the enum Gemini wants, or null for "don't send it".
+ *
+ * An unrecognised value is ignored rather than thrown on: this is a speed knob, and
+ * failing every request in the deployment over a typo in an optional tuning variable is a
+ * worse outcome than running at the default speed.
+ */
+export function mediaResolutionFromEnv(env = process.env) {
+  const raw = String(env.GEMINI_MEDIA_RESOLUTION ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  return MEDIA_RESOLUTIONS[raw] ?? (raw.startsWith("media_resolution_") ? raw.toUpperCase() : null);
+}
+
+/**
+ * Models that answered a `mediaResolution` with "no such field".
+ *
+ * Support for the field is guessed at from the version number, the same way
+ * `supportsThinkingBudget` guesses, and this is what a wrong guess costs: the model that
+ * refused is remembered and the field is dropped for it from the next attempt onward, so
+ * the mistake is paid for once rather than on every request. Module-scoped and unbounded
+ * on purpose — it can only ever hold model IDs from the configured chain.
+ */
+const mediaResolutionRefused = new Set();
+
+/**
  * Whether `model` is expected to accept `thinkingConfig.thinkingBudget`.
  *
  * The chain's thinking models are the "3" series and 2.5; "2.0" predates extended
@@ -163,6 +234,7 @@ export function shouldFallThrough(status, message = "") {
   if (isOverloadedFailure(status, message)) return true;
   if (isContextLimitFailure(status, message)) return true;
   if (isUnsupportedThinkingConfig(status, message)) return true;
+  if (isUnsupportedMediaResolution(status, message)) return true;
   if (status !== 400) return false;
   const lowered = message.toLowerCase();
   return (
@@ -220,6 +292,19 @@ export function isOverloadedFailure(status, message = "") {
 export function isUnsupportedThinkingConfig(status, message = "") {
   if (status !== 400) return false;
   return /thinking[_ ]?config/i.test(message);
+}
+
+/**
+ * Whether a 400 is Gemini refusing `mediaResolution` as a field it doesn't recognise.
+ *
+ * The same safety net as `isUnsupportedThinkingConfig`, for the same reason: which models
+ * accept the field is guessed from the version number, and a wrong guess must cost one
+ * model rather than the whole chain. Paired with `mediaResolutionRefused`, which stops the
+ * next request re-buying the same 400.
+ */
+export function isUnsupportedMediaResolution(status, message = "") {
+  if (status !== 400) return false;
+  return /media[_ ]?resolution/i.test(message);
 }
 
 /**
@@ -961,6 +1046,8 @@ export async function* streamChat({
   // since 0 has its own meaning to Gemini (disable thinking) that not every model may
   // accept, and this app has no live confirmation either way.
   thinkingBudgetTokens = DEFAULT_THINKING_BUDGET_TOKENS,
+  toolRoundThinkingBudgetTokens = DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS,
+  mediaResolution = null,
   signal,
   fetchImpl = fetch,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
@@ -1032,6 +1119,14 @@ export async function* streamChat({
       const toolsThisRound = useTools && round < maxToolRounds;
       if (toolsThisRound) requestBody.tools = tools;
 
+      // A round that can still search is a round deciding *what* to look up; the round
+      // that can't is the one writing the verdict. They get different reasoning budgets —
+      // see `DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS`. Never above the caller's cap.
+      const roundThinkingBudget =
+        toolsThisRound && toolRoundThinkingBudgetTokens > 0
+          ? Math.min(thinkingBudgetTokens, toolRoundThinkingBudgetTokens)
+          : thinkingBudgetTokens;
+
       const calls = [];
       const turn = new ModelTurn();
       let thinkingAnnounced = false;
@@ -1048,7 +1143,8 @@ export async function* streamChat({
         budgetPressure,
         round,
         media,
-        thinkingBudgetTokens,
+        thinkingBudgetTokens: roundThinkingBudget,
+        mediaResolution: media ? mediaResolution : null,
         overloadSweeps,
         // Only forwarded when the caller supplied one, so `streamRound` keeps its own
         // default rather than being handed `undefined` and losing it.
@@ -1170,6 +1266,7 @@ async function* streamRound({
   round = 0,
   media = false,
   thinkingBudgetTokens = 0,
+  mediaResolution = null,
   overloadSweeps = OVERLOAD_SWEEPS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
@@ -1221,7 +1318,10 @@ async function* streamRound({
   let detail = plan.detail;
   let remainingMs = plan.skipped.find((s) => s.model === plan.preferred)?.remainingMs;
 
-  for (const model of plan.models) {
+  // Indexed rather than `for…of` so one case can retry the *same* model — see the
+  // `mediaResolution` branch below, which fixes the request rather than moving on from it.
+  for (let index = 0; index < plan.models.length; index += 1) {
+    const model = plan.models[index];
     if (deadline.callerAborted) return void (abandoned = true);
     const url = `${ENDPOINT}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
 
@@ -1239,6 +1339,18 @@ async function* streamRound({
       requestBody.generationConfig.thinkingConfig = { thinkingBudget: thinkingBudgetTokens };
     } else {
       delete requestBody.generationConfig.thinkingConfig;
+    }
+
+    // Same per-attempt treatment, for the same reason — and additionally dropped for a
+    // model already caught refusing the field, so a wrong guess is paid for once.
+    if (
+      mediaResolution &&
+      supportsThinkingBudget(model) &&
+      !mediaResolutionRefused.has(model)
+    ) {
+      requestBody.generationConfig.mediaResolution = mediaResolution;
+    } else {
+      delete requestBody.generationConfig.mediaResolution;
     }
 
     let response;
@@ -1305,6 +1417,24 @@ async function* streamRound({
       } else if (response.status === 404 || response.status === 403) {
         reason = REASONS.unavailable;
         detail = message;
+      }
+
+      // The one failure this app can repair by itself. `mediaResolution` is an optional
+      // speed setting, not part of what was asked for, so a model refusing it is not a
+      // reason to give up on that model — and *is* a reason to expect the next model in
+      // the chain to refuse it too, which makes falling through the wrong move: the
+      // operator would enable the setting and watch the whole chain fail. So the refusal
+      // is remembered, the field is dropped, and the same model is asked again. The
+      // memory is what makes this terminate: the second attempt cannot carry the field,
+      // so it cannot be refused for this reason twice.
+      if (isUnsupportedMediaResolution(response.status, message)) {
+        const firstRefusal = !mediaResolutionRefused.has(model);
+        mediaResolutionRefused.add(model);
+        if (firstRefusal) {
+          lastError = describeFailure(response.status, message, model);
+          index -= 1;
+          continue;
+        }
       }
 
       if (isOverloadedFailure(response.status, message)) sawOverload = true;

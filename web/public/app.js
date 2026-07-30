@@ -127,8 +127,10 @@ function renderMarkdown(text, sources) {
  * A marker the reader cannot follow is only marginally better than no marker: the whole
  * point of the citation rule is that a claim can be checked, and "can be checked" means
  * one click, not scrolling to a list and matching a number by eye. Markers with no
- * matching source are left as plain text — the server-side audit is what stops those
- * being written, and quietly linking one somewhere would hide the failure.
+ * matching source are left as plain text, and should never arrive — the server deletes a
+ * marker naming a source it never retrieved before the answer is sent. This is the
+ * belt-and-braces for that: linking one somewhere plausible would be worse than showing it
+ * inert.
  *
  * Runs on already-escaped HTML and only ever inserts a URL that came from the server's
  * ledger, escaped again here.
@@ -385,14 +387,6 @@ function sourceListElement(sources, { provisional = false, fallback = false } = 
   return wrap;
 }
 
-/** The banner an answer earns by failing the citation check twice. */
-function unverifiedElement(notice) {
-  const wrap = document.createElement("div");
-  wrap.className = "unverified";
-  wrap.textContent = notice.message;
-  return wrap;
-}
-
 /**
  * @param conversationId - Passed only for the conversation's *final* message, which is
  *   the only one a retry can safely rebuild. Omitted for the in-progress bubble
@@ -427,7 +421,6 @@ function messageElement(message, conversationId) {
   if (message.sources?.length && message.sourcesFallback) {
     wrap.append(sourceListElement(message.sources, { fallback: true }));
   }
-  if (message.unverified) wrap.append(unverifiedElement(message.unverified));
   if (message.truncated) wrap.append(truncatedElement());
 
   // `retryable` distinguishes "Gemini is overloaded, try again" from "that request was
@@ -670,7 +663,6 @@ async function streamAnswer(conversationId) {
   let pendingReads = [];
   let sources = [];
   let sourcesFallback = false;
-  let unverified = null;
   let truncated = false;
 
   // Live containers for the evidence trail. Created up front and left empty so the
@@ -685,12 +677,8 @@ async function streamAnswer(conversationId) {
   const status = statusElement();
   bubble.insertBefore(status.element, searchesEl);
   let sourcesEl = document.createElement("div");
-  let noticeEl = document.createElement("div");
-  // Its own slot rather than sharing `noticeEl`: a truncated answer usually fails the
-  // citation audit too — it was cut off before it could cite — and the two notices say
-  // different things, so one must not overwrite the other.
   let truncatedEl = document.createElement("div");
-  bubble.append(sourcesEl, noticeEl, truncatedEl);
+  bubble.append(sourcesEl, truncatedEl);
 
   /** Swap a placeholder for freshly rendered content, keeping the handle pointing at it. */
   const replace = (element, next) => {
@@ -829,12 +817,14 @@ async function streamAnswer(conversationId) {
           // it necessarily arrives after the last token of the untidied one.
           answer = frame.text;
           scheduleRender();
-        } else if (frame.type === "reset") {
-          // The server rejected what it had written and is starting again. Clearing the
-          // bubble is the point: a failed answer must not be left on screen above its
-          // replacement, where a reader would take the two together as one.
-          answer = "";
-          body.innerHTML = "";
+        } else if (frame.type === "break") {
+          // The model stopped to run a tool and has started writing again. A paragraph
+          // boundary, not an erasure: the search that caused it is already showing in the
+          // trail above, and the text on either side of it is text the reader is entitled
+          // to keep. This replaced a `reset` frame that blanked the bubble mid-reply,
+          // which is what made a normal answer look like the app coming apart.
+          answer += "\n\n";
+          scheduleRender();
         } else if (frame.type === "sources") {
           sources = frame.sources;
           // Held whether or not the list is drawn: these rows are what turn every `[n]` in
@@ -853,9 +843,6 @@ async function streamAnswer(conversationId) {
           // marker as inert plain text for the whole of the stream.
           scheduleRender();
           scrollToBottom();
-        } else if (frame.type === "unverified") {
-          unverified = frame;
-          noticeEl = replace(noticeEl, unverifiedElement(frame));
         } else if (frame.type === "error") {
           // The server already classified this — a quota/5xx/timeout failure sets it,
           // a policy refusal or a malformed request doesn't.
@@ -892,8 +879,8 @@ async function streamAnswer(conversationId) {
   if (target) {
     if (answer) {
       // Stored alongside the text, so the answer keeps its evidence across a reload:
-      // `searches` is what was asked, `sources` is what came back and is what the
-      // markers in `content` point at, `unverified` is the label if it failed the check.
+      // `searches` is what was asked, and `sources` is what came back — the rows the
+      // markers in `content` point at, which is why they are stored rather than redrawn.
       target.messages.push({
         role: "assistant",
         content: answer,
@@ -902,7 +889,6 @@ async function streamAnswer(conversationId) {
         // Whether the list was printed under the answer, so a reload renders the same thing
         // rather than quietly deciding for itself.
         sourcesFallback: sourcesFallback || undefined,
-        unverified: unverified ?? undefined,
         truncated: truncated || undefined,
       });
     }

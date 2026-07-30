@@ -502,12 +502,16 @@ await withPage(async (page) => {
   check("the fallback list survives a reload", afterReload === 2, `count=${afterReload}`);
 });
 
+// The model writes a preamble, goes and searches, and comes back. Both stretches are the
+// reader's; the break separates them. This replaced a `reset` frame that blanked the bubble
+// mid-reply — text appearing and then vanishing, which is what "it cuts itself off"
+// described. Nothing the server sends may un-draw what the browser has already shown.
 scriptedAs([
   {
     frames: [
       { type: "model", model: "gemini-3.6-flash" },
-      { type: "delta", text: "REJECTED ANSWER with no citations." },
-      { type: "reset", reason: "citation-check" },
+      { type: "delta", text: "Let me look that up." },
+      { type: "break" },
       { type: "delta", text: "The bridge cost $2.1 billion [1]." },
       {
         type: "sources",
@@ -521,8 +525,11 @@ await withPage(async (page) => {
   await send(page, "is this true?");
   await page.waitForSelector(".message.assistant a.citation");
   const text = await page.locator(".message.assistant .body").last().innerText();
-  check("a rejected answer is cleared from the screen", !text.includes("REJECTED"), text);
-  check("the rewrite is what remains", text.includes("$2.1 billion"), text);
+  check("the preamble is still on screen", text.includes("Let me look that up"), text);
+  check("the answer is there too", text.includes("$2.1 billion"), text);
+  // Two paragraphs, not one run-on sentence contradicting itself.
+  const paragraphs = await page.locator(".message.assistant .body p").count();
+  check("the break renders as a paragraph boundary", paragraphs === 2, `count=${paragraphs}`);
 });
 
 /* ---------------- reading a page, and the cleaned-up answer ---------------- */
@@ -571,24 +578,24 @@ await withPage(async (page) => {
   check("the cleaned answer is what gets stored", !afterReload.includes("[1][1]"), afterReload);
 });
 
+// An uncited answer is simply an answer. There is no audit to fail and no banner to earn:
+// the reader gets what the model wrote, with the evidence trail above it.
 scriptedAs([
   {
     frames: [
       { type: "model", model: "gemini-3.6-flash" },
       { type: "delta", text: "The bridge cost $2.1 billion." },
-      { type: "unverified", message: "Unverified: 1 statement carries no citation.", violations: [] },
       { type: "done" },
     ],
   },
 ]);
 await withPage(async (page) => {
   await send(page, "is this true?");
-  await page.waitForSelector(".message.assistant .unverified");
-  const notice = await page.locator(".unverified").innerText();
-  check("an answer that failed the check is labelled", /Unverified/.test(notice), notice);
-  await page.reload();
-  await page.waitForSelector(".message.assistant .unverified");
-  check("the label survives a reload", true);
+  await page.waitForSelector(".message.assistant .body");
+  const text = await page.locator(".message.assistant .body").last().innerText();
+  check("an uncited answer is shown as written", text.includes("$2.1 billion"), text);
+  const banners = await page.locator(".unverified").count();
+  check("no banner is drawn for it", banners === 0, `count=${banners}`);
 });
 
 scriptedAs([
@@ -682,7 +689,6 @@ scriptedAs([
       { type: "model", model: "gemini-3.6-flash", degraded: false },
       { type: "delta", text: "The bridge cost $2.1 bil" },
       { type: "truncated", reason: "max_output_tokens" },
-      { type: "unverified", message: "Unverified: 1 statement carries no citation.", violations: [] },
       { type: "done" },
     ],
   },
@@ -692,9 +698,6 @@ await withPage(async (page) => {
   await page.waitForSelector(".message.assistant .truncated");
   const notice = await page.locator(".truncated").innerText();
   check("an answer cut off by the token cap says so", /reply-length limit/.test(notice), notice);
-  // Both notices are true at once and say different things; neither may overwrite the other.
-  const unverified = await page.locator(".unverified").count();
-  check("the truncation notice does not displace the citation warning", unverified === 1, `count=${unverified}`);
 
   await page.reload();
   await page.waitForSelector(".message.assistant .truncated");

@@ -32,10 +32,29 @@
 const UPLOAD_ENDPOINT = "https://generativelanguage.googleapis.com/upload/v1beta/files";
 const FILES_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
 
-/** How long each individual upload leg may take, and how long to wait for ACTIVE. */
+/** How long each individual upload leg may take. */
 export const UPLOAD_TIMEOUT_MS = 120_000;
-export const POLL_INTERVAL_MS = 2_000;
-export const MAX_POLLS = 60;
+
+/**
+ * How the wait for ACTIVE is paced.
+ *
+ * This used to be a flat two seconds per poll, which is the right number for a file that
+ * takes a while and the wrong one for the file this app actually uploads. A short-form
+ * clip is typically ready within a few hundred milliseconds of finalizing, and a flat
+ * interval cannot find that out sooner than its own length: the fast case paid a full two
+ * seconds of doing nothing, every time, on the critical path before the model had even
+ * been called.
+ *
+ * So the first look is quick and the interval grows from there — the fast case is caught
+ * almost immediately, and a genuinely slow transcode still backs off to the same lazy
+ * two-second cadence instead of hammering the API. `MAX_POLL_WAIT_MS` replaces the old
+ * "60 polls" ceiling, because with a varying interval a count of polls no longer describes
+ * how long anything waits; the bound people care about is the clock.
+ */
+export const POLL_INTERVAL_MS = 250;
+export const MAX_POLL_INTERVAL_MS = 2_000;
+export const POLL_BACKOFF = 1.6;
+export const MAX_POLL_WAIT_MS = 120_000;
 
 export class FilesError extends Error {
   constructor(message, { retryable = false } = {}) {
@@ -111,7 +130,9 @@ export async function uploadFile(
     displayName = "seer-clip",
     timeoutMs = UPLOAD_TIMEOUT_MS,
     pollIntervalMs = POLL_INTERVAL_MS,
-    maxPolls = MAX_POLLS,
+    maxPollIntervalMs = MAX_POLL_INTERVAL_MS,
+    maxPollWaitMs = MAX_POLL_WAIT_MS,
+    now = () => Date.now(),
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   },
 ) {
@@ -158,13 +179,18 @@ export async function uploadFile(
 
   let file = parseFile(await finalize.json());
 
-  // 3. Wait for it to leave PROCESSING.
-  for (let poll = 0; poll < maxPolls; poll += 1) {
+  // 3. Wait for it to leave PROCESSING, looking soon and then progressively less often.
+  const deadline = now() + maxPollWaitMs;
+  let interval = pollIntervalMs;
+  for (;;) {
     if (file.state.toUpperCase() === "ACTIVE") return file;
     if (file.state.toUpperCase() !== "PROCESSING") {
       throw new FilesError(`Gemini Files upload finished in state ${file.state}.`);
     }
-    await sleep(pollIntervalMs);
+    if (now() >= deadline) break;
+
+    await sleep(interval);
+    interval = Math.min(Math.round(interval * POLL_BACKOFF), maxPollIntervalMs);
     if (signal?.aborted) throw new FilesError("Upload abandoned.", { retryable: false });
 
     const polled = await withTimeout(`${FILES_ENDPOINT}/${file.name}`, {

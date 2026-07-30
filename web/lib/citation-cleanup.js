@@ -1,11 +1,11 @@
-// Citation cleanup — the pass between an answer that survived the audit and the answer the
-// reader is shown.
+// Citation cleanup — the pass between the answer the model wrote and the answer the reader
+// is shown, and now the only thing standing between the two.
 //
-// `citations.js` enforces the floor: nothing asserted without a source, no source that was
-// not retrieved. It is deliberately indifferent to how *many* markers a sentence carries,
-// because a checker that punishes over-citation teaches a model to under-cite, and of the
-// two failures under-citation is the one that matters. The result is an answer that passes
-// the audit while reading like this:
+// Most of what it does is copy-editing. A model told to cite its sources will cite them
+// several times over, because nothing in the prompt punishes over-citation and it would be
+// a bad idea if it did — a checker that penalised extra markers would teach the model to
+// use fewer, and of the two failures under-citation is by far the one that matters. So the
+// answers arrive reading like this:
 //
 //     The agency revised the figure down to 4.2% [1][2][3]. That revision was published in
 //     March [1][3][2], after the review closed [2][2].
@@ -17,14 +17,20 @@
 // removes what repeats, merges what is secretly the same page, caps what has run away, and
 // renumbers so the markers ascend as they are read.
 //
+// One thing it does is not copy-editing. A marker naming a number the ledger does not have
+// is a citation to a page that was never retrieved, and it is **deleted**. That used to be
+// an auditor's job, and the auditor's remedy was to reject the whole answer, make the model
+// write it again and label the result *Unverified* — see the note at the top of
+// citations.js for why that is gone. Deleting the four characters achieves what the banner
+// was for, which is that no unopenable citation reaches the reader.
+//
 // Three rules govern the whole file:
 //
-//   1. **Never invent a marker, never leave a claim bare.** Cleanup only ever removes a
-//      marker that another marker on the same sentence makes redundant. A sentence that
-//      entered with citations leaves with at least one.
-//   2. **Run after the audit, not before.** The audit judges what the model actually wrote.
-//      Tidying first would mean auditing our own edit and reporting its mistakes as the
-//      model's.
+//   1. **Never invent a marker, and never take the last real one off a sentence.** Every
+//      removal here is either a marker another marker on the same sentence makes redundant,
+//      or one that pointed at nothing in the first place.
+//   2. **Only ever change markers.** The prose the model wrote comes out byte-identical
+//      apart from the markers and the whitespace a removed marker leaves behind.
 //   3. **Renumbering is a rename, applied everywhere at once.** The text and the source
 //      list are rewritten from one mapping, so a marker cannot end up pointing at a
 //      different page than it did a moment ago.
@@ -32,11 +38,11 @@
 /**
  * Fenced blocks and inline code spans, which are not citation sites.
  *
- * `rows[1]` in a code sample is an array index. `citations.js` already excludes code from
- * every check it makes, for the same reason, and cleanup has to be at least as careful — it
- * does not merely read the answer, it rewrites it, so a marker matched inside a code sample
- * would be renumbered and the sample would come out saying something else. The one thing
- * this pass must never do is change what the answer says.
+ * `rows[1]` in a code sample is an array index, not a citation. This pass does not merely
+ * read the answer, it rewrites it, so a marker matched inside a code sample would be
+ * renumbered — or deleted, since no ledger has a source 1 for it — and the sample would
+ * come out saying something else. The one thing this pass must never do is change what the
+ * answer says.
  */
 const CODE_REGION = /```[\s\S]*?(?:```|$)|`[^`\n]*`/g;
 
@@ -76,7 +82,10 @@ export const MAX_MARKERS_PER_SENTENCE = 3;
 const BIBLIOGRAPHY_HEADING =
   /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?(?:sources|references|citations|works cited|bibliography)(?:\*\*|__)?[ \t]*:?[ \t]*$/im;
 
-/** Sentence boundaries, same rule as the auditor's — see `citations.js`. */
+/**
+ * Sentence boundaries. Markers are deduplicated per sentence, so this decides the scope
+ * within which a repeat counts as a repeat.
+ */
 const SENTENCE_BREAK =
   /(?<=[.!?])(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Sen|Rep|Gov|Gen|St|Jr|Sr|vs|etc|al|Inc|Ltd|Co|No|Fig|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.)(?<!\b[A-Z]\.)["')\]]?\s+(?=["'(\[]?[A-Z0-9])/;
 
@@ -184,7 +193,7 @@ export function stripModelBibliography(text) {
 /**
  * Tidy the citations in a finished answer.
  *
- * @param text the audited answer, as the model wrote it.
+ * @param text the finished answer, as the model wrote it.
  * @param ledger the `CitationLedger` its markers refer to.
  * @returns `{text, sources, cited, changed, removed}` — `sources` is the bibliography in
  *   the new numbering and in the order the answer cites them, ready to be sent as-is;
@@ -196,6 +205,10 @@ export function cleanCitations(text, ledger, { renumber = true } = {}) {
     duplicateMarkers: 0,
     mergedSources: 0,
     cappedMarkers: 0,
+    // Markers naming a source that was never retrieved. Counted separately from the
+    // redundancy tallies because it is a different event: the others tidy a real citation,
+    // this one deletes an invented one. Worth having in the log.
+    fabricatedMarkers: 0,
     bibliographyStripped: false,
   };
 
@@ -287,11 +300,21 @@ function cleanSentence(sentence, { merge, ledger, removed }) {
   return sentence.replace(MARKER_GROUP, (group) => {
     const out = [];
     for (const written of numbersIn(group)) {
-      // A number outside the ledger is left exactly as written. It is a fabrication, the
-      // audit has already reported it as one, and quietly deleting it here would erase the
-      // evidence for the "Unverified" label the reader is about to be shown.
+      // A number outside the ledger names a source that was never retrieved, so it is
+      // dropped — the one place this pass removes something for a reason other than
+      // redundancy, and the reason is that a marker is a link. Every other marker in the
+      // answer resolves to a page the reader can open; this one resolves to nothing, and
+      // rendering it would put an unopenable citation in a fact-check, which is the single
+      // worst thing this app can produce.
+      //
+      // It used to be left in place, because the audit reported it and the "Unverified"
+      // banner needed the evidence to still be visible. There is no banner now — see the
+      // note at the top of citations.js — so the honest handling is to take the fabrication
+      // out rather than to publish it with a warning attached. The sentence keeps whatever
+      // real markers it had; a sentence whose *only* marker was invented comes out
+      // uncited, which is exactly what it always was.
       if (!ledger.has(written)) {
-        out.push(written);
+        removed.fabricatedMarkers += 1;
         continue;
       }
 

@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { CitationLedger, auditAnswer } from "./lib/citations.js";
+import { CitationLedger, markersIn } from "./lib/citations.js";
 import {
   cleanCitations,
   canonicalURL,
@@ -222,14 +222,27 @@ test("stripping a bibliography never cuts the answer short", () => {
 
 /* ---------------- what cleanup must never do ---------------- */
 
-test("a fabricated marker is left exactly where the model wrote it", () => {
+test("a fabricated marker is deleted rather than published", () => {
   const ledger = ledgerOf("https://a.example/one");
-  const { text } = cleanCitations("Coverage fell [1]. Fatalities rose [7].", ledger, {
+  const { text, removed } = cleanCitations("Coverage fell [1]. Fatalities rose [7].", ledger, {
     renumber: false,
   });
-  // Deleting [7] would erase the evidence for the "Unverified" banner the reader is about to
-  // be shown, leaving an answer that looks clean and is not.
-  assert.match(text, /\[7\]/);
+
+  // [7] names a source no search returned, so it resolves to nothing. It used to be left
+  // in place because the "Unverified" banner needed the evidence visible; with no banner,
+  // the honest handling is to take the fabrication out rather than render an unopenable
+  // citation. The real marker beside it is untouched.
+  assert.equal(text, "Coverage fell [1]. Fatalities rose.");
+  assert.equal(removed.fabricatedMarkers, 1);
+});
+
+test("a sentence whose only marker was invented comes out uncited, not mangled", () => {
+  const ledger = ledgerOf("https://a.example/one");
+  const { text } = cleanCitations("The agency revised the figure down [4].", ledger, {
+    renumber: false,
+  });
+  // Dropping the group leaves no space stranded before the full stop.
+  assert.equal(text, "The agency revised the figure down.");
 });
 
 test("every cited sentence still carries a citation after cleanup", () => {
@@ -238,13 +251,12 @@ test("every cited sentence still carries a citation after cleanup", () => {
     "The Bureau said coverage fell to 58% in 2023 [1][2]. Officials called the fall routine [2][1].";
   const { text } = cleanCitations(answer, ledger);
 
-  // Both sentences are checkable claims. Merging two markers that are one page must not
-  // leave either of them bare — that would turn a tidy-up into an audit failure.
-  const audit = auditAnswer(text, ledger);
-  assert.deepEqual(
-    audit.violations.filter((violation) => violation.type === "uncited_claim"),
-    [],
-  );
+  // Merging two markers that are secretly one page must not leave either sentence bare.
+  // Cleanup only ever removes what another marker on the same sentence makes redundant,
+  // and this is the property that says so.
+  for (const sentence of text.split(". ")) {
+    assert.ok(markersIn(sentence).length > 0, `lost its citation: ${sentence}`);
+  }
   assert.equal(text, "The Bureau said coverage fell to 58% in 2023 [1]. Officials called the fall routine [1].");
 });
 

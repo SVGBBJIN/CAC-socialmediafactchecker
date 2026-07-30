@@ -666,17 +666,7 @@ a.citation:hover {
   line-height: 1.45;
 }
 
-.unverified {
-  margin-top: 10px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  color: var(--danger);
-  font-size: 13px;
-}
-
-/* Same shape as `.unverified`, one step down in severity. The text that arrived is sound;
-   there is just less of it than the model meant to write. */
+/* The text that arrived is sound; there is just less of it than the model meant to write. */
 .truncated {
   margin-top: 10px;
   border: 1px solid var(--accent);
