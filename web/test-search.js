@@ -1342,6 +1342,149 @@ test("the model reads a page a search returned and quotes it under the same numb
   assert.equal(sources.sources[0].quote, "The final bill came to $2.1 billion.");
 });
 
+/**
+ * A Gemini stub with a page server bolted on, so a turn can be watched fetching pages
+ * nobody asked for yet. Anything with a JSON body is a model call; everything else is a
+ * page being opened.
+ */
+function geminiAndPages(rounds) {
+  const { fetchImpl: gemini, sent } = fakeGemini(rounds);
+  const fetched = [];
+  const fetchImpl = async (url, options) => {
+    // The embedding call has a body too, but it is not a round of the conversation —
+    // letting it fall through to the model stub would desync the script. Declined, which
+    // is a case `embedTexts` is built for: the find drops to lexical ranking and says so.
+    if (String(url).includes("batchEmbedContents")) return { ok: false, status: 503 };
+    if (options?.body) return gemini(url, options);
+    fetched.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === "content-type" ? "text/html" : null) },
+      text: async () =>
+        "<html><title>Title 0</title><body>" +
+        "<p>The bridge opened to traffic in the spring of 2024, two years behind schedule.</p>" +
+        "<p>The final bill for the bridge came to $2.1 billion, the auditor confirmed.</p>" +
+        "<p>Local councillors have asked for a review of the procurement process.</p>" +
+        "</body></html>",
+    };
+  };
+  return { fetchImpl, sent, fetched };
+}
+
+/** Let the fire-and-forget prefetches settle before asserting on them. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("the top results of a search are opened while the model is still reading the snippets", async () => {
+  // The two-pass shape the prompt asks for means the page a second-round `find_in_page`
+  // lands on is nearly always one the first round already retrieved. Waiting to be told
+  // which puts the whole page fetch in series behind a model call that was itself waiting
+  // on the search — the same seconds spent twice.
+  const { fetchImpl, fetched } = geminiAndPages([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { text: "The final bill was $2.1 billion [1]." },
+  ]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () =>
+        searchResult("The bridge cost $4bn", [
+          "https://a.example/1",
+          "https://b.example/2",
+          "https://c.example/3",
+          "https://d.example/4",
+        ]),
+    }),
+  );
+  await settle();
+
+  // Top of the page is where a find goes, so a shallow slice buys most of the benefit —
+  // and the fourth result is bandwidth spent on a page nobody was going to read.
+  assert.deepEqual(fetched, ["https://a.example/1", "https://b.example/2", "https://c.example/3"]);
+});
+
+test("a page opened ahead of time is not opened again when the model asks for it", async () => {
+  const { fetchImpl, fetched } = geminiAndPages([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: {
+            url: "https://a.example/1",
+            find: "the final bill for the bridge",
+            claim: "The bridge cost $4bn",
+          },
+        },
+      ],
+    },
+    { text: "The final bill was $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+    }),
+  );
+  await settle();
+
+  // One fetch, not two: the find is served from the turn's page cache, so it costs the
+  // ranking and nothing else.
+  assert.deepEqual(fetched, ["https://a.example/1"]);
+  const find = frames.find((f) => f.type === "find");
+  assert.equal(find.n, 1);
+  assert.ok(find.matches > 0, "the prefetched page was still readable when the find ran");
+});
+
+test("prefetching is bounded across a whole turn, not just per search", async () => {
+  const rounds = [
+    {
+      calls: [
+        { name: "web_search", args: { query: "a", claim: "one" } },
+        { name: "web_search", args: { query: "b", claim: "two" } },
+        { name: "web_search", args: { query: "c", claim: "three" } },
+        { name: "web_search", args: { query: "d", claim: "four" } },
+      ],
+    },
+    { text: "No source settles this." },
+  ];
+  const { fetchImpl, fetched } = geminiAndPages(rounds);
+
+  let query = 0;
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => {
+        query += 1;
+        return searchResult(`claim ${query}`, [
+          `https://q${query}.example/1`,
+          `https://q${query}.example/2`,
+          `https://q${query}.example/3`,
+        ]);
+      },
+    }),
+  );
+  await settle();
+
+  // Three searches' worth, then the budget is spent — a turn that searches widely must not
+  // turn into a crawler on the strength of a guess about what it will read.
+  assert.equal(fetched.length, 9);
+});
+
 test("a find on a page no search returned is refused, with a way forward", async () => {
   const { fetchImpl } = fakeGemini([
     { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },

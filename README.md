@@ -86,7 +86,49 @@ Unlike the iOS path, the key here never reaches the client at all — there is a
 put it behind. See [web/README.md](web/README.md) for how that works, the controls that
 keep strangers off your quota, and the Vercel deploy.
 
-### Every claim carries a citation
+### What the reader waits through
+
+A short-form video turn is three model calls, not one, and the video is in every one of
+them. Most of the thirty seconds between pasting a link and reading a verdict is spent in
+places that produce no output at all, so they are the places worth measuring.
+
+**The early rounds think on a shorter leash.** A turn runs up to `MAX_TOOL_ROUNDS` model
+calls, and the first one's entire output is a list of searches — but it used to be handed
+the same 4096-token reasoning budget as the round that writes the verdict. A thinking
+model given room to deliberate uses it, so the reader waited out thousands of tokens of
+invisible reasoning before the first search was dispatched, and then waited out more of it
+next round. Any round that still holds its tools now gets
+`TOOL_ROUND_THINKING_BUDGET_TOKENS` (default 1024) instead. The budget is a ceiling rather
+than a target, so a round that was going to be brief costs the same as before; what it
+removes is the rambling one. The answering round — where `tools` is withdrawn — keeps the
+full budget, because that is where reasoning becomes the verdict.
+
+**The pages a search returns are opened before anyone asks for them.** The prompt asks for
+two passes: search everything, then read what matters. That means a second-round
+`find_in_page` almost always lands on a URL the first round already retrieved — and
+waiting to be told which one puts the whole page fetch in series behind a model call that
+was itself waiting on the search. So the top three results of each search are fetched and
+parsed while the model is still reading the snippets, into the same per-turn `PageCache` a
+real find would have used. A find that hits one costs the ranking alone. It is speculative
+work, so it is bounded twice: three pages per search, nine per turn.
+
+**The wait for an uploaded clip starts short.** Clips past the inline ceiling go through
+the Files API, which reports `PROCESSING` and has to be polled until it doesn't. That poll
+was a flat two seconds, which is the right interval for a slow transcode and the wrong one
+for a ten-second TikTok that is ready almost immediately — the fast case cannot be
+discovered sooner than the interval's own length. It now starts at 250 ms and backs off to
+the same two seconds, and the ceiling on the whole wait is a clock rather than a poll
+count.
+
+**`GEMINI_MEDIA_RESOLUTION` is the biggest lever left, and it is off.** Video reaches the
+model as roughly one frame per second, so a 45-second clip is ~45 images to read before it
+can say anything — on every round. Dropping to `low` cuts that by about four. What it
+spends is detail within the frame, and on short-form video the claim is frequently an
+on-screen text card rather than anything in the audio, which is exactly what that detail
+is for. Making the app faster at the thing it exists to do carefully is not a default, so
+it is opt-in: try `medium` first, against clips whose claim is written rather than spoken.
+
+## Every claim carries a citation
 
 The chat assistant has one tool — `web_search` — and is not permitted to assert a fact it
 did not retrieve with it. The system prompt says so; the app then *checks*, because a

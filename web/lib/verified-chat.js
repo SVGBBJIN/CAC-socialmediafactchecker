@@ -138,6 +138,31 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
 /** How many times a failed answer gets sent back for a rewrite before we ship it flagged. */
 export const MAX_REPAIR_ROUNDS = 1;
 
+/**
+ * How many of a search's results are fetched before anyone asks for them, and how many
+ * such fetches one turn will make in total.
+ *
+ * The two-pass shape this prompt asks for — search everything, then read what matters —
+ * means a `find_in_page` in the second round is nearly always on a URL the *first* round
+ * already put in the ledger. Waiting for the model to name it before opening the page puts
+ * the whole page fetch on the critical path, in series behind a model call that itself sat
+ * behind the searches: the reader waits out the same three seconds twice, once to find the
+ * page and once to open it.
+ *
+ * So the top few results of each search are pulled and parsed while the model is still
+ * reading the snippets. A find that lands on one of them costs the ranking alone, and the
+ * `PageCache` makes that free of charge — it already de-duplicates by URL, already drops a
+ * failed fetch so a real find can retry it, and already holds for exactly one turn.
+ *
+ * Bounded twice over because this is speculative work: it is bandwidth spent on pages that
+ * may never be read, and a turn with three rounds of four searches would otherwise open
+ * several dozen. Top-of-page results are where a find goes, so a shallow slice buys most of
+ * the benefit; the per-turn ceiling is what stops a pathological turn from becoming a
+ * crawler.
+ */
+export const PREFETCH_PER_SEARCH = 3;
+export const PREFETCH_PER_TURN = 9;
+
 export function searchEnabled(env = process.env) {
   // Read case-insensitively, like the provider keys: an operator who typed
   // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
@@ -154,7 +179,18 @@ export function searchEnabled(env = process.env) {
  * the claim could not be checked. Throwing here would take down a whole answer over one bad
  * query.
  */
-function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl, findImpl, apiKey, pages }) {
+function makeToolRunner({
+  ledger,
+  env,
+  fetchImpl,
+  signal,
+  searchImpl,
+  findImpl,
+  apiKey,
+  pages,
+  prefetchPerSearch = PREFETCH_PER_SEARCH,
+  prefetchPerTurn = PREFETCH_PER_TURN,
+}) {
   // Every search this turn has already run, by the query it ran. A model that asks the
   // same question twice — the same round, having listed a claim twice, or a later round
   // circling back to a result it didn't like — gets the same answer without a second
@@ -168,6 +204,22 @@ function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl, findImpl, 
       String(args?.freshness ?? "any"),
       args?.max_results ?? null,
     ]);
+
+  // Speculative page loads, budgeted for the whole turn — see `PREFETCH_PER_SEARCH`.
+  let prefetched = 0;
+  const prefetch = (entries) => {
+    if (!pages || prefetchPerSearch <= 0) return;
+    for (const { url } of entries.slice(0, prefetchPerSearch)) {
+      if (prefetched >= prefetchPerTurn) return;
+      if (signal?.aborted) return;
+      prefetched += 1;
+      // Deliberately not awaited: the point is that this overlaps the model call the
+      // search results are about to be handed to. A page that will not open is not a
+      // failure here — nobody asked for it yet, and `PageCache` has already forgotten it
+      // by the time a real find might.
+      pages.load(url).catch(() => {});
+    }
+  };
 
   return async (call, { signal: callSignal } = {}) => {
     if (call.name === "find_in_page") {
@@ -209,6 +261,7 @@ function makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl, findImpl, 
       const base = await pending;
       const result = { ...base, claim: String(call.args?.claim ?? base.claim) };
       const entries = ledger.record(result);
+      prefetch(entries);
       return {
         response: { result: CitationLedger.describe(entries, result) },
         frame: {
@@ -409,6 +462,8 @@ export async function* verifiedChat({
   findImpl = findInPage,
   signal,
   maxRepairRounds = MAX_REPAIR_ROUNDS,
+  prefetchPerSearch = PREFETCH_PER_SEARCH,
+  prefetchPerTurn = PREFETCH_PER_TURN,
   ...geminiOptions
 }) {
   const enabled = searchEnabled(env);
@@ -418,7 +473,18 @@ export async function* verifiedChat({
   // that is the point of reading one rather than searching again.
   const pages = new PageCache({ fetchImpl, signal });
   const toolRunner = enabled
-    ? makeToolRunner({ ledger, env, fetchImpl, signal, searchImpl, findImpl, apiKey, pages })
+    ? makeToolRunner({
+        ledger,
+        env,
+        fetchImpl,
+        signal,
+        searchImpl,
+        findImpl,
+        apiKey,
+        pages,
+        prefetchPerSearch,
+        prefetchPerTurn,
+      })
     : null;
 
   let conversation = messages;

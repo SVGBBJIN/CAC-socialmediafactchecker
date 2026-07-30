@@ -24,6 +24,9 @@ import {
   resolveTikTokParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_BUDGET_TOKENS,
+  DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS,
+  isUnsupportedMediaResolution,
+  mediaResolutionFromEnv,
 } from "./lib/gemini.js";
 import {
   ModelHealth,
@@ -718,6 +721,177 @@ test("a model that rejects thinkingConfig outright is skipped, not fatal", async
 
   assert.equal(tried.length, 2);
   assert.equal(answerFrames(frames).at(-1).text, "answered anyway");
+});
+
+/* ---------------- what the reader waits through ---------------- */
+
+/**
+ * A scripted Gemini for the two-round case: round one asks for a search, round two answers.
+ *
+ * Kept local to these tests rather than shared, because what they assert on is the
+ * *request* — the reasoning budget each round was sent with — not the reply.
+ */
+function twoRoundGemini() {
+  const sent = [];
+  const fetchImpl = async (_url, options) => {
+    sent.push(JSON.parse(options.body));
+    const parts =
+      sent.length === 1
+        ? [{ functionCall: { name: "web_search", args: { query: "q" } } }]
+        : [{ text: "the answer" }];
+    return sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts } }] })}\n\n`]);
+  };
+  return { fetchImpl, sent };
+}
+
+const SEARCH_TOOL = [{ function_declarations: [{ name: "web_search", parameters: { type: "object" } }] }];
+
+test("a round that can still search thinks on a shorter leash than the round that answers", async () => {
+  // The largest avoidable wait in a video fact-check: the first round's whole output is a
+  // list of searches, and the reader sits through however much invisible reasoning the
+  // model chose to do before dispatching them — then through it again next round.
+  const { fetchImpl, sent } = twoRoundGemini();
+
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check this" }],
+      models: ["gemini-3.6-flash"],
+      thinkingBudgetTokens: 4096,
+      maxToolRounds: 1,
+      tools: SEARCH_TOOL,
+      toolRunner: async () => ({ response: { result: "nothing found" } }),
+      fetchImpl,
+    }),
+  );
+
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0].generationConfig.thinkingConfig, {
+    thinkingBudget: DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS,
+  });
+  assert.ok(sent[0].tools, "the short-leash round is the one that still had its tools");
+  // The round writing the verdict is where reasoning turns into the answer, and it keeps
+  // the full budget.
+  assert.deepEqual(sent[1].generationConfig.thinkingConfig, { thinkingBudget: 4096 });
+  assert.ok(!sent[1].tools);
+});
+
+test("the tool-round budget lowers the reasoning cap and never raises it", async () => {
+  const { fetchImpl, sent } = twoRoundGemini();
+
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check this" }],
+      models: ["gemini-3.6-flash"],
+      // An operator who asked for 512 everywhere meant it; a "tool rounds get 1024"
+      // default that quietly doubled it would be the opposite of a spend cap.
+      thinkingBudgetTokens: 512,
+      toolRoundThinkingBudgetTokens: 1024,
+      maxToolRounds: 1,
+      tools: SEARCH_TOOL,
+      toolRunner: async () => ({ response: { result: "nothing found" } }),
+      fetchImpl,
+    }),
+  );
+
+  assert.deepEqual(sent[0].generationConfig.thinkingConfig, { thinkingBudget: 512 });
+  assert.deepEqual(sent[1].generationConfig.thinkingConfig, { thinkingBudget: 512 });
+});
+
+test("a turn with no video is never sent a media resolution", async () => {
+  // The field only describes how much of a frame the model looks at, so on a text-only
+  // turn it is noise in the request — and noise that some model in the chain might refuse.
+  let sent;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "no links here" }],
+      models: ["gemini-3.6-flash"],
+      mediaResolution: "MEDIA_RESOLUTION_LOW",
+      fetchImpl: async (_url, options) => {
+        sent = JSON.parse(options.body);
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+  assert.ok(!("mediaResolution" in sent.generationConfig));
+});
+
+test("a clip is sent at the configured resolution; a model that refuses it keeps the answer", async () => {
+  // An optional speed setting must not cost the turn. Falling through the chain would be
+  // the wrong repair — the next model is if anything *more* likely to refuse the same
+  // field — so the field is dropped and the same model is asked again.
+  const tried = [];
+  const bodies = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check https://www.youtube.com/watch?v=dQw4w9WgXcQ" }],
+      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      mediaResolution: "MEDIA_RESOLUTION_LOW",
+      fetchImpl: async (url, options) => {
+        tried.push(url);
+        bodies.push(JSON.parse(options.body));
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () =>
+              JSON.stringify({
+                error: { message: 'Invalid JSON payload: Unknown name "mediaResolution" at generation_config' },
+              }),
+          };
+        }
+        return sseResponse([frame("watched it")]);
+      },
+    }),
+  );
+
+  assert.equal(bodies[0].generationConfig.mediaResolution, "MEDIA_RESOLUTION_LOW");
+  assert.ok(!("mediaResolution" in bodies[1].generationConfig), "the retry dropped the field");
+  assert.ok(tried[0].includes("gemini-3.6-flash") && tried[1].includes("gemini-3.6-flash"),
+    "the preferred model was retried, not abandoned");
+  assert.equal(answerFrames(frames).at(-1).text, "watched it");
+  // Answering counts as answering: no degradation banner for a setting we withdrew.
+  assert.equal(frames.find((f) => f.type === "model").degraded, false);
+
+  // The refusal is a fact about that model, not about the request, so the next turn goes
+  // out without the field rather than buying the same 400 again.
+  const second = [];
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check https://www.youtube.com/watch?v=dQw4w9WgXcQ" }],
+      models: ["gemini-3.6-flash"],
+      mediaResolution: "MEDIA_RESOLUTION_LOW",
+      fetchImpl: async (_url, options) => {
+        second.push(JSON.parse(options.body));
+        return sseResponse([frame("fine")]);
+      },
+    }),
+  );
+  assert.ok(!("mediaResolution" in second[0].generationConfig));
+});
+
+test("a rejected mediaResolution is recognised however Gemini phrases it", () => {
+  assert.equal(isUnsupportedMediaResolution(400, 'Unknown name "mediaResolution"'), true);
+  assert.equal(isUnsupportedMediaResolution(400, "media_resolution is not supported"), true);
+  assert.equal(isUnsupportedMediaResolution(400, "invalid argument"), false);
+  assert.equal(isUnsupportedMediaResolution(404, "mediaResolution"), false);
+});
+
+test("GEMINI_MEDIA_RESOLUTION is off by default and a typo in it is ignored, not fatal", () => {
+  assert.equal(mediaResolutionFromEnv({}), null);
+  assert.equal(mediaResolutionFromEnv({ GEMINI_MEDIA_RESOLUTION: "" }), null);
+  assert.equal(mediaResolutionFromEnv({ GEMINI_MEDIA_RESOLUTION: "low" }), "MEDIA_RESOLUTION_LOW");
+  assert.equal(mediaResolutionFromEnv({ GEMINI_MEDIA_RESOLUTION: " Medium " }), "MEDIA_RESOLUTION_MEDIUM");
+  assert.equal(
+    mediaResolutionFromEnv({ GEMINI_MEDIA_RESOLUTION: "media_resolution_high" }),
+    "MEDIA_RESOLUTION_HIGH",
+  );
+  // A speed knob is not worth failing every request in the deployment over.
+  assert.equal(mediaResolutionFromEnv({ GEMINI_MEDIA_RESOLUTION: "fastest" }), null);
 });
 
 test("quota and context failures are told apart from ordinary bad requests", () => {
@@ -1591,6 +1765,66 @@ test("an upload waits for PROCESSING to finish before the URI is handed out", as
   assert.equal(polls, 2, "polled until it went active");
   assert.equal(calls[0], "POST https://generativelanguage.googleapis.com/upload/v1beta/files");
   assert.equal(calls[1], "POST https://session/upload");
+});
+
+test("the wait for a processed clip starts short and backs off, rather than sleeping flat", async () => {
+  // A short-form clip is usually ready within a few hundred milliseconds of finalizing,
+  // and a flat two-second interval could not find that out sooner than its own length —
+  // a full second and a half of nothing, on the critical path, every single upload.
+  const waits = [];
+  let polls = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/upload/v1beta/files")) {
+      return { ok: true, status: 200, headers: { get: () => "https://session/upload" } };
+    }
+    if (url === "https://session/upload") {
+      return { ok: true, status: 200, json: async () => ({ file: { name: "files/a", uri: "u", state: "PROCESSING" } }) };
+    }
+    polls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ name: "files/a", uri: "u", state: polls >= 3 ? "ACTIVE" : "PROCESSING" }),
+    };
+  };
+
+  const file = await uploadFile(Buffer.alloc(4), "video/mp4", {
+    apiKey: "k",
+    fetchImpl,
+    sleep: async (ms) => void waits.push(ms),
+  });
+
+  assert.equal(file.state, "ACTIVE");
+  assert.deepEqual(waits, [250, 400, 640], "quick first look, then progressively lazier");
+  // The old flat cadence would have spent 6s of wall clock getting here; this spends 1.3.
+  assert.ok(waits.reduce((a, b) => a + b, 0) < 2_000);
+});
+
+test("a clip that never finishes processing is given up on by the clock, not by a poll count", async () => {
+  // With a varying interval, "60 polls" no longer describes how long anything waits. The
+  // bound that matters to someone watching a spinner is the clock, so that is the bound.
+  let clock = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/upload/v1beta/files")) {
+      return { ok: true, status: 200, headers: { get: () => "https://session/upload" } };
+    }
+    if (url === "https://session/upload") {
+      return { ok: true, status: 200, json: async () => ({ file: { name: "files/a", uri: "u", state: "PROCESSING" } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ name: "files/a", uri: "u", state: "PROCESSING" }) };
+  };
+
+  await assert.rejects(
+    uploadFile(Buffer.alloc(4), "video/mp4", {
+      apiKey: "k",
+      fetchImpl,
+      maxPollWaitMs: 5_000,
+      now: () => clock,
+      sleep: async (ms) => void (clock += ms),
+    }),
+    /never finished processing/,
+  );
+  assert.ok(clock >= 5_000 && clock < 8_000, `gave up at ${clock}ms`);
 });
 
 test("an upload that never returns a session URL fails loudly", async () => {

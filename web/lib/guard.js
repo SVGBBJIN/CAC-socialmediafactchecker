@@ -34,6 +34,13 @@ export function config(env = process.env) {
     // entirely rather than asking Gemini to disable thinking, which not every model in
     // the chain may accept — see `DEFAULT_THINKING_BUDGET_TOKENS` in lib/gemini.js.
     thinkingBudgetTokens: nonNegativeInt(env.THINKING_BUDGET_TOKENS, 4096),
+    // The same cap for a round that still holds its search tools — a round deciding what
+    // to look up rather than writing the verdict, and the round whose deliberation the
+    // reader waits through before the first search even runs. Lower on purpose; see
+    // `DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS` in lib/gemini.js. Never raises
+    // `thinkingBudgetTokens` — the smaller of the two is what gets sent. 0 means "use the
+    // same budget as the answering round".
+    toolRoundThinkingBudgetTokens: nonNegativeInt(env.TOOL_ROUND_THINKING_BUDGET_TOKENS, 1024),
   };
 }
 

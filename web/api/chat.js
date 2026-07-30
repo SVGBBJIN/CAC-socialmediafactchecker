@@ -4,7 +4,7 @@
 // ask for, the credential. Written against raw Node request/response objects so the
 // same file runs under `node server.js` locally and as a Vercel Node function.
 
-import { modelChainFromEnv, GeminiError } from "../lib/gemini.js";
+import { modelChainFromEnv, mediaResolutionFromEnv, GeminiError } from "../lib/gemini.js";
 import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "../lib/verified-chat.js";
 import { authorize, config, validateMessages, GuardError } from "../lib/guard.js";
 
@@ -128,6 +128,10 @@ export default async function handler(req, res) {
       models: modelChainFromEnv(),
       maxOutputTokens: limits.maxOutputTokens,
       thinkingBudgetTokens: limits.thinkingBudgetTokens,
+      toolRoundThinkingBudgetTokens: limits.toolRoundThinkingBudgetTokens,
+      // Off unless the operator opted in — it trades the frame detail that on-screen text
+      // is read from for a much smaller video prefill. See `MEDIA_RESOLUTIONS`.
+      mediaResolution: mediaResolutionFromEnv(),
       // How close this client is to its daily cap. Near it, the chain starts one model
       // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
       // exactly as it was.
