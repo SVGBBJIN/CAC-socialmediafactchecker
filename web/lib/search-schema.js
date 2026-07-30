@@ -194,9 +194,10 @@ export function toGeminiSchema(schema) {
 export const WEB_SEARCH_TOOL = {
   name: "web_search",
   description:
-    "Search the live web for sources that verify or refute one specific factual claim. " +
-    "This is the only way you can learn anything about the world that is not in the " +
-    "conversation itself, and every source you are allowed to cite comes from it: each " +
+    "Search the live web on demand for sources that verify or refute one specific " +
+    "factual claim. Use it when the user asks for verification or the answer needs " +
+    "current outside sources; do not call it for ordinary conversational turns. Every " +
+    "source you are allowed to cite comes from it: each " +
     "result is returned with a numbered citation marker, and only those numbers may " +
     "appear in your answer. Call it once per claim, and issue every call you need in the " +
     "same turn: calls made together are run at the same time and cost one wait between " +
