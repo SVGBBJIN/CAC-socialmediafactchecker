@@ -31,7 +31,7 @@ test("a valid query is normalised and given its defaults", () => {
     query: "measles cases 2026",
     claim: "Measles cases have tripled this year",
     freshness: "any",
-    max_results: 5,
+    max_results: 3,
   });
 });
 
