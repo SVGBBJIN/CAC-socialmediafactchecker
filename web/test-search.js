@@ -873,6 +873,25 @@ test("a bad tool call is corrected by the model, not fatal to the turn", async (
   assert.ok(!frames.some((f) => f.type === "error"));
 });
 
+
+test("an unsourced ordinary answer is not forced through search or citation repair", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "Hi — how can I help?" }]);
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hello" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+    }),
+  );
+
+  assert.equal(sent.length, 1, "no repair round should be triggered");
+  assert.equal(sent[0].tools[0].function_declarations[0].name, "web_search");
+  assert.equal(readerSees(frames), "Hi — how can I help?");
+  assert.ok(!frames.some((f) => f.type === "unverified" || f.type === "sources"));
+});
+
 test("search can be turned off, and then nothing is enforced", async () => {
   const { fetchImpl, sent } = fakeGemini([{ text: "Plain answer with no citations at all." }]);
   const frames = await collect(
@@ -985,10 +1004,10 @@ test("text with no signature is still merged into one part", async () => {
   ]);
 });
 
-test("the system prompt states where the model's facts come from", () => {
+test("the system prompt makes search available on demand", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /web_search/);
-  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Your training data is not a source/);
-  assert.match(FACT_CHECK_SYSTEM_PROMPT, /checked automatically after/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /available on demand/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /checked automatically after a searched answer/);
 });
 
 /* ---------------- doing the looking up all at once ---------------- */
