@@ -5,7 +5,7 @@
 // verdict names a claim, the clip is forty seconds long, and finding the sentence means
 // scrubbing. So the model is asked to mark each claim it takes from the video with the
 // moment it was made — `[0:42]` — and this module is what makes that marker trustworthy
-// enough to render as a link.
+// enough to open a player with.
 //
 // It is deliberately the same shape as `lib/citation-cleanup.js`, because it is the same
 // problem one layer over. A citation marker says *which page* backs a sentence and is
@@ -30,7 +30,7 @@
 // check. A TikTok arrives through `lib/tiktok.js`, whose embed payload carries the clip's
 // duration, so "past the end" is a fact here. A YouTube link is handed to Gemini as a URL
 // and nothing in this app ever learns how long the video is — so a YouTube timestamp is
-// bounded by nothing, and the most that can be said for it is that the link it becomes
+// bounded by nothing, and the most that can be said for it is that the player it opens
 // lands somewhere in the video the reader is already looking at. That is a smaller promise
 // than the citation ledger makes, and it is not dressed up as a bigger one anywhere in the
 // UI: a timestamp is a pointer into the clip, not evidence.
@@ -84,22 +84,12 @@ export function formatClock(seconds) {
 }
 
 /**
- * A link that opens the video at `seconds`, or null when the platform has no such link.
- *
- * YouTube takes `t` on a watch URL and honours it from any share format, which is why the
- * app hands the browser a canonical `watch?v=` URL rather than whatever the user pasted.
- *
- * TikTok has no documented way to deep-link into a clip — no `t`, no fragment, nothing the
- * web player reads — so a TikTok timestamp is returned as null and rendered as a label
- * instead of a link. That is a worse experience and the honest one: a link that silently
- * starts at zero is a link that lies about having worked, and on a forty-second clip the
- * reader would not even notice it had.
+ * What a marker *becomes* — a link to the platform's own page, or the embed the pill opens
+ * over the answer — is deliberately not here. That is browser work, it lives beside the
+ * click that uses it in `public/app.js`, and a second copy on this side would be a rule
+ * with no caller, drifting from the one that has one. What this module owns is the part
+ * the server has to decide: which markers are allowed through to the browser at all.
  */
-export function videoLinkAt(video, seconds) {
-  if (!video || !Number.isFinite(seconds) || seconds < 0) return null;
-  if (video.platform !== "youtube" || !video.videoID) return null;
-  return `https://www.youtube.com/watch?v=${video.videoID}&t=${Math.round(seconds)}s`;
-}
 
 /**
  * The longest clip in the turn, in seconds, or null when no clip's length is known.
@@ -123,7 +113,7 @@ export function knownDuration(videos = []) {
  *
  * "Cannot be true" is one rule and one rule only: later than the longest clip this turn,
  * plus `END_TOLERANCE_SECONDS`. A turn with no video at all is left completely untouched —
- * the markers there point at nothing, but they also *link* to nothing, so they render as
+ * the markers there point at nothing, but nothing is drawn around them either — they stay
  * the plain text the model wrote and cost the reader nothing. Deleting them would be this
  * pass editing prose on a suspicion, which is exactly the guesswork that got the old
  * citation auditor removed.

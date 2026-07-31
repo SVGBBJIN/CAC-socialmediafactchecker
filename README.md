@@ -181,14 +181,18 @@ inline or via the Files API depending on size. That is the same `directMediaFetc
 ## Every claim from a video carries a time
 
 A verdict names a claim; the reader still has to find it in the clip. So the model marks
-each claim it takes from the video with the moment it was made, and that marker is rendered
-the way a citation is — as a link, straight to `watch?v=…&t=14s`:
+each claim it takes from the video with the moment it was made, and clicking that marker
+plays the clip from exactly there, in a player that opens over the answer:
 
 > • **“Measles cases have tripled this year”** [0:14] — the actual rise was 12% [2].
 
-The two markers on that line point at different kinds of thing, and are drawn differently
-for it: `[2]` is a source somewhere else, superscript like a footnote; `[0:14]` is a place
-in the clip already on screen, a pill on the baseline.
+The two markers point at different kinds of thing and are drawn differently for it: `[2]`
+is a source somewhere else, superscript like a footnote; `[0:14]` is a place in the clip
+the verdict is about, a pill on the baseline. Over the answer rather than in a new tab
+because the clip is the thing being checked — sending the reader away to hear one sentence
+and back again for the next is the scrubbing problem in a different shape. The pill is
+still a real link underneath (`watch?v=…&t=14s`), so ⌘-click and "copy link address" do
+what a link does; only the ordinary click is intercepted.
 
 A timestamp is a pointer, not evidence, and the guarantee behind it is deliberately smaller
 than the citation ledger's. `web/lib/timestamps.js` deletes a marker naming a moment the
@@ -199,11 +203,14 @@ is, so a YouTube timestamp is bounded by nothing. Everything else is left exactl
 written: a turn with no video attached is not touched at all, because a bracketed time
 there is prose rather than a claim about a clip.
 
-TikTok has no URL that opens a clip partway through, so a TikTok timestamp is shown as a
-label rather than a link — a link that silently restarted the clip from zero would be worse
-than none. The Swift side has carried the same information since the beginning: Gemini is
-asked for `timestampSeconds` per claim and it lands in `CandidateClaim.timestamp`. What was
-missing was a surface that showed it to anyone.
+TikTok's embed cannot start partway through — it is the same `/embed/v2/<id>` page
+`web/lib/tiktok.js` scrapes for the MP4, and it has no `start` — so a TikTok clip opens at
+the beginning and the player says so, naming the time to scrub to. A limitation stated is
+not the same thing as a click that appears to have been ignored.
+
+The Swift side has carried this information since the beginning: Gemini is asked for
+`timestampSeconds` per claim and it lands in `CandidateClaim.timestamp`. What was missing
+was a surface that showed it to anyone.
 
 ## Progress
 

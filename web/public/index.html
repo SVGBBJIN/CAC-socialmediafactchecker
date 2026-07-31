@@ -78,6 +78,21 @@
       </form>
     </dialog>
 
+    <!-- The clip, opened at the moment a timestamp names. The iframe is built when the
+         dialog opens and torn out when it closes: an embed left in the DOM keeps playing
+         audio behind a closed dialog, and a paused one still holds a connection to a
+         third-party player nobody is watching. -->
+    <dialog class="player" id="player-dialog" aria-label="Video player">
+      <div class="player-head">
+        <span class="player-title" id="player-title"></span>
+        <button class="icon-button" id="player-close" type="button" aria-label="Close player">
+          ✕
+        </button>
+      </div>
+      <div class="player-frame" id="player-frame"></div>
+      <p class="player-note" id="player-note" hidden></p>
+    </dialog>
+
     <script type="module" src="/app.js"></script>
   </body>
 </html>

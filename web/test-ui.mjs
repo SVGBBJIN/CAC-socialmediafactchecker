@@ -743,12 +743,20 @@ scriptedAs([
   },
 ]);
 await withPage(async (page) => {
+  // The embeds are never actually fetched: the point under test is which URL the app builds
+  // and hands the player, and letting a real request out would make a unit test of the
+  // markup depend on YouTube being up.
+  await page.route(/(youtube-nocookie|youtube|tiktok)\.com/, (route) => route.abort());
+
   await send(page, "check https://www.youtube.com/watch?v=dQw4w9WgXcQ");
   await page.waitForSelector(".message.assistant a.timestamp");
 
+  // The pill is a real link first. Middle-click, ⌘-click and "copy link address" all have
+  // to keep working, and the href is what makes them work — the player is what an ordinary
+  // click gets instead.
   const href = await page.locator("a.timestamp").first().getAttribute("href");
   check(
-    "a timestamp opens the video at the second the claim was made",
+    "a timestamp is a link to the video at the second the claim was made",
     href === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
     String(href),
   );
@@ -760,6 +768,38 @@ await withPage(async (page) => {
   const citation = await page.locator("a.citation").first().getAttribute("href");
   check("and the citation beside it still points at its source", citation === "https://audit.example/report", String(citation));
 
+  // …and clicking it opens the clip over the answer rather than navigating away.
+  await page.locator("a.timestamp").first().click();
+  await page.waitForSelector("#player-dialog[open]");
+  const src = await page.locator("#player-frame iframe").getAttribute("src");
+  check(
+    "clicking plays the clip in an embed that starts at that second",
+    src === "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=42&autoplay=1&rel=0",
+    String(src),
+  );
+  const title = (await page.locator("#player-title").innerText()).trim();
+  check("the player says where it is playing from", title === "Playing from 0:42", title);
+  const note = await page.locator("#player-note").isVisible();
+  check("and does not apologise for a start time it did honour", note === false, `visible=${note}`);
+
+  // Closing has to take the iframe out, not just hide the dialog: an embed left in the DOM
+  // keeps playing audio behind a dialog nobody can see.
+  await page.locator("#player-close").click();
+  await page.waitForSelector("#player-dialog[open]", { state: "detached" });
+  const frames = await page.locator("#player-frame iframe").count();
+  check("closing the player removes the embed rather than hiding it", frames === 0, `count=${frames}`);
+
+  // Escape is the other way out, and it is the one that skips the close button entirely.
+  await page.locator("a.timestamp").first().click();
+  await page.waitForSelector("#player-dialog[open]");
+  await page.keyboard.press("Escape");
+  // Waited for rather than asserted on the spot: closing a `<dialog>` drops the `open`
+  // attribute synchronously and dispatches `close` as a queued task, so on this path the
+  // teardown lands one task after the dialog has visibly gone.
+  await page.waitForFunction(() => !document.querySelector("#player-frame iframe"));
+  const afterEscape = await page.locator("#player-frame iframe").count();
+  check("Escape closes it and takes the embed with it", afterEscape === 0, `count=${afterEscape}`);
+
   await page.reload();
   await page.waitForSelector(".message.assistant a.timestamp");
   const afterReload = await page.locator("a.timestamp").first().getAttribute("href");
@@ -770,7 +810,8 @@ await withPage(async (page) => {
   );
 });
 
-// A TikTok has no URL that opens it partway through, so the time is shown and not linked.
+// A TikTok clip can be embedded but not started partway through, so the pill opens the
+// player and the player says so rather than letting the reader think it was ignored.
 scriptedAs([
   {
     frames: [
@@ -792,12 +833,27 @@ scriptedAs([
   },
 ]);
 await withPage(async (page) => {
+  await page.route(/(youtube-nocookie|youtube|tiktok)\.com/, (route) => route.abort());
+
   await send(page, "check https://www.tiktok.com/@user/video/7300000000000000000");
-  await page.waitForSelector(".message.assistant span.timestamp");
-  const links = await page.locator(".message.assistant a.timestamp").count();
-  check("a TikTok timestamp is a label, not a link that would go to the start", links === 0, `count=${links}`);
-  const label = (await page.locator("span.timestamp").innerText()).trim();
-  check("and it still tells the reader when the claim was made", label === "0:42", label);
+  await page.waitForSelector(".message.assistant a.timestamp");
+  await page.locator("a.timestamp").first().click();
+  await page.waitForSelector("#player-dialog[open]");
+
+  const src = await page.locator("#player-frame iframe").getAttribute("src");
+  check(
+    "a TikTok pill opens the clip in the embed player",
+    src === "https://www.tiktok.com/embed/v2/7300000000000000000",
+    String(src),
+  );
+  // The one place the pill's number and what the player can do disagree. Saying it is what
+  // keeps a limitation from reading as a bug.
+  const note = (await page.locator("#player-note").innerText()).trim();
+  check(
+    "and says plainly that it cannot start partway through",
+    /can't start partway through/.test(note) && /0:42/.test(note),
+    note,
+  );
 });
 
 // No video in the turn: a bracketed time is whatever the model was writing about, and the

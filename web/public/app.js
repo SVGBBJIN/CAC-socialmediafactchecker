@@ -26,6 +26,11 @@ const el = {
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
+  playerDialog: document.getElementById("player-dialog"),
+  playerTitle: document.getElementById("player-title"),
+  playerFrame: document.getElementById("player-frame"),
+  playerNote: document.getElementById("player-note"),
+  playerClose: document.getElementById("player-close"),
 };
 
 let conversations = load();
@@ -152,42 +157,146 @@ function linkCitations(html, sources) {
 }
 
 /**
- * Turn `[0:42]` into a link that opens the video at 42 seconds.
+ * Where a click on a timestamp goes: the platform's own page, opened at that second.
  *
- * The counterpart to `linkCitations`, and the same argument: a marker the reader cannot
- * follow is barely better than no marker. A verdict on a forty-second clip is only
- * checkable against the clip if the reader can get to the sentence it is about, and
- * scrubbing for it by hand is exactly the work this is meant to remove.
+ * The `href` rather than the embed, so the pill behaves like a link — middle-click, ⌘-click
+ * and "copy link address" all do what the reader expects, and if the page's JavaScript is
+ * broken the marker still goes somewhere useful. The click handler intercepts the ordinary
+ * left-click and shows the embed instead.
  *
- * Two cases render as a label rather than a link, and both are deliberate:
+ * TikTok has no timestamped URL — no `t`, no fragment its player reads — so its link is the
+ * clip itself and the time is carried by the label. That is the one place the pill's
+ * destination and its number disagree, and the player says so out loud when it opens.
+ */
+function watchURL(video, seconds) {
+  if (video?.platform === "youtube" && video.videoID) {
+    return `https://www.youtube.com/watch?v=${encodeURIComponent(video.videoID)}&t=${seconds}s`;
+  }
+  return video?.url ?? null;
+}
+
+/**
+ * The embed a click actually opens, or null for a clip that cannot be embedded.
  *
- * - **TikTok.** There is no URL that opens a TikTok clip partway through — no `t`, no
- *   fragment the web player reads — so the time is shown and not linked. A link that
- *   quietly restarted the clip from zero would be worse than none: on a short clip the
- *   reader would not notice it had failed.
- * - **More than one video in the turn.** `[0:42]` says when, not which. With two clips
- *   attached there is no way to tell which one a marker belongs to, and a link that picks
- *   wrong sends the reader to a confidently incorrect moment in the wrong video.
+ * `exact` is the honest part. YouTube's player takes `start`, so the clip opens on the
+ * sentence the marker names and the pill does exactly what it says. TikTok's embed has no
+ * equivalent — the same `/embed/v2/<id>` page `lib/tiktok.js` scrapes for the MP4 — so it
+ * opens at the beginning, and `exact: false` is what makes the dialog admit that rather
+ * than letting the reader assume the player ignored them.
  *
- * Runs on already-escaped HTML, and the only text it inserts is digits and colons from a
- * marker it just matched, plus a URL built from a video ID the server sent.
+ * `youtube-nocookie.com` for the same reason it is in the host allowlist on the server
+ * side: the reader is being shown a clip to check a claim, not signed up for tracking by
+ * the app that showed it to them.
+ */
+function embedFor(video, seconds) {
+  if (video?.platform === "youtube" && video.videoID) {
+    return {
+      src: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(video.videoID)}?start=${seconds}&autoplay=1&rel=0`,
+      aspect: "16 / 9",
+      exact: true,
+    };
+  }
+  if (video?.platform === "tiktok" && video.videoID) {
+    return {
+      src: `https://www.tiktok.com/embed/v2/${encodeURIComponent(video.videoID)}`,
+      // Short-form video is shot vertically; a 16:9 box would letterbox it into a stripe.
+      aspect: "9 / 16",
+      exact: false,
+    };
+  }
+  return null;
+}
+
+/**
+ * Turn `[0:42]` into a pill that opens the clip at 42 seconds.
+ *
+ * The counterpart to `linkCitations`, and the same argument one step further. A citation is
+ * followed by leaving for another page; a timestamp is about the video the reader is
+ * already reading a verdict on, so sending them to a new tab to check one sentence and back
+ * again for the next is the scrubbing problem in a different shape. The clip opens over the
+ * answer instead, at the second the marker names, and closing it puts the reader back
+ * exactly where they were.
+ *
+ * Everything the player needs rides on the element itself — the embed URL, the aspect, the
+ * label, whether the start time is honoured. The click handler is delegated from the
+ * message list, which is re-rendered on every frame of a stream and on every reload, so a
+ * handler that had to be re-bound or a lookup that had to be re-populated would be one more
+ * thing to get wrong on a redraw.
+ *
+ * One case still renders as a plain label: **more than one video in the turn.** `[0:42]`
+ * says when, not which, and a player that picks wrong opens a confidently incorrect moment
+ * in the wrong clip.
+ *
+ * Runs on already-escaped HTML. The only text inserted is digits and colons from a marker
+ * it just matched, plus URLs built from a video ID the server sent, escaped again here.
  */
 function linkTimestamps(html, videos) {
   if (!videos?.length) return html;
+  // One clip in the turn, or none this can be sure of.
   const video = videos.length === 1 ? videos[0] : null;
-  const linkable = video?.platform === "youtube" && video.videoID;
   return html.replace(/\[(\d{1,3}):([0-5]\d)(?::([0-5]\d))?\]/g, (match, a, b, c) => {
     const seconds =
       c === undefined
         ? Number(a) * 60 + Number(b)
         : Number(a) * 3600 + Number(b) * 60 + Number(c);
     const label = match.slice(1, -1);
-    if (!linkable) {
+    const embed = embedFor(video, seconds);
+    const href = watchURL(video, seconds);
+    if (!embed || !href) {
       return `<span class="timestamp" title="${label} into the video">${label}</span>`;
     }
-    const href = `https://www.youtube.com/watch?v=${encodeURIComponent(video.videoID)}&t=${seconds}s`;
-    return `<a class="timestamp" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" title="Open the video at ${label}">${label}</a>`;
+    return (
+      `<a class="timestamp" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer"` +
+      ` data-embed="${escapeHTML(embed.src)}" data-aspect="${embed.aspect}"` +
+      ` data-exact="${embed.exact}" data-label="${label}"` +
+      ` title="Play from ${label}">${label}</a>`
+    );
   });
+}
+
+/**
+ * Show the clip over the answer, at the moment a pill named.
+ *
+ * The iframe is built here and destroyed on close rather than being kept and re-pointed.
+ * An embed left in the DOM goes on playing audio behind a closed dialog, and even paused it
+ * holds an open connection to a third-party player nobody is watching — so the element's
+ * lifetime is the dialog's, and closing is what stops it.
+ */
+function openPlayer({ embed, aspect, exact, label }) {
+  el.playerTitle.textContent = `Playing from ${label}`;
+  // The box is described by its aspect and bounded by the height cap in the stylesheet;
+  // the width is what has to be derived, or a 9:16 clip in a wide dialog becomes a stripe
+  // of video with black either side of it. Computed from the aspect rather than hardcoded
+  // per platform, so a third one slots in without touching this.
+  const [wide, tall] = String(aspect || "16 / 9").split("/").map((n) => Number(n.trim()));
+  el.playerFrame.style.aspectRatio = aspect || "16 / 9";
+  el.playerFrame.style.width =
+    wide > 0 && tall > 0
+      ? `min(880px, 88vw, calc(72vh * ${wide} / ${tall}))`
+      : "min(880px, 88vw)";
+
+  const frame = document.createElement("iframe");
+  frame.src = embed;
+  frame.title = `Video from ${label}`;
+  frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+  frame.allowFullscreen = true;
+  frame.referrerPolicy = "no-referrer";
+  el.playerFrame.replaceChildren(frame);
+
+  // Said plainly rather than left for the reader to notice. A player that opens at the
+  // beginning when the pill said 0:42 looks broken; a player that opens at the beginning
+  // and tells you it cannot do otherwise is merely limited, and the reader knows to scrub.
+  el.playerNote.hidden = exact === "true";
+  el.playerNote.textContent = `TikTok's player can't start partway through — the claim is at ${label}.`;
+
+  el.playerDialog.showModal();
+}
+
+function closePlayer() {
+  // Removing the iframe is what actually stops playback; the rest is tidying.
+  el.playerFrame.replaceChildren();
+  el.playerNote.hidden = true;
+  if (el.playerDialog.open) el.playerDialog.close();
 }
 
 /**
@@ -1025,6 +1134,32 @@ el.input.addEventListener("keydown", (event) => {
 el.input.addEventListener("input", () => {
   el.input.style.height = "auto";
   el.input.style.height = `${el.input.scrollHeight}px`;
+});
+
+// Delegated from the list rather than bound per pill: the list is rebuilt on every frame of
+// a stream and again on every reload, and a handler attached to the elements themselves
+// would have to be re-attached on each redraw — one more thing for a re-render to lose.
+el.messages.addEventListener("click", (event) => {
+  const pill = event.target.closest?.("a.timestamp[data-embed]");
+  if (!pill) return;
+  // A modified click is the reader asking for a new tab, or a new window, or a saved link.
+  // The pill is a real link precisely so that all of those still work; only the plain
+  // left-click is the one this intercepts.
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  openPlayer(pill.dataset);
+});
+
+el.playerClose.addEventListener("click", closePlayer);
+// Escape closes a `<dialog>` natively, and that path never runs `closePlayer` — so the
+// iframe survives, the audio keeps playing, and the next open stacks a second one behind it.
+el.playerDialog.addEventListener("close", closePlayer);
+// A click on the backdrop lands on the dialog element itself; anything inside it has a
+// closer target. Dismissing that way is what people try first on a modal over a page.
+el.playerDialog.addEventListener("click", (event) => {
+  if (event.target === el.playerDialog) closePlayer();
 });
 
 el.stop.addEventListener("click", () => inFlight?.abort());

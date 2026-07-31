@@ -465,15 +465,27 @@ A verdict names a claim; the reader still has to find it. On a forty-second TikT
 means scrubbing, and on an hour of YouTube it means giving up — so a check the app has done
 correctly is one the reader cannot confirm against the video it is about.
 
-So the model marks each claim it takes from the video with the moment it was made, and the
-marker is rendered the way a citation is: as a link.
+So the model marks each claim it takes from the video with the moment it was made, and that
+marker is something the reader can click.
 
 > • **“Measles cases have tripled this year”** [0:14] — the actual rise was 12% [2].
 
 The two markers on that line point at different kinds of thing and are drawn differently
 for that reason. `[2]` is a source — superscript, a footnote, somewhere else. `[0:14]` is a
-place in the clip already on screen — a pill on the baseline, and on YouTube a link
-straight to `watch?v=…&t=14s`.
+place in the clip the verdict is about — a pill on the baseline, and **clicking it plays
+the clip from that second**, in a player that opens over the answer.
+
+Over the answer rather than in a new tab, because a citation and a timestamp are followed
+differently. A source is somewhere else and leaving for it is the point; the clip is the
+thing being checked, and sending the reader away to hear one sentence and back again for
+the next is the scrubbing problem in a different shape. Closing the player puts them back
+exactly where they were.
+
+The pill is still a real link underneath — `href` to `watch?v=…&t=14s` — so ⌘-click,
+middle-click and "copy link address" all do what a link does, and the marker still goes
+somewhere useful if the page's JavaScript is broken. Only the ordinary left-click is
+intercepted. The embed is built when the player opens and destroyed when it closes: an
+iframe left in the DOM goes on playing audio behind a dialog nobody can see.
 
 **A timestamp is a pointer, not evidence, and the check behind it is smaller than the
 ledger's.** `lib/timestamps.js` deletes a marker that names a moment the clip does not
@@ -488,17 +500,19 @@ Everything else is left exactly as written. A turn with no video attached is not
 all — a bracketed time there is prose, not a claim about a clip, and `[2:1]` in a sentence
 about a football score is not something this app should be rewriting or linking.
 
-Two more places the marker cannot become a link, both shown as a plain label instead:
+**TikTok's player cannot start partway through.** The embed is the same
+`/embed/v2/<id>` page `lib/tiktok.js` scrapes for the MP4, and it has no `start` — so the
+clip opens at the beginning and the player says so in as many words, naming the time to
+scrub to. That is a limitation stated rather than a click that appears to have been
+ignored, which is what silently starting at zero would look like on a forty-second clip.
 
-- **TikTok**, which has no URL that opens a clip partway through. A link that silently
-  restarted from zero would be worse than none — on a short clip nobody would notice it had
-  failed.
-- **Two videos in one turn.** `[0:42]` says when, not which, and a link that guesses wrong
-  sends the reader to a confidently incorrect moment in the wrong video.
+One case still renders as a plain label with no player behind it: **two videos in one
+turn.** `[0:42]` says when, not which, and a player that guesses wrong opens a confidently
+incorrect moment in the wrong clip.
 
 The server tells the browser which clips a turn attached in a `video` frame, sent before
-the model's first token so a marker is a link the moment it is written rather than after
-the stream ends. Those rows are stored with the message like the source rows, so timestamps
+the model's first token so a marker is live the moment it is written rather than after the
+stream ends. Those rows are stored with the message like the source rows, so timestamps
 survive a reload.
 
 ### Finding inside a page from the terminal

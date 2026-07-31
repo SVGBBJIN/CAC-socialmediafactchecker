@@ -19,7 +19,6 @@ import assert from "node:assert/strict";
 import {
   parseClock,
   formatClock,
-  videoLinkAt,
   knownDuration,
   cleanTimestamps,
   END_TOLERANCE_SECONDS,
@@ -53,23 +52,6 @@ test("seconds format back to the shortest correct clock", () => {
   assert.equal(formatClock(727), "12:07");
   assert.equal(formatClock(3753), "1:02:33");
   assert.equal(formatClock(0), "0:00");
-});
-
-/* ---------------- what a timestamp can be turned into ---------------- */
-
-test("a YouTube timestamp becomes a link that opens the video at that second", () => {
-  assert.equal(
-    videoLinkAt(youtube, 42),
-    "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
-  );
-});
-
-test("a TikTok timestamp has no link, and does not get given a wrong one", () => {
-  // The temptation is `?t=42` — TikTok ignores it, the clip starts from the beginning, and
-  // on a forty-second video the reader never notices the link did nothing.
-  assert.equal(videoLinkAt(tikTok, 20), null);
-  assert.equal(videoLinkAt(null, 20), null);
-  assert.equal(videoLinkAt(youtube, Number.NaN), null);
 });
 
 /* ---------------- the bound, and what it is taken from ---------------- */
