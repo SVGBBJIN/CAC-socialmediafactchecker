@@ -696,8 +696,15 @@ function describeClip(resolved) {
  * - **Never on an assistant turn.** A `model` turn is a record of what Gemini said, not
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
+ *
+ * `onAttach` is called once per video actually attached, with `{platform, url, videoID,
+ * duration}`. It exists so the caller can tell the reader *which clip the model is
+ * watching* without re-deriving the two rules above — and getting them wrong, since a
+ * second copy of "first mention, user turns only" would drift from this one the first time
+ * either changed. `duration` is present for TikTok, where the embed page reports it, and
+ * null for YouTube, where nothing in this app ever learns it.
  */
-export function toGeminiContents(messages, { tikTok, attachVideos = true } = {}) {
+export function toGeminiContents(messages, { tikTok, attachVideos = true, onAttach } = {}) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
   const clips = tikTok?.attachments ?? new Map();
@@ -726,6 +733,16 @@ export function toGeminiContents(messages, { tikTok, attachVideos = true } = {})
           continue;
         }
         parts.push({ file_data: { file_uri: canonicalYouTubeURL(id) } });
+        onAttach?.({
+          platform: "youtube",
+          url: canonicalYouTubeURL(id),
+          videoID: id,
+          // Unknown, and knowable only by asking YouTube — which this path deliberately
+          // never does, since the whole point of native ingestion is that the app handles
+          // no YouTube metadata at all. A timestamp into this clip is therefore unbounded;
+          // see `knownDuration` in lib/timestamps.js for what that costs.
+          duration: null,
+        });
       }
 
       for (const link of findTikTokLinks(text)) {
@@ -740,6 +757,14 @@ export function toGeminiContents(messages, { tikTok, attachVideos = true } = {})
         if (attachedClips.has(entry.videoID)) continue;
         attachedClips.add(entry.videoID);
         parts.push(entry.part);
+        onAttach?.({
+          platform: "tiktok",
+          // The link as the user wrote it, not the canonical one: it is what the reader
+          // sees in their own message, and TikTok has no timestamped form of it to prefer.
+          url: entry.resolved?.sourceURL ?? link,
+          videoID: entry.videoID,
+          duration: Number.isFinite(entry.resolved?.duration) ? entry.resolved.duration : null,
+        });
         const context = describeClip(entry.resolved);
         if (context) notes.push(context);
       }
@@ -1090,13 +1115,26 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { tikTok, attachVideos: attachMedia });
+    const videos = [];
+    const contents = toGeminiContents(messages, {
+      tikTok,
+      attachVideos: attachMedia,
+      onAttach: (video) => videos.push(video),
+    });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
     const media = contents.some((turn) =>
       turn.parts.some((part) => part.file_data || part.inline_data),
     );
+    // Which clips are in front of the model, announced before it has said anything about
+    // them. This is what a `[0:42]` in the answer is measured against and resolved into a
+    // link, and it has to arrive *first* for the same reason the sources do: markers stream
+    // in with the text, and one that cannot be resolved when it is written renders as inert
+    // prose and stays that way. Sent even on a turn the model never mentions a time in —
+    // it costs one small frame, and the alternative is deciding after the fact that the
+    // reader did not need it.
+    if (videos.length > 0) yield { type: "video", videos };
     const useTools = Boolean(tools?.length && toolRunner);
     let announced = null;
     // Whether the model has already been told, in so many words, that its tools are gone.

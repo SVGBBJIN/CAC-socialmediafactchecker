@@ -95,7 +95,7 @@ function escapeHTML(text) {
  * and the only tags introduced afterwards are ones this function writes, so model
  * output cannot inject markup.
  */
-function renderMarkdown(text, sources) {
+function renderMarkdown(text, sources, videos) {
   // Odd segments are the insides of ``` fences; leave those untouched.
   const segments = text.split(/```/);
   return segments
@@ -111,10 +111,16 @@ function renderMarkdown(text, sources) {
       let plain = segment;
       if (index > 0) plain = plain.replace(/^\n+/, "");
       if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
+      // Timestamps before citations, so the pass that inserts attributes runs last: at
+      // this point the only tags in the string are the attribute-less ones written just
+      // above, and a marker can't land inside a `href` or a `title` and break it.
       return linkCitations(
-        escapeHTML(plain)
-          .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"),
+        linkTimestamps(
+          escapeHTML(plain)
+            .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+            .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"),
+          videos,
+        ),
         sources,
       );
     })
@@ -142,6 +148,45 @@ function linkCitations(html, sources) {
     const source = byNumber.get(number);
     if (!source) return match;
     return `<a class="citation" href="${escapeHTML(source.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(source.title)}">[${number}]</a>`;
+  });
+}
+
+/**
+ * Turn `[0:42]` into a link that opens the video at 42 seconds.
+ *
+ * The counterpart to `linkCitations`, and the same argument: a marker the reader cannot
+ * follow is barely better than no marker. A verdict on a forty-second clip is only
+ * checkable against the clip if the reader can get to the sentence it is about, and
+ * scrubbing for it by hand is exactly the work this is meant to remove.
+ *
+ * Two cases render as a label rather than a link, and both are deliberate:
+ *
+ * - **TikTok.** There is no URL that opens a TikTok clip partway through — no `t`, no
+ *   fragment the web player reads — so the time is shown and not linked. A link that
+ *   quietly restarted the clip from zero would be worse than none: on a short clip the
+ *   reader would not notice it had failed.
+ * - **More than one video in the turn.** `[0:42]` says when, not which. With two clips
+ *   attached there is no way to tell which one a marker belongs to, and a link that picks
+ *   wrong sends the reader to a confidently incorrect moment in the wrong video.
+ *
+ * Runs on already-escaped HTML, and the only text it inserts is digits and colons from a
+ * marker it just matched, plus a URL built from a video ID the server sent.
+ */
+function linkTimestamps(html, videos) {
+  if (!videos?.length) return html;
+  const video = videos.length === 1 ? videos[0] : null;
+  const linkable = video?.platform === "youtube" && video.videoID;
+  return html.replace(/\[(\d{1,3}):([0-5]\d)(?::([0-5]\d))?\]/g, (match, a, b, c) => {
+    const seconds =
+      c === undefined
+        ? Number(a) * 60 + Number(b)
+        : Number(a) * 3600 + Number(b) * 60 + Number(c);
+    const label = match.slice(1, -1);
+    if (!linkable) {
+      return `<span class="timestamp" title="${label} into the video">${label}</span>`;
+    }
+    const href = `https://www.youtube.com/watch?v=${encodeURIComponent(video.videoID)}&t=${seconds}s`;
+    return `<a class="timestamp" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" title="Open the video at ${label}">${label}</a>`;
   });
 }
 
@@ -404,7 +449,7 @@ function messageElement(message, conversationId) {
   const body = document.createElement("div");
   body.className = "body";
   if (message.role === "assistant") {
-    body.innerHTML = renderMarkdown(message.content, message.sources);
+    body.innerHTML = renderMarkdown(message.content, message.sources, message.videos);
   } else {
     body.textContent = message.content;
   }
@@ -664,6 +709,9 @@ async function streamAnswer(conversationId) {
   let sources = [];
   let sourcesFallback = false;
   let truncated = false;
+  // The clips the server attached to this turn. Arrives before the first token, so a
+  // `[0:42]` is a link from the moment it is written rather than after the stream ends.
+  let videos = [];
 
   // Live containers for the evidence trail. Created up front and left empty so the
   // ordering — searches, answer, sources, warning — is fixed by the DOM rather than by
@@ -698,7 +746,7 @@ async function streamAnswer(conversationId) {
     renderScheduled = true;
     requestAnimationFrame(() => {
       renderScheduled = false;
-      body.innerHTML = renderMarkdown(answer, sources);
+      body.innerHTML = renderMarkdown(answer, sources, videos);
       scrollToBottom();
     });
   }
@@ -783,6 +831,11 @@ async function streamAnswer(conversationId) {
         } else if (frame.type === "model") {
           modelState = frame;
           renderModelBadge(modelState);
+        } else if (frame.type === "video") {
+          // Which clips the model is watching. Nothing is drawn for this on its own — it is
+          // what `linkTimestamps` resolves a `[0:42]` against, and it arrives before the
+          // answer so the first marker written is already a link.
+          videos = frame.videos ?? [];
         } else if (frame.type === "truncated") {
           truncated = true;
           truncatedEl = replace(truncatedEl, truncatedElement());
@@ -864,7 +917,7 @@ async function streamAnswer(conversationId) {
     }
     // Flushed synchronously rather than left to a pending rAF: the bubble has to show
     // the final `answer` the instant streaming stops, not up to one frame late.
-    body.innerHTML = renderMarkdown(answer, sources);
+    body.innerHTML = renderMarkdown(answer, sources, videos);
     body.classList.remove("caret");
     inFlight = null;
     setBusy(false);
@@ -885,6 +938,10 @@ async function streamAnswer(conversationId) {
         content: answer,
         searches: searches.length ? searches : undefined,
         sources: sources.length ? sources : undefined,
+        // Stored for the same reason `sources` is: the timestamps in `content` are only
+        // links while the app still knows which clip they point into, and an answer whose
+        // times went inert on reload would lose half of what makes it checkable.
+        videos: videos.length ? videos : undefined,
         // Whether the list was printed under the answer, so a reload renders the same thing
         // rather than quietly deciding for itself.
         sourcesFallback: sourcesFallback || undefined,

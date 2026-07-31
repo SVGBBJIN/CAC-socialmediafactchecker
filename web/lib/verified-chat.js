@@ -40,6 +40,7 @@ import { RESEARCH_TOOLS, validateFindQuery, FindQueryError } from "./find-schema
 import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
+import { cleanTimestamps } from "./timestamps.js";
 
 /**
  * The system prompt.
@@ -182,6 +183,24 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "which on short-form video is often where the claim actually lives. Then check each one.",
   "A bracketed note saying a video could not be attached is from the app, not the user: say",
   "what went wrong and work from the link alone.",
+  "",
+  "SAYING WHEN A CLAIM WAS MADE",
+  "Mark every claim you take from the video with the moment it was made, as [M:SS] — or",
+  "[H:MM:SS] past an hour — written immediately after the claim:",
+  "",
+  "• **“Measles cases have tripled this year”** [0:14] — the actual increase was 12% [2].",
+  "",
+  "A time marker and a source marker are different things and both belong on that line. The",
+  "[0:14] says where in the clip the claim was made; the [2] says which page you checked it",
+  "against. The app turns the time into a link that opens the video at that second, so the",
+  "reader can hear the sentence for themselves rather than scrubbing for it.",
+  "",
+  "Give the time you actually observed the claim at — where the speaker says it, or where",
+  "the text card appears on screen. If you are unsure to the second, that is fine; if you",
+  "have no idea, leave the marker off. A guessed timestamp sends the reader to the wrong",
+  "part of the clip and makes them doubt everything else in the answer, and a marker past",
+  "the end of the video is deleted by the app before it reaches them. Timestamps are for",
+  "the video only — never write one for something a source said.",
 ].join("\n");
 
 /**
@@ -473,6 +492,10 @@ function sourcesFrame(rows, { cited, truncated, streamError }) {
  *   each one. `fallback` says whether the links still need to be *shown* as a list — see
  *   `sourcesFrame`, and note that a consumer must keep the rows either way, because they are
  *   what turns a marker into a link.
+ * - `{type: "video", videos}` — the clips attached to this turn, passed straight through
+ *   from `streamChat` and sent before the model has said anything. Each carries
+ *   `{platform, url, videoID, duration}`, which is what a `[0:42]` in the answer is checked
+ *   against here and turned into a link by the consumer.
  * - `{type: "answer", text}` — the final text of the answer, with its citations cleaned up.
  *   Replaces everything streamed as `delta` so far. Sent only when cleanup changed something,
  *   which is why it is a replacement rather than the normal channel: the answer streams
@@ -532,6 +555,10 @@ export async function* verifiedChat({
   // either of them.
   let lastRound = -1;
   let needsBreak = false;
+  // The clips this turn put in front of the model, as `streamChat` reported them. Held
+  // because the timestamp markers in the answer are checked against their durations once
+  // the answer is whole — the same way the citation markers are checked against the ledger.
+  let videos = [];
 
   /**
    * Mark a paragraph boundary at the seam between two stretches of the model's writing.
@@ -574,6 +601,7 @@ export async function* verifiedChat({
     })) {
       // The model went off to use a tool, or a fresh round began on top of text already
       // written. Either way what it writes next is a new paragraph, not a continuation.
+      if (frame.type === "video") videos = frame.videos ?? [];
       if (frame.type === "search" || frame.type === "find") needsBreak = true;
       if (frame.type === "stage" && frame.stage === "waiting" && frame.round > lastRound) {
         lastRound = frame.round;
@@ -653,10 +681,13 @@ export async function* verifiedChat({
   }
 
   if (signal?.aborted) return;
-  if (!enabled) {
-    if (streamError) throw streamError;
-    return;
-  }
+
+  // Everything below used to be skipped outright when the research tools were off. It is
+  // not any more, and nothing about the search path changed: with no tools there is nothing
+  // in the ledger, so every block that reads it is already a no-op. What the early return
+  // was also skipping is the timestamp pass, which has nothing to do with searching — a
+  // marker naming a second the clip does not reach is just as wrong on a deployment with
+  // `WEB_SEARCH_ENABLED=false`, and was reaching the reader there.
 
   // Sources were retrieved and then nothing was said about them: the model spent the whole
   // turn searching and ran out of rounds. Say so plainly — the sources are still shown, and
@@ -670,37 +701,57 @@ export async function* verifiedChat({
     yield { type: "delta", text: answer };
   }
 
-  // Citation cleanup, and the last thing done to the answer.
+  // Marker cleanup, and the last thing done to the answer.
   //
-  // What it does is what a copy editor does — merge two markers that turn out to be one
-  // page reached by two URLs, drop the ones that repeat inside a sentence, cap a runaway
-  // stack, delete one that names a source no search returned, and renumber so the markers
-  // ascend as they are read. Nothing is ever added; see lib/citation-cleanup.js.
-  if (ledger.size > 0) {
-    // An answer the reader is being asked to make their own judgement about — one cut off
-    // by the token cap, or by a stream that died — gets every source listed, and therefore
-    // must keep the ledger's own numbering. Renumbering it would leave the list and the
-    // text disagreeing about which page is [2].
-    const flawed = Boolean(truncated || streamError);
-    let rows = sourceRows(ledger.sources);
-    let cited = false;
+  // Two passes over the same text, one per kind of marker the answer carries. What they do
+  // is what a copy editor does — merge two citations that turn out to be one page reached
+  // by two URLs, drop the ones that repeat inside a sentence, cap a runaway stack, delete a
+  // citation naming a source no search returned or a timestamp naming a second the clip
+  // does not reach, and renumber so the citations ascend as they are read. Nothing is ever
+  // added; see lib/citation-cleanup.js and lib/timestamps.js.
 
+  // An answer the reader is being asked to make their own judgement about — one cut off by
+  // the token cap, or by a stream that died — gets every source listed, and therefore must
+  // keep the ledger's own numbering. Renumbering it would leave the list and the text
+  // disagreeing about which page is [2].
+  const flawed = Boolean(truncated || streamError);
+  // Whether either pass changed the text, and so whether the reader's copy has to be
+  // replaced. One frame however many passes touched it: the browser redraws the answer from
+  // it, and doing that twice would flash.
+  let rewritten = false;
+  let rows = null;
+  let cited = false;
+
+  // Timestamps first, and outside the `ledger.size` gate below: an answer about a clip has
+  // times in it whether or not a search ever ran, and a marker past the end of that clip
+  // has to go either way.
+  if (answer.trim()) {
+    const stamped = cleanTimestamps(answer, videos);
+    if (stamped.changed) {
+      answer = stamped.text;
+      rewritten = true;
+    }
+  }
+
+  if (ledger.size > 0) {
+    rows = sourceRows(ledger.sources);
     if (answer.trim()) {
       const cleaned = cleanCitations(answer, ledger, { renumber: !flawed });
       if (cleaned.changed) {
         answer = cleaned.text;
-        // A replacement rather than more deltas: the answer streamed token by token while it
-        // was being written, and this pass could only run once it was whole.
-        yield { type: "answer", text: answer };
+        rewritten = true;
       }
       if (cleaned.sources.length > 0 && !flawed) {
         rows = sourceRows(cleaned.sources);
         cited = true;
       }
     }
-
-    yield sourcesFrame(rows, { cited, truncated, streamError });
   }
+
+  // A replacement rather than more deltas: the answer streamed token by token while it was
+  // being written, and these passes could only run once it was whole.
+  if (rewritten) yield { type: "answer", text: answer };
+  if (rows) yield sourcesFrame(rows, { cited, truncated, streamError });
 
   // Held back this whole time so everything above could reach the reader first. The turn is
   // now as complete as it is going to get — the partial answer, its sources, its label —

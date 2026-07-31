@@ -406,15 +406,20 @@ scriptedAs([
 ]);
 await withPage(async (page) => {
   await send(page, "is this true?");
-  await page.waitForSelector(".message.assistant .sources");
+  await page.waitForSelector(".message.assistant a.citation");
 
-  const provisional = await page.locator(".sources.provisional").count();
-  check("a bibliography sent before the answer is marked provisional", provisional === 1, `count=${provisional}`);
+  // The list itself is *not* drawn while the searches are landing. That is the newer
+  // behaviour and this test used to assert the opposite — it waited for `.sources` to
+  // appear and hung until the harness timed out, taking every test below it with it. The
+  // reason the list is withheld is that the evidence trail above the answer is already
+  // showing each search as it lands, and a numbered bibliography under a bubble that has
+  // no answer in it yet is the same information twice.
+  const drawn = await page.locator(".message.assistant .sources").count();
+  check("a bibliography sent before the answer is not drawn as a list", drawn === 0, `count=${drawn}`);
 
-  const heading = (await page.locator(".sources-heading").innerText()).trim();
-  check("its heading says the sources are still being read", /reading them now/i.test(heading), heading);
-
-  // The point of sending it early: a marker in text that is still arriving already resolves.
+  // What the early send is actually for, and the part that must not regress: the rows are
+  // held even though the list is hidden, so a marker in text that is still arriving already
+  // resolves to a link rather than sitting inert until the stream ends.
   const href = await page.locator("a.citation").first().getAttribute("href");
   check(
     "markers link while the answer is still streaming",
@@ -527,9 +532,12 @@ await withPage(async (page) => {
   const text = await page.locator(".message.assistant .body").last().innerText();
   check("the preamble is still on screen", text.includes("Let me look that up"), text);
   check("the answer is there too", text.includes("$2.1 billion"), text);
-  // Two paragraphs, not one run-on sentence contradicting itself.
-  const paragraphs = await page.locator(".message.assistant .body p").count();
-  check("the break renders as a paragraph boundary", paragraphs === 2, `count=${paragraphs}`);
+  // Two paragraphs, not one run-on sentence contradicting itself. Counted as a blank line
+  // rather than as `<p>` elements — which is what this used to look for, and never found:
+  // the renderer emits no block tags at all, it writes the newlines the model wrote and
+  // the bubble is `white-space: pre-wrap`. A count of zero `<p>`s is what that renderer
+  // has always produced, break or no break, so the old check could not tell the two apart.
+  check("the break renders as a paragraph boundary", /up\.\n\s*\nThe bridge/.test(text), JSON.stringify(text));
 });
 
 /* ---------------- reading a page, and the cleaned-up answer ---------------- */
@@ -702,6 +710,112 @@ await withPage(async (page) => {
   await page.reload();
   await page.waitForSelector(".message.assistant .truncated");
   check("the truncation label survives a reload", true);
+});
+
+/* ---------------- where in the clip a claim was made ---------------- */
+
+const YOUTUBE_CLIP = {
+  type: "video",
+  videos: [
+    {
+      platform: "youtube",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      videoID: "dQw4w9WgXcQ",
+      duration: null,
+    },
+  ],
+};
+
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      // Sent before the answer, which is what makes the marker below a link as it is
+      // written rather than only once the stream has ended.
+      YOUTUBE_CLIP,
+      { type: "delta", text: "The clip claims measles tripled [0:42]. It rose 12% [1]." },
+      {
+        type: "sources",
+        sources: [{ n: 1, title: "State audit report", url: "https://audit.example/report", domain: "audit.example" }],
+      },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "check https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  await page.waitForSelector(".message.assistant a.timestamp");
+
+  const href = await page.locator("a.timestamp").first().getAttribute("href");
+  check(
+    "a timestamp opens the video at the second the claim was made",
+    href === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+    String(href),
+  );
+
+  // The two markers sit in the same sentence and must stay tellable apart: one points into
+  // the clip on screen, the other at a page somewhere else.
+  const label = (await page.locator("a.timestamp").first().innerText()).trim();
+  check("it reads as a clock, not as a footnote number", label === "0:42", label);
+  const citation = await page.locator("a.citation").first().getAttribute("href");
+  check("and the citation beside it still points at its source", citation === "https://audit.example/report", String(citation));
+
+  await page.reload();
+  await page.waitForSelector(".message.assistant a.timestamp");
+  const afterReload = await page.locator("a.timestamp").first().getAttribute("href");
+  check(
+    "timestamps stay clickable after a reload",
+    afterReload === "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+    String(afterReload),
+  );
+});
+
+// A TikTok has no URL that opens it partway through, so the time is shown and not linked.
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      {
+        type: "video",
+        videos: [
+          {
+            platform: "tiktok",
+            url: "https://www.tiktok.com/@user/video/7300000000000000000",
+            videoID: "7300000000000000000",
+            duration: 45,
+          },
+        ],
+      },
+      { type: "delta", text: "The clip claims measles tripled [0:42]." },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "check https://www.tiktok.com/@user/video/7300000000000000000");
+  await page.waitForSelector(".message.assistant span.timestamp");
+  const links = await page.locator(".message.assistant a.timestamp").count();
+  check("a TikTok timestamp is a label, not a link that would go to the start", links === 0, `count=${links}`);
+  const label = (await page.locator("span.timestamp").innerText()).trim();
+  check("and it still tells the reader when the claim was made", label === "0:42", label);
+});
+
+// No video in the turn: a bracketed time is whatever the model was writing about, and the
+// app has no business turning it into a link to somewhere.
+scriptedAs([
+  {
+    frames: [
+      { type: "model", model: "gemini-3.6-flash" },
+      { type: "delta", text: "The score was [2:1] at half time." },
+      { type: "done" },
+    ],
+  },
+]);
+await withPage(async (page) => {
+  await send(page, "who won?");
+  await page.waitForSelector(".message.assistant .body");
+  const marked = await page.locator(".message.assistant .timestamp").count();
+  check("with no video attached, nothing is marked up as a timestamp", marked === 0, `count=${marked}`);
 });
 
 await browser.close();

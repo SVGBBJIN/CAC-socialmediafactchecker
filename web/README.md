@@ -122,6 +122,7 @@ web/
   lib/find-schema.js  JSON Schema for a find, and both tool declarations together.
   lib/citations.js The ledger: every source the model may cite, numbered as retrieved.
   lib/citation-cleanup.js  Merge, dedupe, cap, renumber, and delete invented markers.
+  lib/timestamps.js  Where in the clip a claim was made, and which markers can be believed.
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
@@ -133,6 +134,7 @@ web/
   test-search.js   Tests for search, the schema, and the turn end to end.
   test-find.js     Tests for the in-page find and the fuzzy matching under it.
   test-cleanup.js  Tests for citation cleanup — what it removes, and what it must not.
+  test-timestamps.js  Tests for the clip timestamps — parsing, the bound, and the frame.
   test-ui.mjs      Browser tests for app.js. Opt-in — see below.
 ```
 
@@ -440,12 +442,12 @@ reads, and its length is what made a two-source answer look like a literature re
 
 The links are still saved for every answer and stored with the message: they are what
 resolves the markers, and an answer whose links vanished on reload could not be checked.
-What changed is that *printing* them is now conditional, on exactly the cases where the
+What changed is that *printing* them is now conditional. While the searches are still
+landing nothing is drawn at all — the evidence trail above the answer is already showing
+each search as it lands, and a numbered bibliography under a bubble with no answer in it is
+the same information twice. Afterwards the list appears in exactly the cases where the
 inline links cannot carry the evidence alone:
 
-- **While the searches are still landing** — there is no answer yet, so there are no inline
-  markers to be links, and this is the reader's only view of the evidence during the longest
-  silence in the turn.
 - **The answer cites nothing** — it never got past searching, or was cut off before the
   first marker. Those pages were fetched on the reader's behalf and must not vanish because
   no marker happens to point at them.
@@ -456,6 +458,48 @@ inline links cannot carry the evidence alone:
 
 A passage the page reader pulled off a source rides along with its link, so the fallback
 list shows the sentence the citation rests on rather than a row of domain names.
+
+### Where in the clip it was said
+
+A verdict names a claim; the reader still has to find it. On a forty-second TikTok that
+means scrubbing, and on an hour of YouTube it means giving up — so a check the app has done
+correctly is one the reader cannot confirm against the video it is about.
+
+So the model marks each claim it takes from the video with the moment it was made, and the
+marker is rendered the way a citation is: as a link.
+
+> • **“Measles cases have tripled this year”** [0:14] — the actual rise was 12% [2].
+
+The two markers on that line point at different kinds of thing and are drawn differently
+for that reason. `[2]` is a source — superscript, a footnote, somewhere else. `[0:14]` is a
+place in the clip already on screen — a pill on the baseline, and on YouTube a link
+straight to `watch?v=…&t=14s`.
+
+**A timestamp is a pointer, not evidence, and the check behind it is smaller than the
+ledger's.** `lib/timestamps.js` deletes a marker that names a moment the clip does not
+reach — the direct analogue of deleting a citation to a page no search returned, and for
+the same reason: it looks checkable and is not. But it can only do that where the length is
+known, which is TikTok, whose embed page reports the duration. A YouTube link is handed
+straight to Gemini and nothing here ever learns how long the video is, so a YouTube
+timestamp is bounded by nothing. What is deleted, and what is left alone, is spelled out at
+the top of that file.
+
+Everything else is left exactly as written. A turn with no video attached is not touched at
+all — a bracketed time there is prose, not a claim about a clip, and `[2:1]` in a sentence
+about a football score is not something this app should be rewriting or linking.
+
+Two more places the marker cannot become a link, both shown as a plain label instead:
+
+- **TikTok**, which has no URL that opens a clip partway through. A link that silently
+  restarted from zero would be worse than none — on a short clip nobody would notice it had
+  failed.
+- **Two videos in one turn.** `[0:42]` says when, not which, and a link that guesses wrong
+  sends the reader to a confidently incorrect moment in the wrong video.
+
+The server tells the browser which clips a turn attached in a `video` frame, sent before
+the model's first token so a marker is a link the moment it is written rather than after
+the stream ends. Those rows are stored with the message like the source rows, so timestamps
+survive a reload.
 
 ### Finding inside a page from the terminal
 

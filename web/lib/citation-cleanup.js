@@ -51,8 +51,12 @@ const CODE_REGION = /```[\s\S]*?(?:```|$)|`[^`\n]*`/g;
  *
  * Splitting rather than masking, so the code comes back byte-identical: there is no
  * placeholder to be mangled by the rewrite and no substitution to get wrong on the way out.
+ *
+ * Exported for `lib/timestamps.js`, which rewrites a different kind of marker in the same
+ * answer and must skip exactly the same regions — two rules for what counts as code would
+ * eventually disagree, and the sample one of them mangled would be in the reader's answer.
  */
-function outsideCode(text, rewrite) {
+export function outsideCode(text, rewrite) {
   let out = "";
   let start = 0;
   for (const match of String(text).matchAll(CODE_REGION)) {

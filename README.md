@@ -178,6 +178,33 @@ resolves the embed page to a CDN URL, downloads the MP4 and puts the bytes in th
 inline or via the Files API depending on size. That is the same `directMediaFetch` shape as
 `TikTokMediaResolver.swift`, and the two parsers are held to the same captured payload.
 
+## Every claim from a video carries a time
+
+A verdict names a claim; the reader still has to find it in the clip. So the model marks
+each claim it takes from the video with the moment it was made, and that marker is rendered
+the way a citation is — as a link, straight to `watch?v=…&t=14s`:
+
+> • **“Measles cases have tripled this year”** [0:14] — the actual rise was 12% [2].
+
+The two markers on that line point at different kinds of thing, and are drawn differently
+for it: `[2]` is a source somewhere else, superscript like a footnote; `[0:14]` is a place
+in the clip already on screen, a pill on the baseline.
+
+A timestamp is a pointer, not evidence, and the guarantee behind it is deliberately smaller
+than the citation ledger's. `web/lib/timestamps.js` deletes a marker naming a moment the
+clip does not reach — the analogue of deleting a citation to a page no search returned —
+but it can only do that where the length is known. TikTok's embed page reports a duration;
+a YouTube link is handed straight to Gemini and nothing here ever learns how long the video
+is, so a YouTube timestamp is bounded by nothing. Everything else is left exactly as
+written: a turn with no video attached is not touched at all, because a bracketed time
+there is prose rather than a claim about a clip.
+
+TikTok has no URL that opens a clip partway through, so a TikTok timestamp is shown as a
+label rather than a link — a link that silently restarted the clip from zero would be worse
+than none. The Swift side has carried the same information since the beginning: Gemini is
+asked for `timestampSeconds` per claim and it lands in `CandidateClaim.timestamp`. What was
+missing was a surface that showed it to anyone.
+
 ## Progress
 
 Extraction is slow in a way users read as broken — the YouTube path is a single HTTPS call

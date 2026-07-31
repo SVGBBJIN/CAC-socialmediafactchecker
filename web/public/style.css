@@ -620,6 +620,37 @@ a.citation:hover {
   text-decoration: underline;
 }
 
+/* A moment in the clip, sitting on the line rather than raised above it. Deliberately not
+   styled like a citation: the two markers can appear in the same sentence and they point at
+   different kinds of thing — a source is somewhere else, a timestamp is somewhere in the
+   video already on the reader's screen — so they must never be mistaken for one another at
+   a glance. A pill on the baseline reads as a place; a superscript reads as a footnote. */
+.timestamp {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  color: var(--text-dim);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin: 0 2px;
+  white-space: nowrap;
+}
+a.timestamp {
+  color: var(--accent);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+a.timestamp:hover {
+  background: var(--accent-soft);
+}
+/* The clip has no time-linkable URL — TikTok — or the turn had more than one video, so
+   there is no single clip the marker could open. Shown as the label it is, with the cursor
+   saying it is not going anywhere rather than the reader finding that out by clicking. */
+span.timestamp {
+  cursor: default;
+}
+
 .sources {
   margin-top: 10px;
   border-top: 1px solid var(--border);
