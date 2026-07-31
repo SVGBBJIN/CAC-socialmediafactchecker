@@ -352,12 +352,24 @@ The ranking is hybrid because the two halves fail in opposite directions:
   so `1,200,000` matches `1200000`; and a proximity bonus, so matches in one sentence beat
   the same words scattered down the page. A verbatim phrase hit outranks every paraphrase,
   which is what stops three half-matches beating the passage that prints the figure.
+  Every comparison is made once per *distinct word on the page* rather than once per
+  occurrence of it (`fuzzyIndex`), which is the same arithmetic and the same scores for
+  about a twentieth of the time — it was ~600ms of blocked event loop per find on a long
+  page, and nothing else in the process moves while it runs.
 - **Semantic** (`lib/embeddings.js`) finds the passage that means the right thing in the
   wrong words — *coverage declined* for a claim about *rates falling*. It is **optional**:
   every failure path returns "no vectors", the find drops to lexical scoring alone, and the
   model is told which ranking it got, because "not on this page" from half a ranking
   deserves less confidence than from both. Only the lexically plausible passages are
-  embedded, one batch per page, capped and timed out.
+  embedded, capped and timed out — and **once per page, not once per find**. A passage's
+  vector is a fact about the passage; only the query's depends on the query. So coming back
+  to a good source, which is the behaviour the whole tool exists to encourage, no longer
+  re-buys sixty embeddings to ask it a second question. The vectors are pinned to the model
+  that produced them, since a cosine across two embedding spaces is a number that looks like
+  a score and means nothing. The embedding chain also remembers a model that just refused,
+  for a minute — a key with no entitlement to the preferred model used to buy that refusal
+  ahead of every single find, at the far end of a 10-second timeout when it hung rather
+  than answering.
 
 Absence is a first-class result. "Nothing on this page matches" comes back as a finding
 about the page — *do not cite it for that claim* — not as an error, because a fact-checker

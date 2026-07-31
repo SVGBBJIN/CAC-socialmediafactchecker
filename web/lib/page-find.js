@@ -28,7 +28,7 @@
 // a failed one, because the alternative the model falls back on is guessing.
 
 import { embedTexts, similarity } from "./embeddings.js";
-import { idfWeights, lexicalScore, phraseHit, queryTerms, tokenise } from "./fuzzy.js";
+import { fuzzyIndex, idfWeights, lexicalScore, phraseHit, queryTerms, tokenise } from "./fuzzy.js";
 
 /** Longest one page fetch may take. */
 export const FETCH_TIMEOUT_MS = 12_000;
@@ -222,7 +222,14 @@ function splitLong(block) {
   return pieces;
 }
 
-/** A passage with everything the scorers need precomputed, since each is scored many times. */
+/**
+ * A passage with everything the scorers need precomputed, since each is scored many times.
+ *
+ * The token list itself is not kept. Scoring used to walk it once per query term; it now
+ * works from `terms` and `firstAt`, which hold the same information deduplicated — so
+ * retaining the array as well would be a second copy of the page's words, held for as long
+ * as the page is, across every page a turn speculatively prefetches.
+ */
 function prepare(text, index) {
   const tokens = tokenise(text);
   const terms = new Set(tokens);
@@ -230,7 +237,7 @@ function prepare(text, index) {
   for (const [position, token] of tokens.entries()) {
     if (!firstAt.has(token)) firstAt.set(token, position);
   }
-  return { index, text, tokens, terms, firstAt, normalised: tokens.join(" ") };
+  return { index, text, terms, firstAt, normalised: tokens.join(" ") };
 }
 
 /* ---------------- fetching ---------------- */
@@ -329,13 +336,16 @@ const PHRASE_BONUS = 0.25;
 export async function rankPassages(
   query,
   passages,
-  { apiKey, fetchImpl = fetch, signal, limit = 4, embedImpl = embedTexts, vectors: cachedVectors } = {},
+  { apiKey, fetchImpl = fetch, signal, limit = 4, embedImpl = embedTexts, vectors: vectorCache } = {},
 ) {
   const terms = queryTerms(query);
   const weights = idfWeights(terms, passages);
 
+  // Which page words fuzzy-match which query term, worked out once for the whole page
+  // rather than rediscovered per passage. See `fuzzyIndex`.
+  const fuzzy = fuzzyIndex(terms, passages);
   const scored = passages.map((passage) => {
-    const { score, matched } = lexicalScore(terms, weights, passage);
+    const { score, matched } = lexicalScore(terms, weights, passage, fuzzy);
     return { passage, lexical: score, matched, semantic: 0 };
   });
 
@@ -346,20 +356,19 @@ export async function rankPassages(
   // nothing matched a word at all.
   const shortlist = shortlistFor(scored);
 
-  let vectors = cachedVectors ?? null;
-  if (!vectors && apiKey && shortlist.length > 0) {
-    vectors = await embedImpl(
-      [query, ...shortlist.map((entry) => entry.passage.text)],
-      { apiKey, fetchImpl, signal },
-    );
-  }
+  const { queryVector, vectors } = await embedShortlist(query, shortlist, {
+    apiKey,
+    fetchImpl,
+    signal,
+    embedImpl,
+    cache: vectorCache,
+  });
 
   let semantic = false;
-  if (vectors && vectors.length === shortlist.length + 1) {
+  if (queryVector) {
     semantic = true;
-    const [queryVector, ...passageVectors] = vectors;
     for (const [index, entry] of shortlist.entries()) {
-      entry.semantic = similarity(queryVector, passageVectors[index]);
+      entry.semantic = similarity(queryVector, vectors[index]);
     }
   }
 
@@ -386,6 +395,83 @@ export async function rankPassages(
   return { passages: results.slice(0, limit), semantic, terms };
 }
 
+/**
+ * A page's passage vectors, kept for as long as the page is.
+ *
+ * Embedding is the slowest step of a find and the only one that leaves the machine, and
+ * until this existed every find re-bought all of it: up to sixty passages of two thousand
+ * characters each, sent again in full because the *query* had changed. A passage's vector
+ * does not depend on the query — only the query's does — so a page is embedded once and
+ * every later find into it sends the query plus whatever paragraphs the earlier finds
+ * happened not to shortlist, which is often none of them.
+ *
+ * That matters because coming back to a good source is the behaviour the whole tool is
+ * built to encourage: the system prompt tells the model to read two pages properly rather
+ * than search six times, and each of those reads used to cost a full re-embedding.
+ *
+ * `model` is the one that produced these vectors, and later batches for this page are
+ * pinned to it. Cosine similarity between two different embedding models is arithmetic
+ * over unrelated spaces — a number that looks like a score and means nothing — so if the
+ * pinned model stops answering the find drops to lexical ranking and says so, which is a
+ * result the model is told how to read.
+ */
+export class PassageVectors {
+  constructor() {
+    this.model = null;
+    this.byIndex = new Map();
+  }
+
+  /** Record which model this page's vectors belong to. First one to answer wins. */
+  claim(model) {
+    if (!this.model && model) this.model = model;
+  }
+
+  has(index) {
+    return this.byIndex.has(index);
+  }
+
+  get(index) {
+    return this.byIndex.get(index);
+  }
+
+  set(index, vector) {
+    if (Array.isArray(vector)) this.byIndex.set(index, vector);
+  }
+}
+
+/**
+ * Vectors for the query and for every shortlisted passage, embedding only what is missing.
+ *
+ * @returns `{queryVector, vectors}` with `vectors` parallel to `shortlist`, or a null
+ *   `queryVector` when there is no semantic signal to be had — no key, nothing shortlisted,
+ *   or a batch that came back unusable. Every one of those is a degraded ranking, never a
+ *   failed one.
+ */
+async function embedShortlist(query, shortlist, { apiKey, fetchImpl, signal, embedImpl, cache }) {
+  const none = { queryVector: null, vectors: [] };
+  if (!apiKey || shortlist.length === 0) return none;
+
+  const missing = cache ? shortlist.filter((entry) => !cache.has(entry.passage.index)) : shortlist;
+
+  const options = { apiKey, fetchImpl, signal };
+  if (cache?.model) options.models = [cache.model];
+  if (cache) options.onModel = (model) => cache.claim(model);
+
+  const batch = await embedImpl([query, ...missing.map((entry) => entry.passage.text)], options);
+  // A short batch cannot be zipped back onto its texts by position, and guessing which
+  // passage lost its vector would silently mis-rank the page. Discard the lot.
+  if (!batch || batch.length !== missing.length + 1) return none;
+
+  const [queryVector, ...fresh] = batch;
+  if (!cache) return { queryVector, vectors: fresh };
+
+  for (const [index, entry] of missing.entries()) cache.set(entry.passage.index, fresh[index]);
+  const vectors = shortlist.map((entry) => cache.get(entry.passage.index));
+  // A vector the cache declined to store (anything that wasn't an array) would leave a
+  // hole here, and scoring around a hole is the mis-zipping this guards against.
+  return vectors.every(Array.isArray) ? { queryVector, vectors } : none;
+}
+
 function shortlistFor(scored) {
   const withHits = scored.filter((entry) => entry.lexical > 0);
   const pool = withHits.length > 0 ? withHits : scored;
@@ -395,13 +481,17 @@ function shortlistFor(scored) {
 }
 
 /**
- * One page, fetched and parsed once per turn.
+ * One page, fetched, parsed and embedded once per turn.
  *
  * The model is expected to come back to the same page for a second claim — that is the
  * point of reading a source rather than searching again — and re-fetching and re-splitting
- * it for each question would spend the reader's time re-doing settled work. Embeddings are
- * deliberately *not* cached alongside, because they are computed against a specific query
- * and reusing them would answer the second question with the first one's ranking.
+ * it for each question would spend the reader's time re-doing settled work.
+ *
+ * The passage vectors are held here too, in a `PassageVectors` per page. They were once
+ * left out on the grounds that an embedding is computed against a specific query, which is
+ * true of the *query's* vector and of nothing else: a passage's vector is a fact about the
+ * passage. Nothing is embedded twice, and the ranking is unchanged because the numbers
+ * being blended are the same ones.
  */
 export class PageCache {
   constructor({ fetchImpl = fetch, signal, fetchPageImpl = fetchPage } = {}) {
@@ -411,7 +501,10 @@ export class PageCache {
     this.pages = new Map();
   }
 
-  /** @returns `{title, text, passages}`. Throws `PageFindError`; a failure is not cached. */
+  /**
+   * @returns `{title, text, passages, vectors}`. Throws `PageFindError`; a failure is not
+   *   cached.
+   */
   async load(url) {
     let pending = this.pages.get(url);
     if (!pending) {
@@ -421,7 +514,7 @@ export class PageCache {
           signal: this.signal,
         });
         const passages = extractPassages(text);
-        return { title, text, passages };
+        return { title, text, passages, vectors: new PassageVectors() };
       })();
       pending.catch(() => this.pages.delete(url));
       this.pages.set(url, pending);
@@ -457,6 +550,9 @@ export async function findInPage(
     signal,
     limit: maxPassages,
     embedImpl,
+    // Shared across every find into this page for as long as the turn lasts, so only the
+    // query is embedded the second time round. See `PassageVectors`.
+    vectors: page.vectors,
   });
 
   return {

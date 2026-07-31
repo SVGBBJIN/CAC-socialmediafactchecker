@@ -40,7 +40,43 @@ const MAX_BATCH = 100;
 const MAX_CHARS_PER_TEXT = 2_000;
 
 /**
+ * How long a model that just refused is passed over, in milliseconds.
+ *
+ * The chain is walked from the top on every call, so a key with no entitlement to
+ * `gemini-embedding-001` — or a preview ID that has been retired — used to buy the same
+ * refusal on every find, ahead of the model that was going to answer. That is a whole
+ * failed round trip on the critical path, and at the far end of it the 10-second timeout
+ * rather than a prompt 404, since a request that hangs is the expensive way to fail.
+ *
+ * So a refusal is remembered, the same way `lib/degradation.js` remembers one from the chat
+ * chain, and briefly: a minute is long enough to skip the refusals in one turn and short
+ * enough that a quota blip does not quietly pin the deployment to the second-choice model
+ * for the rest of the process's life. Nothing is ever excluded outright — when every model
+ * is cooling the original order is used, because a stale note about one model is not a
+ * reason to skip the semantic half altogether.
+ */
+export const EMBEDDING_COOLDOWN_MS = 60_000;
+
+/** model → when it may be preferred again. Module-scoped; only ever holds model IDs. */
+const cooling = new Map();
+
+/** Test seam, and the escape hatch if a deployment ever wants the memory cleared. */
+export function resetEmbeddingHealth() {
+  cooling.clear();
+}
+
+/** The chain, models that just refused moved to the back rather than dropped. */
+function byHealth(models, now) {
+  const ready = models.filter((model) => (cooling.get(model) ?? 0) <= now);
+  return ready.length > 0 ? [...ready, ...models.filter((m) => !ready.includes(m))] : models;
+}
+
+/**
  * Embed a batch of texts.
+ *
+ * `onModel` is called with the model that answered, so a caller holding vectors across
+ * calls can pin later batches to the same embedding space — see `PassageVectors` in
+ * lib/page-find.js. Cosines between two models' vectors are meaningless.
  *
  * @returns an array of vectors parallel to `texts`, or `null` if no model could be
  *   reached. Never throws for an upstream failure — the caller's job is ranking, and
@@ -48,19 +84,32 @@ const MAX_CHARS_PER_TEXT = 2_000;
  */
 export async function embedTexts(
   texts,
-  { apiKey, fetchImpl = fetch, signal, models = EMBEDDING_MODELS, timeoutMs = EMBEDDING_TIMEOUT_MS } = {},
+  {
+    apiKey,
+    fetchImpl = fetch,
+    signal,
+    models = EMBEDDING_MODELS,
+    timeoutMs = EMBEDDING_TIMEOUT_MS,
+    onModel,
+    now = () => Date.now(),
+  } = {},
 ) {
   if (!apiKey || texts.length === 0) return null;
   if (texts.length > MAX_BATCH) return null;
 
   const payloadTexts = texts.map((text) => String(text ?? "").slice(0, MAX_CHARS_PER_TEXT));
 
-  for (const model of models) {
+  for (const model of byHealth(models, now())) {
     const vectors = await requestBatch(model, payloadTexts, { apiKey, fetchImpl, signal, timeoutMs });
-    if (vectors) return vectors;
+    if (vectors) {
+      cooling.delete(model);
+      onModel?.(model);
+      return vectors;
+    }
     // The caller went away — stop walking the chain rather than spending another request
-    // on an answer nobody is waiting for.
+    // on an answer nobody is waiting for, and don't blame the model for it.
     if (signal?.aborted) return null;
+    cooling.set(model, now() + EMBEDDING_COOLDOWN_MS);
   }
   return null;
 }
