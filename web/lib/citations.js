@@ -163,7 +163,10 @@ export class CitationLedger {
       `Cite these by number. ${
         entries.length === 1 ? "[1] refers" : `[${entries[0].n}]–[${entries.at(-1).n}] refer`
       } to the pages above and to nothing else. Do not cite a number outside the range you ` +
-      `have been given, and do not state anything these sources do not support.`
+      `have been given, and do not state anything these sources do not support.\n\n` +
+      `Format your response with bullet points when the claim has multiple parts or when ` +
+      `checking sub-claims. Each bullet should end with a citation marker [n]. Use **bold** ` +
+      `to highlight what part of the claim you are addressing in each bullet.`
     );
   }
 
