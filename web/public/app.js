@@ -830,17 +830,16 @@ async function streamAnswer(conversationId) {
           // Held whether or not the list is drawn: these rows are what turn every `[n]` in
           // the answer into a link, which is the whole point of not drawing the list.
           sourcesFallback = Boolean(frame.fallback);
-          const show = frame.provisional || sourcesFallback;
+          // Hide the bibliography during source lookup (while provisional: true) and only
+          // show it once searching is complete with final results.
+          const show = !frame.provisional && sourcesFallback;
           sourcesEl = replace(
             sourcesEl,
             show
               ? sourceListElement(sources, { provisional: frame.provisional, fallback: sourcesFallback })
               : document.createElement("div"),
           );
-          // Re-render so the markers become links. This is why the provisional list is
-          // worth sending: `linkCitations` can only turn `[3]` into a link if it is already
-          // holding source 3, so holding the bibliography back until the end left every
-          // marker as inert plain text for the whole of the stream.
+          // Re-render so the markers become links.
           scheduleRender();
           scrollToBottom();
         } else if (frame.type === "error") {
