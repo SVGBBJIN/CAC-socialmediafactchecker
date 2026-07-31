@@ -79,6 +79,18 @@ export function trigrams(token) {
  * is most calls.
  */
 export function tokenSimilarity(a, b) {
+  return similarityWith(a, b, null);
+}
+
+/**
+ * `tokenSimilarity`, with `a`'s trigrams supplied by the caller.
+ *
+ * One query term is compared against every distinct word on the page, so recomputing its
+ * trigram set for each of those comparisons is the same small allocation done thousands of
+ * times. Hoisting it out is the difference between the two functions and nothing else —
+ * `tokenSimilarity` is this function with the set computed on the spot.
+ */
+function similarityWith(a, b, gramsA) {
   if (a === b) return 1;
 
   // A shared stem, floored rather than left to trigrams.
@@ -103,7 +115,7 @@ export function tokenSimilarity(a, b) {
 
   if (Math.abs(a.length - b.length) > Math.max(a.length, b.length) * 0.6) return 0;
 
-  const left = trigrams(a);
+  const left = gramsA ?? trigrams(a);
   const right = trigrams(b);
   let shared = 0;
   for (const gram of left) if (right.has(gram)) shared += 1;
@@ -145,15 +157,93 @@ export function idfWeights(terms, passages) {
 }
 
 /**
+ * Which words on this page are a fuzzy match for which query term, worked out once.
+ *
+ * This is the whole cost of lexical ranking, and where it used to be paid was the problem.
+ * Scoring compared every query term against every *token* of every passage — the same
+ * comparison, between the same two words, redone once per occurrence. A page of 65,000
+ * tokens draws on a vocabulary of about 1,100 distinct words, so roughly fifty-nine out of
+ * every sixty of those comparisons had already been made and thrown away, and the whole of
+ * it ran synchronously in the middle of a turn: measured at ~600ms of blocked event loop
+ * per find on a long page, during which no SSE frame is written and no search in flight
+ * makes progress.
+ *
+ * So the comparison is done once per *distinct word* instead, up front, and passage scoring
+ * becomes a lookup. Same arithmetic, same scores — it is the same `similarityWith` against
+ * the same pair of words, only not repeated — for around a twentieth of the time.
+ *
+ * Sparse on purpose: only pairs at or above `FUZZY_FLOOR` are stored, since anything below
+ * it scores zero anyway. On an ordinary page that leaves a handful of entries.
+ *
+ * @returns `Map<pageWord, Map<queryTerm, score>>`, to be handed to `lexicalScore`.
+ */
+export function fuzzyIndex(terms, passages) {
+  const index = new Map();
+  if (terms.length === 0) return index;
+
+  const vocabulary = new Set();
+  for (const passage of passages) {
+    for (const token of passage.terms) vocabulary.add(token);
+  }
+
+  const gramsFor = terms.map((term) => [term, trigrams(term)]);
+  for (const word of vocabulary) {
+    for (const [term, grams] of gramsFor) {
+      // An exact hit needs no fuzzy entry: `lexicalScore` checks membership directly, and
+      // scores it 1 without consulting this index.
+      if (word === term) continue;
+      const score = similarityWith(term, word, grams);
+      if (score < FUZZY_FLOOR) continue;
+      let matches = index.get(word);
+      if (!matches) index.set(word, (matches = new Map()));
+      matches.set(term, score);
+    }
+  }
+  return index;
+}
+
+/**
  * Score one passage against one query, and say which words matched.
+ *
+ * `index` is a `fuzzyIndex` over the passages being ranked. It is optional so a caller
+ * scoring a single passage need not build one; omitting it costs an index over that one
+ * passage, not the old scan.
  *
  * @returns `{score, matched}` — `score` in [0, 1], `matched` the query terms that were
  *   found, which is what lets the tool result tell the model *why* a passage came back.
  */
-export function lexicalScore(terms, weights, passage) {
+export function lexicalScore(terms, weights, passage, index) {
   if (terms.length === 0) return { score: 0, matched: [] };
 
-  const tokens = passage.tokens;
+  const fuzzy = index ?? fuzzyIndex(terms, [passage]);
+
+  // The best match found for each term so far, and where in the passage it sits. Exact
+  // hits are filled in first because they cannot be beaten, which lets the sweep below
+  // skip a term that already has one.
+  const best = new Map();
+  for (const term of terms) {
+    if (passage.terms.has(term)) best.set(term, { score: 1, at: passage.firstAt.get(term) ?? -1 });
+  }
+
+  // One pass over the words this passage actually contains, rather than one pass per term
+  // over every token. `passage.terms` is the deduplicated set, so a word repeated through a
+  // paragraph is looked at once.
+  for (const word of passage.terms) {
+    const matches = fuzzy.get(word);
+    if (!matches) continue;
+    const at = passage.firstAt.get(word) ?? -1;
+    for (const [term, score] of matches) {
+      const previous = best.get(term);
+      if (previous?.score === 1) continue;
+      // Ties go to the earlier word, which is what scanning tokens in order used to do —
+      // it kept the first token to reach the best score, and never replaced it with a
+      // later one that merely equalled it.
+      if (!previous || score > previous.score || (score === previous.score && at < previous.at)) {
+        best.set(term, { score, at });
+      }
+    }
+  }
+
   let earned = 0;
   let possible = 0;
   const matched = [];
@@ -163,30 +253,12 @@ export function lexicalScore(terms, weights, passage) {
     const weight = weights.get(term) ?? 1;
     possible += weight;
 
-    let best = 0;
-    let bestAt = -1;
-    if (passage.terms.has(term)) {
-      best = 1;
-      bestAt = passage.firstAt.get(term) ?? -1;
-    } else {
-      // No exact hit: this is where fuzzy earns its place. Only tokens of a plausibly
-      // similar length are compared, so this stays linear-ish in practice.
-      for (let i = 0; i < tokens.length; i += 1) {
-        const score = tokenSimilarity(term, tokens[i]);
-        if (score > best) {
-          best = score;
-          bestAt = i;
-          if (best === 1) break;
-        }
-      }
-      if (best < FUZZY_FLOOR) best = 0;
-    }
+    const hit = best.get(term);
+    if (!hit) continue;
 
-    if (best > 0) {
-      earned += weight * best;
-      matched.push(term);
-      if (bestAt >= 0) hitPositions.push(bestAt);
-    }
+    earned += weight * hit.score;
+    matched.push(term);
+    if (hit.at >= 0) hitPositions.push(hit.at);
   }
 
   if (earned === 0) return { score: 0, matched: [] };

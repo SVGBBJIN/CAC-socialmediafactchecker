@@ -16,6 +16,7 @@ import {
   tokenSimilarity,
   idfWeights,
   lexicalScore,
+  fuzzyIndex,
   phraseHit,
 } from "./lib/fuzzy.js";
 import {
@@ -28,7 +29,13 @@ import {
   PageFindError,
   decodeEntities,
 } from "./lib/page-find.js";
-import { normalise, similarity, embedTexts } from "./lib/embeddings.js";
+import {
+  normalise,
+  similarity,
+  embedTexts,
+  resetEmbeddingHealth,
+  EMBEDDING_COOLDOWN_MS,
+} from "./lib/embeddings.js";
 import { validateFindQuery, FindQueryError, RESEARCH_TOOLS } from "./lib/find-schema.js";
 import { CitationLedger } from "./lib/citations.js";
 
@@ -232,6 +239,51 @@ test("embedTexts walks the model chain and normalises what comes back", async ()
   assert.deepEqual(vectors, [[0.6, 0.8], [0, 1]]);
 });
 
+test("a model that just refused is not put in front of the one that answered", async () => {
+  // A key with no entitlement to the first model used to buy that refusal on every find,
+  // ahead of the model that was always going to answer it.
+  resetEmbeddingHealth();
+  const tried = [];
+  const fetchImpl = async (url) => {
+    tried.push(String(url).includes("gemini-embedding-001") ? "first" : "second");
+    if (String(url).includes("gemini-embedding-001")) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, json: async () => ({ embeddings: [{ values: [1, 0] }] }) };
+  };
+
+  await embedTexts(["a"], { apiKey: "k", fetchImpl });
+  await embedTexts(["a"], { apiKey: "k", fetchImpl });
+
+  assert.deepEqual(tried, ["first", "second", "second"], "the second call goes straight there");
+
+  // The memory expires rather than pinning the deployment to a fallback for good.
+  tried.length = 0;
+  await embedTexts(["a"], { apiKey: "k", fetchImpl, now: () => Date.now() + EMBEDDING_COOLDOWN_MS + 1 });
+  assert.deepEqual(tried, ["first", "second"], "the preferred model is tried again once cooled");
+  resetEmbeddingHealth();
+});
+
+test("a caller that went away is not counted against the model", async () => {
+  resetEmbeddingHealth();
+  const signal = AbortSignal.abort();
+  const tried = [];
+  const fetchImpl = async (url) => {
+    tried.push(String(url));
+    throw new Error("aborted");
+  };
+
+  await embedTexts(["a"], { apiKey: "k", fetchImpl, signal });
+  assert.equal(tried.length, 1, "the chain stops at the abort rather than walking on");
+
+  tried.length = 0;
+  await embedTexts(["a"], {
+    apiKey: "k",
+    fetchImpl: async () => ({ ok: true, json: async () => ({ embeddings: [{ values: [1, 0] }] }) }),
+    onModel: (model) => tried.push(model),
+  });
+  assert.deepEqual(tried, ["gemini-embedding-001"], "still the preferred model, and it reports itself");
+  resetEmbeddingHealth();
+});
+
 /* ---------------- fetching ---------------- */
 
 function response(body, { ok = true, status = 200, type = "text/html" } = {}) {
@@ -309,6 +361,68 @@ test("PageCache fetches a page once per turn and re-fetches after a failure", as
   const second = await cache.load("https://example.gov/a");
   assert.equal(calls, 2, "the successful fetch is reused");
   assert.equal(first, second);
+});
+
+test("a page's passages are embedded once however many times it is read", async () => {
+  const batches = [];
+  const embedImpl = async (texts) => {
+    // The query is always first; the rest are passages.
+    batches.push(texts.slice(1));
+    return texts.map((text, i) => normalise(text.includes("Vaccine") ? [1, 0] : [i, 1]));
+  };
+  const cache = new PageCache({ fetchPageImpl: async () => ({ title: "T", text: PAGE }) });
+  const url = "https://example.gov/review";
+  const at = (n) => ({ url, find: n, claim: "The claim being checked here.", max_passages: 2 });
+
+  const first = await findInPage(at("did vaccine coverage fall"), { apiKey: "k", cache, embedImpl });
+  const second = await findInPage(at("did vaccine coverage fall in 2023"), { apiKey: "k", cache, embedImpl });
+
+  assert.equal(first.semantic, true);
+  assert.equal(second.semantic, true, "the cached vectors still give a semantic ranking");
+  assert.ok(batches[0].length > 0, "the first find embeds the query and its shortlist");
+  // The saving is exactly the overlap: a passage this page has already had embedded is
+  // never sent again, whatever the next find asks about. Two reads of one page used to
+  // cost two full embeddings of it.
+  assert.equal(batches[1].length, 0, "the second read of the same shortlist embeds no passages");
+  const sent = batches.flat();
+  assert.equal(new Set(sent).size, sent.length, "no passage is ever embedded twice");
+});
+
+test("later batches for a page are pinned to the model that embedded it", async () => {
+  // Cosine between two models' vectors is arithmetic over unrelated spaces. Once a page
+  // belongs to one model, every later batch for it either uses that model or gives up the
+  // semantic half — it must never quietly blend the two.
+  const asked = [];
+  const embedImpl = async (texts, options) => {
+    asked.push(options.models ?? null);
+    options.onModel?.("gemini-embedding-001");
+    return texts.map(() => normalise([1, 0]));
+  };
+  const cache = new PageCache({ fetchPageImpl: async () => ({ title: "T", text: PAGE }) });
+  const at = (n) => ({ url: "https://example.gov/a", find: n, claim: "A claim to check here." });
+
+  await findInPage(at("coverage in 2023"), { apiKey: "k", cache, embedImpl });
+  await findInPage(at("road safety figures"), { apiKey: "k", cache, embedImpl });
+
+  assert.equal(asked[0], null, "a fresh page takes whichever model answers");
+  assert.deepEqual(asked[1], ["gemini-embedding-001"]);
+});
+
+test("a page whose second batch fails keeps its cached vectors and drops to lexical", async () => {
+  let call = 0;
+  const embedImpl = async (texts) => {
+    call += 1;
+    return call === 1 ? texts.map(() => normalise([1, 0])) : null;
+  };
+  const cache = new PageCache({ fetchPageImpl: async () => ({ title: "T", text: PAGE }) });
+  const at = (n) => ({ url: "https://example.gov/a", find: n, claim: "A claim to check here." });
+
+  const first = await findInPage(at("coverage in 2023"), { apiKey: "k", cache, embedImpl });
+  const second = await findInPage(at("road safety figures"), { apiKey: "k", cache, embedImpl });
+
+  assert.equal(first.semantic, true);
+  assert.equal(second.semantic, false, "no query vector means no semantic half, not a wrong one");
+  assert.ok(second.passages.length >= 0, "and the find still answers");
 });
 
 /* ---------------- the tool, end to end ---------------- */
@@ -473,6 +587,30 @@ test("IDF stops a term in every passage from deciding the ranking", () => {
 
   const scores = passages.map((passage) => lexicalScore(terms, weights, passage).score);
   assert.ok(scores[1] > scores[0] && scores[1] > scores[2]);
+});
+
+test("the fuzzy index scores exactly what a per-passage scan scored", () => {
+  // The index exists to stop the same two words being compared once per occurrence. It is
+  // a speed change and must not be anything else, so the two ways of calling `lexicalScore`
+  // — with the page's index, and with none at all — have to agree everywhere.
+  const passages = extractPassages(PAGE);
+  for (const query of [
+    "vaccination rates fell in 2023",
+    "whether the agency revised the figure downward",
+    "from 62 per cent to 58 per cent",
+    "zoning ordinance municipal referendum",
+  ]) {
+    const terms = queryTerms(query);
+    const weights = idfWeights(terms, passages);
+    const index = fuzzyIndex(terms, passages);
+    for (const passage of passages) {
+      assert.deepEqual(
+        lexicalScore(terms, weights, passage, index),
+        lexicalScore(terms, weights, passage),
+        `${query} / ${passage.text.slice(0, 40)}`,
+      );
+    }
+  }
 });
 
 test("phraseHit needs a real phrase, not two words", () => {

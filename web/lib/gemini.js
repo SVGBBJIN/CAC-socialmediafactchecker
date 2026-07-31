@@ -558,8 +558,12 @@ export async function resolveTikTokParts(
 ) {
   const attachments = new Map();
   const uploads = [];
+  // Together rather than one after another. This is awaited in `streamChat`'s `finally`,
+  // which runs *before* the last frames of the turn reach the reader — so a serial sweep
+  // put a DELETE round trip per uploaded clip between the final token of an answer and the
+  // sources printed under it, for housekeeping nobody is waiting on.
   const cleanup = async () => {
-    for (const file of uploads.splice(0)) await deleteImpl(file, { apiKey, fetchImpl });
+    await Promise.all(uploads.splice(0).map((file) => deleteImpl(file, { apiKey, fetchImpl })));
   };
 
   // Assistant turns are excluded for the same reason they carry no media below: a model
