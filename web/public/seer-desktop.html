@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seer — Library</title>
+<link
+  rel="icon"
+  href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>👁</text></svg>"
+/>
+<style>
+  :root {
+    --bg: #12151A;
+    --surface: #1B1F26;
+    --surface-raised: #232833;
+    --border: #2A2F39;
+    --ink: #F0EDE6;
+    --ink-dim: #A9AFBB;
+    --muted: #8A93A3;
+    --accent: #4FD1C5;
+    --good: #6FA98A;
+    --warn: #D6A84A;
+    --bad: #C1594F;
+
+    --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; margin: 0; }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    background: #0A0C10;
+    background-image: radial-gradient(circle at 50% 0%, #171B22 0%, #0A0C10 60%);
+    font-family: var(--font-body);
+  }
+
+  .app { flex: 1; display: flex; min-height: 0; }
+
+  /* ---------- Sidebar / library ---------- */
+  .sidebar {
+    width: 270px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 18px 14px;
+  }
+
+  .sidebar-header {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 16px; padding: 0 4px;
+  }
+  .sidebar-header .mark { width: 18px; height: 18px; color: var(--accent); }
+  .sidebar-header .mark svg { width: 100%; height: 100%; }
+  .sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); }
+
+  .search {
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--ink-dim);
+    font-family: var(--font-body);
+    font-size: 12.5px;
+    margin-bottom: 14px;
+  }
+  .search::placeholder { color: #616977; }
+  .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
+
+  .lib-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px;
+    border-radius: 9px;
+    cursor: pointer;
+  }
+  .lib-item:hover { background: var(--surface-raised); }
+  .lib-item.active { background: var(--surface-raised); }
+  .lib-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .lib-thumb {
+    width: 34px; height: 34px; border-radius: 7px; flex-shrink: 0;
+    background: linear-gradient(135deg, #2A3140, #1A1E27);
+  }
+  .lib-meta { min-width: 0; }
+  .lib-title {
+    font-size: 12.5px; color: var(--ink); line-height: 1.3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dot.bad { background: var(--bad); }
+  .dot.warn { background: var(--warn); }
+  .dot.good { background: var(--good); }
+  .dot.muted { background: var(--muted); }
+
+  /* ---------- Main pane ---------- */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  .entry-bar {
+    display: flex; gap: 8px;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .entry-bar input {
+    flex: 1;
+    padding: 11px 14px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13.5px;
+  }
+  .entry-bar input::placeholder { color: #616977; }
+  .entry-bar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .entry-bar button {
+    padding: 11px 18px;
+    border-radius: 9px;
+    border: 1px solid var(--accent);
+    background: rgba(79,209,197,0.12);
+    color: var(--accent);
+    font-family: var(--font-body);
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .entry-bar button:hover { background: rgba(79,209,197,0.2); }
+  .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .entry-bar button:disabled { opacity: 0.5; cursor: default; }
+
+  .content-grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 20px;
+    padding: 20px 24px;
+    overflow-y: auto;
+  }
+
+  /* ---------- Video preview pane ---------- */
+  .video-pane {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px;
+    align-self: start;
+    position: sticky;
+    top: 0;
+  }
+  .video-thumb {
+    width: 100%; aspect-ratio: 9/16;
+    border-radius: 10px;
+    background: linear-gradient(155deg, #2E3646, #14171D 70%);
+    position: relative;
+    margin-bottom: 12px;
+  }
+  .video-thumb .play {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 34px; height: 34px; color: rgba(240,237,230,0.55);
+  }
+  .video-source-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; color: var(--ink-dim);
+    border: 1px solid var(--border); border-radius: 100px;
+    padding: 5px 10px; margin-bottom: 8px;
+  }
+  .video-source-chip svg { width: 12px; height: 12px; opacity: 0.8; }
+  .video-title { font-family: var(--font-display); font-size: 14.5px; color: var(--ink); line-height: 1.4; margin: 0 0 6px; }
+  .video-link { font-size: 11.5px; color: var(--accent); text-decoration: none; }
+  .video-link:hover { text-decoration: underline; }
+
+  /* ---------- Claims feed ---------- */
+  .claims-pane { display: flex; flex-direction: column; gap: 16px; }
+
+  .claim-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+  }
+
+  .card-loading {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 22px 0;
+  }
+  .iris-wrap { position: relative; width: 44px; height: 44px; }
+  .iris-wrap svg { width: 100%; height: 100%; }
+
+  .blade {
+    transform-origin: 50px 50px;
+    fill: var(--accent);
+    opacity: 0.85;
+    animation: blade-breathe 2.6s ease-in-out infinite;
+  }
+  .blade:nth-child(1) { animation-delay: 0s; }
+  .blade:nth-child(2) { animation-delay: -0.43s; }
+  .blade:nth-child(3) { animation-delay: -0.86s; }
+  .blade:nth-child(4) { animation-delay: -1.3s; }
+  .blade:nth-child(5) { animation-delay: -1.73s; }
+  .blade:nth-child(6) { animation-delay: -2.16s; }
+
+  @keyframes blade-breathe {
+    0%, 100% { transform: rotate(var(--rot)) scaleY(0.62); opacity: 0.55; }
+    50%      { transform: rotate(var(--rot)) scaleY(1);    opacity: 0.95; }
+  }
+
+  .seal-check { opacity: 0; transform: scale(0.5); transition: opacity 0.25s ease, transform 0.25s ease; }
+  .iris-wrap.resolved .blade { animation: none; transform: rotate(var(--rot)) scaleY(0.9); opacity: 0.35; }
+  .iris-wrap.resolved .seal-check { opacity: 1; transform: scale(1); }
+
+  .status-text { font-size: 13px; color: var(--ink-dim); text-align: center; min-height: 18px; transition: opacity 0.35s ease; }
+  .source-counter { font-family: var(--font-mono); font-size: 11px; color: var(--accent); min-height: 14px; }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
+  }
+
+  .claim-text {
+    font-family: var(--font-display); font-size: 16.5px; line-height: 1.45; color: var(--ink);
+    margin: 0 0 16px;
+    opacity: 0; transform: translateY(6px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .claim-text.in { opacity: 1; transform: translateY(0); }
+
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 11px; border-radius: 100px;
+    font-size: 12px; font-weight: 600;
+    opacity: 0; transform: scale(0.5) rotate(-6deg);
+  }
+  .badge.in { animation: stamp-in 0.42s cubic-bezier(.2,1.4,.4,1) forwards; }
+  @keyframes stamp-in {
+    0%   { opacity: 0; transform: scale(0.5) rotate(-6deg); }
+    60%  { opacity: 1; transform: scale(1.08) rotate(2deg); }
+    100% { opacity: 1; transform: scale(1) rotate(0deg); }
+  }
+  .badge svg { width: 12px; height: 12px; }
+  .badge.verdict.bad   { background: rgba(193,89,79,0.15);  color: var(--bad);   border: 1px solid rgba(193,89,79,0.35); }
+  .badge.verdict.warn  { background: rgba(214,168,74,0.15); color: var(--warn);  border: 1px solid rgba(214,168,74,0.35); }
+  .badge.verdict.good  { background: rgba(111,169,138,0.15);color: var(--good);  border: 1px solid rgba(111,169,138,0.35); }
+  .badge.verdict.muted { background: rgba(138,147,163,0.15);color: var(--muted); border: 1px solid rgba(138,147,163,0.3); }
+  .badge.auth { background: rgba(138,147,163,0.15); color: var(--muted); border: 1px solid rgba(138,147,163,0.3); }
+
+  .sources { border-top: 1px solid var(--border); padding-top: 12px; max-height: 0; overflow: hidden; opacity: 0; transition: max-height 0.45s ease, opacity 0.4s ease; }
+  .sources.in { max-height: 200px; opacity: 1; }
+  .sources-label { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 7px; }
+  .source-item { font-size: 12.5px; color: var(--ink-dim); padding: 4px 0; display: flex; justify-content: space-between; }
+  .source-item span:last-child { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+
+  .note {
+    padding: 10px 24px;
+    color: #666d7a; font-family: var(--font-body);
+    font-size: 11.5px; text-align: center; line-height: 1.5;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .blade, .claim-text, .badge, .sources, .seal-check { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg></div>
+        <div class="wordmark">Library</div>
+      </div>
+      <input class="search" placeholder="Search checks…" />
+      <ul class="lib-list">
+        <li class="lib-item active" tabindex="0">
+          <div class="lib-thumb"></div>
+          <div class="lib-meta">
+            <div class="lib-title">Celery juice liver detox</div>
+            <div class="lib-sub"><span class="dot bad"></span>TikTok · Contradicted</div>
+          </div>
+        </li>
+        <li class="lib-item" tabindex="0">
+          <div class="lib-thumb"></div>
+          <div class="lib-meta">
+            <div class="lib-title">Cold plunges "boost" metabolism 300%</div>
+            <div class="lib-sub"><span class="dot warn"></span>YouTube · Disputed</div>
+          </div>
+        </li>
+        <li class="lib-item" tabindex="0">
+          <div class="lib-thumb"></div>
+          <div class="lib-meta">
+            <div class="lib-title">7-day jawline fix routine</div>
+            <div class="lib-sub"><span class="dot muted"></span>Instagram · Insufficient evidence</div>
+          </div>
+        </li>
+        <li class="lib-item" tabindex="0">
+          <div class="lib-thumb"></div>
+          <div class="lib-meta">
+            <div class="lib-title">Handwashing cuts cold transmission</div>
+            <div class="lib-sub"><span class="dot good"></span>YouTube · Corroborated</div>
+          </div>
+        </li>
+      </ul>
+    </aside>
+
+    <div class="main">
+      <div class="entry-bar">
+        <input type="text" placeholder="Paste a TikTok, YouTube, or Instagram link…" value="tiktok.com/@wellness.tips/video/7412…" />
+        <button id="checkBtn">Check</button>
+      </div>
+
+      <div class="content-grid">
+        <div class="video-pane">
+          <div class="video-thumb">
+            <svg class="play" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+          </div>
+          <div class="video-source-chip">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+            TikTok · 0:58
+          </div>
+          <p class="video-title">"3 things your liver needs you to know"</p>
+          <a class="video-link" href="#" onclick="return false;">Open original ↗</a>
+        </div>
+
+        <div class="claims-pane" id="claimsPane">
+
+          <div class="claim-card" data-card="1">
+            <div class="card-loading">
+              <div class="iris-wrap" id="iris-1">
+                <svg viewBox="0 0 100 100">
+                  <g>
+                    <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
+                  </g>
+                  <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="status-text" id="status-1">Pulling transcript…</div>
+              <div class="source-counter" id="counter-1">&nbsp;</div>
+            </div>
+            <div class="card-result" hidden>
+              <div class="eyebrow">Claim at 0:12</div>
+              <p class="claim-text" id="claimtext-1">"Drinking celery juice every morning flushes toxins out of your liver."</p>
+              <div class="badges">
+                <span class="badge verdict bad" id="verdict-1">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M6 12h12M6 12l4-4M6 12l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Contradicted
+                </span>
+                <span class="badge auth" id="auth-1">
+                  <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/></svg>
+                  Authenticity: no signs of AI generation
+                </span>
+              </div>
+              <div class="sources" id="sources-1">
+                <div class="sources-label">Checked against 3 sources</div>
+                <div class="source-item"><span>Mayo Clinic — liver function</span><span>match</span></div>
+                <div class="source-item"><span>Cleveland Clinic — detox claims</span><span>match</span></div>
+                <div class="source-item"><span>NIH — hepatic physiology</span><span>match</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="claim-card" data-card="2">
+            <div class="card-loading">
+              <div class="iris-wrap" id="iris-2">
+                <svg viewBox="0 0 100 100">
+                  <g>
+                    <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
+                    <rect class="blade" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
+                  </g>
+                  <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="status-text" id="status-2">Pulling transcript…</div>
+              <div class="source-counter" id="counter-2">&nbsp;</div>
+            </div>
+            <div class="card-result" hidden>
+              <div class="eyebrow">Claim at 0:31</div>
+              <p class="claim-text" id="claimtext-2">"Celery juice absorbs into your body better than eating whole vegetables."</p>
+              <div class="badges">
+                <span class="badge verdict muted" id="verdict-2">
+                  <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M12 8v5M12 16h.01" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                  Insufficient evidence
+                </span>
+                <span class="badge auth" id="auth-2">
+                  <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/></svg>
+                  Authenticity: no signs of AI generation
+                </span>
+              </div>
+              <div class="sources" id="sources-2">
+                <div class="sources-label">Checked against 2 sources — below 3-source threshold</div>
+                <div class="source-item"><span>USDA FoodData Central</span><span>no match</span></div>
+                <div class="source-item"><span>Harvard T.H. Chan — nutrition</span><span>partial</span></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="note">Visual mockup — library, claims, and verdicts below are placeholder data with simulated stage timings, not wired to the extraction pipeline.</p>
+
+<script>
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function wait(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+  function stagesFor(id) {
+    return [
+      { text: 'Pulling transcript…',      ms: reduced ? 150 : 1100 },
+      { text: 'Extracting claims…',       ms: reduced ? 150 : 900 },
+      { text: 'Cross-checking sources…',  ms: reduced ? 200 : (id === '1' ? 2000 : 1700), counter: id === '1' ? 3 : 2 },
+      { text: 'Checking authenticity…',   ms: reduced ? 150 : 900 },
+    ];
+  }
+
+  async function runCounter(el, n, totalMs) {
+    const step = totalMs / n;
+    for (let i = 1; i <= n; i++) {
+      el.textContent = `Source ${i} of ${n}`;
+      await wait(step);
+    }
+  }
+
+  async function runCard(id, delayStart) {
+    await wait(delayStart);
+    const card = document.querySelector(`.claim-card[data-card="${id}"]`);
+    const loadingEl = card.querySelector('.card-loading');
+    const resultEl = card.querySelector('.card-result');
+    const iris = document.getElementById('iris-' + id);
+    const status = document.getElementById('status-' + id);
+    const counter = document.getElementById('counter-' + id);
+    const claimText = document.getElementById('claimtext-' + id);
+    const verdict = document.getElementById('verdict-' + id);
+    const auth = document.getElementById('auth-' + id);
+    const sources = document.getElementById('sources-' + id);
+
+    loadingEl.style.display = 'flex';
+    resultEl.hidden = true;
+    iris.classList.remove('resolved');
+    claimText.classList.remove('in');
+    verdict.classList.remove('in');
+    auth.classList.remove('in');
+    sources.classList.remove('in');
+    counter.textContent = ' ';
+
+    for (const stage of stagesFor(id)) {
+      status.style.opacity = 0;
+      await wait(100);
+      status.textContent = stage.text;
+      status.style.opacity = 1;
+      if (stage.counter) await runCounter(counter, stage.counter, stage.ms);
+      else await wait(stage.ms);
+    }
+
+    iris.classList.add('resolved');
+    await wait(reduced ? 80 : 350);
+    loadingEl.style.display = 'none';
+    resultEl.hidden = false;
+
+    claimText.classList.add('in');
+    await wait(reduced ? 50 : 280);
+    verdict.classList.add('in');
+    await wait(reduced ? 50 : 220);
+    auth.classList.add('in');
+    await wait(reduced ? 50 : 220);
+    sources.classList.add('in');
+  }
+
+  function runAll() {
+    const btn = document.getElementById('checkBtn');
+    btn.disabled = true;
+    Promise.all([runCard('1', 0), runCard('2', reduced ? 200 : 900)]).then(() => {
+      btn.disabled = false;
+    });
+  }
+
+  document.getElementById('checkBtn').addEventListener('click', runAll);
+
+  document.querySelectorAll('.lib-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.lib-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      // Mockup only: selecting a library item would load that video's claims into the main pane.
+    });
+    item.addEventListener('keydown', e => { if (e.key === 'Enter') item.click(); });
+  });
+
+  runAll();
+</script>
+</body>
+</html>
