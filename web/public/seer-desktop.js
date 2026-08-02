@@ -74,6 +74,7 @@ const el = {
   videoChip: document.getElementById("videoChip"),
   videoTitle: document.getElementById("videoTitle"),
   videoLink: document.getElementById("videoLink"),
+  videoThumb: document.getElementById("videoThumb"),
   videoPlaceholder: document.getElementById("videoPlaceholder"),
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
@@ -324,6 +325,19 @@ function startNewCheck() {
 
 /* ---------------------------------------------------------------- video pane */
 
+// Fallback while a video's real dimensions are still unknown (before the TikTok API
+// response lands, or before the <video> element has decoded enough to know its own
+// size). Most short-form content is vertical, so this is the least-wrong guess, but
+// `setVideoAspect` below always overrides it with the real ratio as soon as one is known.
+const DEFAULT_VIDEO_ASPECT = "9 / 16";
+
+/** Resizes the pane itself to the video's ratio, so nothing gets cropped or letterboxed
+ * once the real size is known — object-fit: contain (see the CSS) only has to cover the
+ * brief gap before that happens. */
+function setVideoAspect(ratio) {
+  el.videoThumb.style.aspectRatio = ratio || DEFAULT_VIDEO_ASPECT;
+}
+
 /** Back to the play-icon placeholder — no video element holding stale media or playing. */
 function clearVideoMedia() {
   el.videoPlayer.pause();
@@ -333,18 +347,34 @@ function clearVideoMedia() {
   el.videoEmbed.src = "";
   el.videoEmbed.hidden = true;
   el.videoPlaceholder.hidden = false;
+  setVideoAspect(DEFAULT_VIDEO_ASPECT);
 }
 
-function showVideoElement(entry) {
+function showVideoElement(media) {
   el.videoPlaceholder.hidden = true;
-  el.videoPlayer.src = entry.mediaURL;
+  // TikTok's own reported width/height, if the API returned one — corrected below by
+  // `loadedmetadata` against what the browser actually decoded, which is authoritative
+  // even when the API's numbers are missing or wrong.
+  if (media.width && media.height) setVideoAspect(`${media.width} / ${media.height}`);
+  el.videoPlayer.src = media.mediaURL;
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
   el.videoPlayer.hidden = false;
   el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
 }
 
-function showYouTubeEmbed(videoID) {
+/** Shorts are vertical, everything else on YouTube is 16:9 — there's no dimension field
+ * to read the way TikTok's embed state has one, so the URL shape is the only signal. */
+function youTubeAspectRatio(urlString) {
+  try {
+    return new URL(urlString).pathname.toLowerCase().includes("/shorts/") ? "9 / 16" : "16 / 9";
+  } catch {
+    return "16 / 9";
+  }
+}
+
+function showYouTubeEmbed(videoID, aspect) {
   el.videoPlaceholder.hidden = true;
+  setVideoAspect(aspect);
   // youtube-nocookie.com: this is a fact-check tool, not a place that should be dropping
   // YouTube's regular tracking cookies on every pasted link.
   el.videoEmbed.src = `https://www.youtube-nocookie.com/embed/${videoID}?rel=0`;
@@ -364,10 +394,11 @@ async function loadTikTokMedia(entry, token) {
       body: JSON.stringify({ url: entry.url }),
     });
     if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
-    const { mediaURL } = await response.json();
+    const { mediaURL, width, height } = await response.json();
     if (!mediaURL) return;
-    mediaCache.set(entry.id, { kind: "tiktok", mediaURL });
-    if (token === videoPaneToken) showVideoElement({ mediaURL });
+    const media = { kind: "tiktok", mediaURL, width, height };
+    mediaCache.set(entry.id, media);
+    if (token === videoPaneToken) showVideoElement(media);
   } catch {
     // Network hiccup or the passphrase dialog intercepting — the rest of the pane (title,
     // link, and the fact-check itself) doesn't depend on this succeeding.
@@ -389,8 +420,9 @@ function renderVideoPane(entry) {
 
   const videoID = youTubeVideoID(entry.url);
   if (entry.platform === "YouTube" && videoID) {
-    mediaCache.set(entry.id, { kind: "youtube", videoID });
-    showYouTubeEmbed(videoID);
+    const aspect = youTubeAspectRatio(entry.url);
+    mediaCache.set(entry.id, { kind: "youtube", videoID, aspect });
+    showYouTubeEmbed(videoID, aspect);
   }
 }
 
@@ -786,6 +818,15 @@ el.linkInput.addEventListener("keydown", (event) => {
 
 el.linkInput.addEventListener("input", updateComposerMode);
 el.searchInput.addEventListener("input", () => renderLibrary(el.searchInput.value));
+
+// Fires once the browser has actually decoded the video's dimensions — overrides
+// whatever `setVideoAspect` guessed from the API/URL with the real ratio, so the pane
+// never stays letterboxed or cropped once playback is possible.
+el.videoPlayer.addEventListener("loadedmetadata", () => {
+  if (el.videoPlayer.videoWidth && el.videoPlayer.videoHeight) {
+    setVideoAspect(`${el.videoPlayer.videoWidth} / ${el.videoPlayer.videoHeight}`);
+  }
+});
 
 el.passForm.addEventListener("submit", () => {
   const value = el.passInput.value.trim();

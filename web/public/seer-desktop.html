@@ -195,7 +195,10 @@
     position: absolute; inset: 0;
     width: 100%; height: 100%;
     border: 0; border-radius: 10px;
-    object-fit: cover;
+    /* contain, not cover: the pane's aspect-ratio is set in JS to match the actual
+       video (TikTok's real width/height, or 16:9 vs 9:16 for YouTube/Shorts), so this
+       only ever letterboxes for the brief window before that lands — never crops. */
+    object-fit: contain;
     background: transparent;
   }
   .video-media[hidden] { display: none; }
