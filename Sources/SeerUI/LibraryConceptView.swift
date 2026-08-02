@@ -26,8 +26,6 @@ public struct LibraryConceptView: View {
             Divider()
 
             VStack(spacing: 0) {
-                entryBar
-                Divider()
                 ScrollView {
                     HStack(alignment: .top, spacing: 20) {
                         videoPane
@@ -42,6 +40,8 @@ public struct LibraryConceptView: View {
                     }
                     .padding(20)
                 }
+                Divider()
+                entryBar
             }
         }
         .frame(minWidth: 900, minHeight: 600)

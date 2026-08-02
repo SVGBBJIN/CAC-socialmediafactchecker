@@ -109,7 +109,8 @@
   .entry-bar {
     display: flex; gap: 8px;
     padding: 18px 24px;
-    border-bottom: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
   }
   .entry-bar input {
     flex: 1;
@@ -314,11 +315,6 @@
     </aside>
 
     <div class="main">
-      <div class="entry-bar">
-        <input type="text" placeholder="Paste a TikTok, YouTube, or Instagram link…" value="tiktok.com/@wellness.tips/video/7412…" />
-        <button id="checkBtn">Check</button>
-      </div>
-
       <div class="content-grid">
         <div class="video-pane">
           <div class="video-thumb">
@@ -414,6 +410,11 @@
           </div>
 
         </div>
+      </div>
+
+      <div class="entry-bar">
+        <input type="text" placeholder="Paste a TikTok, YouTube, or Instagram link…" value="tiktok.com/@wellness.tips/video/7412…" />
+        <button id="checkBtn">Check</button>
       </div>
     </div>
   </div>
