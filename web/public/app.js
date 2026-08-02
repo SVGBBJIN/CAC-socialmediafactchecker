@@ -168,20 +168,30 @@ function platformFor(url) {
   }
 }
 
-function normalizeLink(raw) {
+// Requires an actual domain shape (a label, a dot, a letters-only TLD), not just "no
+// whitespace" — otherwise a plain word like "hi" reads as a bare hostname and gets a
+// scheme bolted on in normalizeLink, turning a greeting into a fake fact-check target.
+const BARE_DOMAIN_PATTERN = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(:\d+)?(\/\S*)?$/i;
+
+function looksLikeLink(raw) {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  return /^https?:\/\//i.test(trimmed) || BARE_DOMAIN_PATTERN.test(trimmed);
+}
+
+function normalizeLink(raw) {
+  if (!looksLikeLink(raw)) return null;
+  const trimmed = raw.trim();
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 /**
- * A bare link never has whitespace in it; a follow-up question almost always does
- * ("what about the second claim?"). Cheap, and it means pasting a new URL always starts
- * a new check even while a result is on screen — the one case that must never be
- * ambiguous.
+ * Anything that isn't a recognizable link is a follow-up question — "hi", "what about the
+ * second claim?", etc. Pasting an actual URL always starts a new check even while a result
+ * is on screen — the one case that must never be ambiguous.
  */
 function looksLikeFollowup(raw) {
-  return /\s/.test(raw.trim());
+  return raw.trim().length > 0 && !looksLikeLink(raw);
 }
 
 function truncate(text, max) {
