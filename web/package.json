@@ -3,14 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Chat UI for Seer. Static front end, Gemini called from a server-side route that holds the key.",
+  "description": "Fact-checking library UI for Seer. Static front end, Gemini called from a server-side route that holds the key.",
   "scripts": {
     "dev": "node server.js",
     "test": "node --test test.js test-search.js test-find.js test-cleanup.js",
     "search": "node bin/search.mjs",
-    "find": "node bin/find.mjs",
-    "//test:ui": "Browser tests for app.js. Needs `npm install --no-save playwright` first — deliberately not a dependency, so `npm test` stays dependency-free.",
-    "test:ui": "node test-ui.mjs"
+    "find": "node bin/find.mjs"
   },
   "engines": {
     "node": ">=20"

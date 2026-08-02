@@ -1,7 +1,8 @@
-# Seer Chat
+# Seer
 
-A chat UI over Gemini. Static front end in `public/`, one server route in `api/` that
-holds the key. No build step, no dependencies.
+A fact-checking library UI over Gemini: paste a video link, get claims checked against
+live sources. Static front end in `public/`, one server route in `api/` that holds the
+key. No build step, no dependencies.
 
 ## Run it
 
@@ -109,7 +110,7 @@ actually holding the door, so treat it as required rather than optional.
 
 ```
 web/
-  public/          Front end — index.html, app.js, style.css. No key, ever.
+  public/          Front end — index.html, app.js. No key, ever.
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
@@ -136,7 +137,6 @@ web/
   test-search.js   Tests for search, the schema, and the turn end to end.
   test-find.js     Tests for the in-page find and the fuzzy matching under it.
   test-cleanup.js  Tests for citation cleanup — what it removes, and what it must not.
-  test-ui.mjs      Browser tests for app.js. Opt-in — see below.
 ```
 
 ## How a pasted video reaches the model
@@ -183,15 +183,7 @@ explains why, and the answer proceeds from the link and caption alone.
 
 ```bash
 npm test                              # unit tests, no network, no dependencies
-npm install --no-save playwright      # only needed for the browser tests
-npm run test:ui                       # drives the real UI in Chromium
 ```
-
-`app.js` only runs in a browser, so retry behaviour, streaming and render batching can't
-be reached from `test.js` — `test-ui.mjs` drives a real page against a stubbed chat
-endpoint instead. Playwright is deliberately *not* a dependency of this package, so the
-default `npm test` path stays dependency-free; `test:ui` exits with instructions if it
-isn't installed.
 
 `lib/gemini.js` mirrors the model chain in `Sources/SeerCore/Gemini/GeminiModel.swift` —
 Flash 3.6, then 3.5, 3-preview, 2.5, 2.0. Model IDs get retired and key tiers differ;
