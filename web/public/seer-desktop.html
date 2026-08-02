@@ -191,6 +191,14 @@
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
     width: 34px; height: 34px; color: rgba(240,237,230,0.55);
   }
+  .video-media {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    border: 0; border-radius: 10px;
+    object-fit: cover;
+    background: transparent;
+  }
+  .video-media[hidden] { display: none; }
   .video-source-chip {
     display: inline-flex; align-items: center; gap: 6px;
     font-size: 11.5px; color: var(--ink-dim);
@@ -377,8 +385,10 @@
     <div class="main">
       <div class="content-grid">
         <div class="video-pane">
-          <div class="video-thumb">
-            <svg class="play" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+          <div class="video-thumb" id="videoThumb">
+            <svg class="play" id="videoPlaceholder" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+            <video class="video-media" id="videoPlayer" playsinline muted loop controls hidden></video>
+            <iframe class="video-media" id="videoEmbed" title="YouTube video" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen hidden></iframe>
           </div>
           <div class="video-source-chip">
             <svg viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>

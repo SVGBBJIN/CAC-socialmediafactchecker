@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import chatHandler from "./api/chat.js";
 import configHandler from "./api/config.js";
+import resolveMediaHandler from "./api/resolve-media.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
 import { providerFromEnv } from "./lib/search.js";
 import { searchEnabled } from "./lib/verified-chat.js";
@@ -71,6 +72,7 @@ const server = createServer(async (req, res) => {
   try {
     if (pathname === "/api/chat") return await chatHandler(req, res);
     if (pathname === "/api/config") return await configHandler(req, res);
+    if (pathname === "/api/resolve-media") return await resolveMediaHandler(req, res);
     return await serveStatic(req, res);
   } catch (error) {
     console.error("[server]", error);
