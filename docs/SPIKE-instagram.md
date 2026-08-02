@@ -1,5 +1,17 @@
 # Spike: does Instagram behave like TikTok?
 
+> **Resolved 2026-08-02 — for the web app.** The question this spike closed on ("does
+> Instagram's embed iframe expose a media URL the way TikTok's does?") was re-tested and
+> the answer is **no**. But a third route, not tested in the original spike, does work with
+> no credential at all, and the web app now ships on it: `POST /graphql/query` with a
+> `doc_id` and the post's shortcode, carrying a CSRF token from a plain GET of the
+> homepage, returns `video_url` — a signed CDN link that serves the MP4 anonymously.
+>
+> So **the Meta App Review blocker is gone** for the web pipeline, and so is the ReplayKit
+> one, because nothing is captured. See [What actually worked](#what-actually-worked-2026-08-02)
+> below and `web/lib/instagram.js`. The Swift app is *not* on this route yet — it still has
+> Instagram on the capture arm and unregistered.
+
 **Date:** 2026-07-27
 **Question asked:** before building the Instagram method, confirm its oEmbed endpoint
 returns embeddable HTML the way TikTok's does.
@@ -110,3 +122,48 @@ So when a token arrives, add one question to step 4 below, and ask it first:
 If yes, Instagram takes the `directMediaFetch` arm, both blockers evaporate together, and
 the capture path can be deleted rather than debugged. That is a much better outcome than
 the one this spike originally recommended, and it costs one HTTP request to find out.
+
+## What actually worked (2026-08-02)
+
+That question was asked, and the answer is **no** — but asking it turned up a route that
+does work, and needs no token. All five tests below were run anonymously from a datacenter
+IP with nothing but a browser user-agent.
+
+| # | Route | Result |
+|---|---|---|
+| 1 | `GET /reel/<sc>/embed/captioned/` | 200, but a React shell — **no media, no metadata** |
+| 2 | `GET /api/v1/media/<pk>/info/` | 302 to login |
+| 3 | `GET i.instagram.com/api/v1/media/<pk>/info/` | 403 `login_required` |
+| 4 | `GET graph.facebook.com/v21.0/instagram_oembed` (no token) | 200 — but the *loading placeholder* blockquote: no author, no thumbnail, no media |
+| 5 | `POST /graphql/query` + `doc_id` + `{"shortcode"}` + CSRF | **200 with the full post, including `video_url`** |
+
+Route 4 is a change from the original spike, which got error 24 here. It is not an
+improvement: what comes back is the skeleton Instagram's embed script replaces once it
+hydrates, so it is still useless without App Review — and even with it, oEmbed returns an
+embed, not a file.
+
+Route 5 is what shipped. Three details make it work:
+
+1. **The CSRF token is required.** Without a `csrftoken` cookie and matching `x-csrftoken`
+   header, `/graphql/query` answers 403 with the "Page Not Found" HTML shell — which reads
+   like a dead link and is not one. A plain `GET https://www.instagram.com/` sets the
+   cookie; no login is involved.
+2. **The shortcode is the only input needed.** It is base64url over the media's numeric id,
+   so `shortcode → pk` is local arithmetic — but nothing needs the pk, because the query
+   takes the shortcode directly.
+3. **The CDN link is unauthenticated.** `video_url` served `video/mp4` (6.2 MB and 9.9 MB
+   clips, three public reels) to a request carrying no cookie and no `Referer`.
+
+What this costs, and what to watch: `doc_id` is a rotating query hash rather than an API —
+overridable via `INSTAGRAM_DOC_ID` so recovery is a config change — and anonymous traffic
+is rate-limited (`web_profile_info` started returning 429 within a handful of requests,
+which is why the shipped path never touches it and seeds one CSRF token per 10 minutes).
+
+### What is still open
+
+The **Swift app** is unchanged: `CaptureBasedExtractor.instagram` is still what exists, it
+is still unregistered, and it is still the only thing keeping the capture arm alive. The
+follow-up is to port `web/lib/instagram.js` to a `MediaURLResolver` alongside
+`TikTokMediaResolver`, register Instagram as `directMediaFetch`, and then delete the
+capture path outright — the outcome the section above hoped for, now with a route to it
+that does not wait on anyone's review queue.

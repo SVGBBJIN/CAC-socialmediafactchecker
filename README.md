@@ -21,10 +21,11 @@ Nothing downstream of `ClaimContext` knows which platform a claim came from.
 |---|---|---|
 | **YouTube** | Gemini native URL ingestion | **Working** — verified against the live API |
 | **TikTok** | embed page → CDN MP4 → Gemini Flash | **Working** — resolve + download verified live; Gemini leg needs a key to confirm |
-| **Instagram** | oEmbed → WKWebView → ReplayKit → Whisper | **Blocked twice** — ReplayKit audio, plus Meta App Review |
+| **Instagram** | post query → CDN MP4 → Gemini Flash | **Working in the web app** — resolve + download verified live 2026-08-02. The Swift extractor is still the capture one, still unregistered |
 
 Only platforms that can actually be served are registered, so a user sharing an Instagram
-link today gets an honest "not supported yet" instead of an empty result.
+link *to the Swift app* today still gets an honest "not supported yet" instead of an empty
+result. The web app answers it.
 
 ### TikTok no longer needs screen capture
 
@@ -42,6 +43,20 @@ silent B-roll now yields on-screen text where the capture path yielded nothing.
 
 Verified live on 2026-07-28 through the compiled resolver: anonymous request, no
 credential, 3.2 MB `video/mp4` with a valid `ftyp` box.
+
+### Instagram doesn't either
+
+Same shape, different door. Instagram's embed iframe carries no media, and its oEmbed
+endpoint needs a Meta app that has passed App Review — but the query instagram.com's own
+web client runs to render a post does not: `POST /graphql/query` with a `doc_id` and the
+post's shortcode, carrying a CSRF token from a plain GET of the homepage, returns the post
+including `video_url`. That CDN link then serves the MP4 to an anonymous request.
+
+So a reel costs what a TikTok costs, and the App Review blocker is gone. `web/lib/instagram.js`
+ships this and the fact-checker attaches reels today; the Swift extractor has not been
+ported yet and is still the capture one. Verified live on 2026-08-02 against three public
+reels: 6.2 MB and 9.9 MB `video/mp4`, no credential.
+[docs/SPIKE-instagram.md](docs/SPIKE-instagram.md)
 
 ## Two things to action
 
@@ -231,8 +246,10 @@ arm is strictly cheaper and less fragile than the one below it:
    One HTTPS call, no media on the device.
 2. **Can we get at the media file?** (TikTok, via its embed page) → `directMediaFetch`.
    Resolve, download, hand the bytes over.
-3. **Neither** (Instagram — login-walled) → `screenCapture`. Render the embed, record the
-   screen, transcribe. Slow, needs a recording permission, and still blocked.
+3. **Neither** → `screenCapture`. Render the embed, record the screen, transcribe. Slow,
+   needs a recording permission, and blocked on ReplayKit audio. Nothing should land here:
+   Instagram was the last platform on this arm and it turned out to belong on arm 2 (see
+   below), so the arm is carried only until that port lands.
 
 All three conform to `ClaimExtractor` and produce the same `ClaimContext`. Adding X or
 Facebook means answering those questions, not rediscovering the fork.
@@ -266,5 +283,5 @@ described. `SeerCapture` still has none, and still needs a device.
 
 - [Extraction pipeline](docs/EXTRACTION_PIPELINE.md) — architecture, per-platform status,
   the capture blocker in detail
-- [Instagram spike](docs/SPIKE-instagram.md) — what was tested, what it found, what unblocks it
+- [Instagram spike](docs/SPIKE-instagram.md) — what was tested, what it found, and the credential-free route that unblocked it
 - [Secrets](docs/SECRETS.md) — how keys are handled, and what that does and doesn't protect

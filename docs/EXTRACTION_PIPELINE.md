@@ -47,7 +47,7 @@ its platform's, so the two can't drift apart.
 |---|---|---|
 | YouTube | native ingestion | **Working.** Verified against the live API. |
 | TikTok | direct media fetch | **Working.** Resolve + download verified live 2026-07-28; the Gemini leg needs a key to confirm. |
-| Instagram | screen capture | **Blocked twice over** — ReplayKit audio, plus Meta app review. See [SPIKE-instagram.md](SPIKE-instagram.md). |
+| Instagram | screen capture (Swift) / direct media fetch (web) | **Unblocked, not yet ported.** The web app resolves reels anonymously and ships it; the Swift extractor is still the capture one and still unregistered. See [SPIKE-instagram.md](SPIKE-instagram.md). |
 
 Only platforms that can actually be served get registered. TikTok and YouTube need nothing
 but the Gemini key. `SeerPipelineBuilder` leaves Instagram out unless a capture source and
@@ -184,15 +184,16 @@ into a prompt. It is fenced in a `<caption>` delimiter, explicitly labelled as d
 the task is re-stated after it. That is mitigation, not a guarantee — the real protection
 is structural: nothing downstream acts on model output except to fact-check it.
 
-## 2a. The capture path — still there, still blocked
+## 2a. The capture path — still there, now avoidable
 
 `CaptureBasedExtractor`, `MediaCaptureSource`, `ScreenRecorderCaptureSource` and
-`AudioCaptureDiagnostic` are unchanged and still wired up. Instagram needs them, and the
-ReplayKit audio question is unresolved.
+`AudioCaptureDiagnostic` are unchanged and still wired up. Instagram is the only thing that
+needs them, and the ReplayKit audio question is unresolved.
 
-If Instagram ever gets a Meta token, **check whether it has an equivalent of TikTok's embed
-blob before investing anything further in capture.** The TikTok result is a reason to
-suspect the capture path is avoidable rather than fixable.
+It no longer has to be. Instagram turned out to be resolvable to a direct MP4 with no
+credential (see §3), which is the outcome this section was told to check for. **Do not
+spend anything further on the capture path** — port the resolver instead, and the whole arm
+goes away with the ReplayKit problem inside it.
 
 Two properties of that path worth preserving if it is revisited:
 
@@ -244,22 +245,27 @@ Two things the naive version gets wrong, handled in `WebViewEmbedRenderer`:
 The embed document is loaded against a real platform origin, not `about:blank`; platform
 embed scripts check the origin and refuse to hydrate otherwise.
 
-## 3. Instagram — spiked, blocked
+## 3. Instagram — resolved in the web app, unported in Swift
 
-Short version: **it does not behave like TikTok.** The legacy token-free oEmbed endpoint is
-dead (HTTP 500), the Graph replacement requires a Meta app token gated behind App Review,
-and anonymous instagram.com is login-walled. Full findings and what unblocks it:
-[SPIKE-instagram.md](SPIKE-instagram.md).
+Short version: **Instagram does not behave like TikTok, but it does not need to.** The
+legacy oEmbed endpoint is dead, the Graph replacement is gated behind Meta App Review, the
+embed iframe carries no media (re-tested 2026-08-02), and anonymous instagram.com is
+login-walled. What *is* open to a logged-out visitor is the query instagram.com's own web
+client runs: `POST /graphql/query` with a `doc_id` and the post's shortcode, carrying a
+CSRF token from a plain GET of the homepage. It returns `video_url`, and that CDN link
+serves the MP4 with no credential. Full findings: [SPIKE-instagram.md](SPIKE-instagram.md).
 
-The code is written and tested — `CaptureBasedExtractor.instagram` reuses the capture
-pipeline verbatim. It stays unregistered until someone obtains a token.
+**The web app ships this** — `web/lib/instagram.js`, same interface as `web/lib/tiktok.js`,
+so a reel and a TikTok are one kind of thing to the Gemini layer. No Meta token, no
+capture, no ReplayKit.
 
-Note that TikTok moving to `directMediaFetch` changed what "reuses the TikTok pipeline"
-means: Instagram is now the *only* platform on the capture arm, so that arm is carried
-entirely for a platform that is itself blocked on someone else's review queue. Before
-spending anything more on capture, re-run the spike and check whether Instagram's embed
-iframe exposes a media URL the way TikTok's does. If it does, the capture path can be
-retired outright rather than fixed.
+**The Swift app does not, yet.** `CaptureBasedExtractor.instagram` is still what exists and
+is still unregistered, which means Instagram remains the only platform on the capture arm
+and that arm is still carried for a platform that no longer needs it. The port is small and
+the shape is known: a `MediaURLResolver` alongside `TikTokMediaResolver`, then register
+Instagram as `directMediaFetch` and delete the capture path — including
+`WebViewEmbedRenderer`, `ScreenRecorderCaptureSource` and the ReplayKit audio problem with
+it. Do that before spending anything further on capture.
 
 ## Cross-cutting
 

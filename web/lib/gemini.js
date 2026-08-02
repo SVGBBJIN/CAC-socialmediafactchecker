@@ -12,6 +12,11 @@ import {
   downloadTikTokMedia,
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
+import {
+  findInstagramLinks,
+  resolveInstagramVideo,
+  downloadInstagramMedia,
+} from "./instagram.js";
 import { uploadFile, deleteFile } from "./gemini-files.js";
 import {
   modelHealth,
@@ -512,20 +517,68 @@ function canonicalYouTubeURL(videoID) {
 }
 
 /**
- * How many TikTok clips one request will fetch, however many are pasted.
+ * The platforms whose videos arrive as bytes rather than as a URL Gemini will fetch.
+ *
+ * Both entries are the same shape on purpose: a link finder, a resolver that turns a link
+ * into `{videoID, mediaURL, …}`, and a downloader. Everything below this line treats a
+ * clip as a clip — the difference between reading TikTok's embed state and running
+ * Instagram's shortcode query lives entirely in lib/tiktok.js and lib/instagram.js.
+ *
+ * YouTube is deliberately absent: Gemini fetches a watch URL itself, so a YouTube link
+ * costs us a string rather than a download. See `toGeminiContents`.
+ */
+export const CLIP_PROVIDERS = [
+  {
+    platform: "TikTok",
+    find: findTikTokLinks,
+    resolve: resolveTikTokVideo,
+    download: downloadTikTokMedia,
+  },
+  {
+    platform: "Instagram",
+    find: findInstagramLinks,
+    resolve: resolveInstagramVideo,
+    download: downloadInstagramMedia,
+  },
+];
+
+/**
+ * Every clip link in a piece of text, tagged with the platform that claimed it.
+ *
+ * First-seen order across providers, deduplicated by URL text — the same link is never
+ * offered twice even if two providers' patterns could both match it.
+ */
+export function findClipLinks(text, providers = CLIP_PROVIDERS) {
+  const found = [];
+  const seen = new Set();
+  for (const provider of providers) {
+    for (const link of provider.find(text)) {
+      if (seen.has(link)) continue;
+      seen.add(link);
+      found.push({ link, provider });
+    }
+  }
+  return found;
+}
+
+/**
+ * How many clips one request will fetch, however many are pasted.
  *
  * Unlike a YouTube link — which costs us a URL string and lets Gemini do the fetching —
- * every TikTok costs a download, a base64 copy and, past the inline ceiling, an upload.
- * Ten links in one message is ten of those. A cap keeps a single paste from becoming a
- * bandwidth and quota event; links past it get a note rather than silence.
+ * every TikTok or reel costs a download, a base64 copy and, past the inline ceiling, an
+ * upload. Ten links in one message is ten of those. A cap keeps a single paste from
+ * becoming a bandwidth and quota event; links past it get a note rather than silence.
+ *
+ * Counted across platforms, not per platform: the cost being capped is bytes moved in one
+ * request, and Gemini does not care which app they came from.
  */
-export const MAX_TIKTOK_ATTACHMENTS = 2;
+export const MAX_CLIP_ATTACHMENTS = 2;
 
 /** Captions are user-authored and can run long; this is context, not the payload. */
 const MAX_CAPTION_CHARS = 500;
 
 /**
- * Resolve every TikTok link in the conversation to a Gemini part.
+ * Resolve every clip link in the conversation to a Gemini part.
  *
  * Kept separate from `toGeminiContents` on purpose. That function is pure, synchronous
  * and covers the rule that actually costs money (attach each video exactly once); this
@@ -534,24 +587,28 @@ const MAX_CAPTION_CHARS = 500;
  * reasoning about turn structure.
  *
  * Nothing here throws for a video it couldn't get. A private, deleted or region-blocked
- * TikTok is a normal thing to paste, and failing the whole message over it would take the
+ * post is a normal thing to paste, and failing the whole message over it would take the
  * rest of the conversation down with it — so the failure is recorded and surfaces as a
  * note in the prompt, letting the model say *why* it can't discuss the clip.
+ *
+ * `resolveImpl` and `downloadImpl` override every provider's own pair, which is how tests
+ * stub the network; left unset, each link is handled by the platform that claimed it.
  *
  * @returns `{attachments, cleanup}` — `attachments` maps each link to either a Gemini
  *   part or an `error` string; `cleanup` removes anything uploaded to the Files API and
  *   must be awaited once the request is done.
  */
-export async function resolveTikTokParts(
+export async function resolveClipParts(
   messages,
   {
     apiKey,
     fetchImpl = fetch,
     signal,
     inlineByteLimit = INLINE_BYTE_LIMIT,
-    maxAttachments = MAX_TIKTOK_ATTACHMENTS,
-    resolveImpl = resolveTikTokVideo,
-    downloadImpl = downloadTikTokMedia,
+    maxAttachments = MAX_CLIP_ATTACHMENTS,
+    providers = CLIP_PROVIDERS,
+    resolveImpl = null,
+    downloadImpl = null,
     uploadImpl = uploadFile,
     deleteImpl = deleteFile,
   } = {},
@@ -572,60 +629,64 @@ export async function resolveTikTokParts(
   const seenLink = new Set();
   for (const message of messages) {
     if (message?.role === "assistant") continue;
-    for (const link of findTikTokLinks(String(message?.content ?? ""))) {
-      if (seenLink.has(link)) continue;
-      seenLink.add(link);
-      links.push(link);
+    for (const found of findClipLinks(String(message?.content ?? ""), providers)) {
+      if (seenLink.has(found.link)) continue;
+      seenLink.add(found.link);
+      links.push(found);
     }
   }
-  if (links.length === 0) return { attachments, cleanup };
+  if (links.length === 0) return { attachments, cleanup, providers };
 
-  // Resolving is metadata only — following a short link's redirect and reading the embed
-  // page — not the download itself, so every link is resolved at once rather than one
-  // after another. With the usual two-link paste this halves the wait before either
-  // download can even start.
+  // Resolving is metadata only — following a share link's redirect, reading an embed page
+  // or running Instagram's post query — not the download itself, so every link is resolved
+  // at once rather than one after another. With the usual two-link paste this halves the
+  // wait before either download can even start.
   const resolutions = await Promise.all(
-    links.map(async (link) => {
+    links.map(async ({ link, provider }) => {
       try {
-        return { link, resolved: await resolveImpl(link, { fetchImpl, signal }) };
+        const resolve = resolveImpl ?? provider.resolve;
+        return { link, provider, resolved: await resolve(link, { fetchImpl, signal }) };
       } catch (error) {
-        return { link, error: error?.message || "the video could not be fetched" };
+        return { link, provider, error: error?.message || "the video could not be fetched" };
       }
     }),
   );
 
   // Which distinct videos are worth downloading, decided in link order now that every
-  // link's video ID is known. A short link and the canonical URL it redirects to are the
+  // link's video ID is known. A share link and the canonical URL it redirects to are the
   // same video — caught here rather than by URL, because that equality is only knowable
   // after the redirect has been followed — so this is also where the cap is enforced,
-  // against distinct videos rather than distinct links.
+  // against distinct videos rather than distinct links. Keyed by platform as well as ID,
+  // since two platforms' ID spaces are unrelated and only look alike.
   const byVideoID = new Map();
   const toDownload = [];
-  for (const { link, resolved, error } of resolutions) {
+  for (const { link, provider, resolved, error } of resolutions) {
     if (error) {
-      attachments.set(link, { error });
+      attachments.set(link, { platform: provider.platform, error });
       continue;
     }
-    const existing = byVideoID.get(resolved.videoID);
+    const key = `${provider.platform}:${resolved.videoID}`;
+    const existing = byVideoID.get(key);
     if (existing) {
       attachments.set(link, existing);
       continue;
     }
     if (byVideoID.size >= maxAttachments) {
       attachments.set(link, {
-        error: `only the first ${maxAttachments} TikTok video${
+        platform: provider.platform,
+        error: `only the first ${maxAttachments} ${provider.platform} video${
           maxAttachments === 1 ? "" : "s"
         } in a message are fetched`,
       });
       continue;
     }
-    const entry = { videoID: resolved.videoID, resolved };
-    byVideoID.set(resolved.videoID, entry);
+    const entry = { videoID: key, platform: provider.platform, provider, resolved };
+    byVideoID.set(key, entry);
     attachments.set(link, entry);
     toDownload.push(entry);
   }
 
-  if (signal?.aborted || toDownload.length === 0) return { attachments, cleanup };
+  if (signal?.aborted || toDownload.length === 0) return { attachments, cleanup, providers };
 
   // The downloads (and any upload past the inline limit) run together too — this is the
   // slow part of attaching a clip, and the part most worth overlapping. A failure is
@@ -634,7 +695,8 @@ export async function resolveTikTokParts(
   await Promise.all(
     toDownload.map(async (entry) => {
       try {
-        const { bytes, mimeType } = await downloadImpl(entry.resolved, { fetchImpl, signal });
+        const download = downloadImpl ?? entry.provider.download;
+        const { bytes, mimeType } = await download(entry.resolved, { fetchImpl, signal });
         if (bytes.length <= inlineByteLimit) {
           entry.part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
         } else {
@@ -648,24 +710,24 @@ export async function resolveTikTokParts(
     }),
   );
 
-  return { attachments, cleanup };
+  return { attachments, cleanup, providers };
 }
 
 /**
- * What the embed page told us about a clip, as a line of prompt context.
+ * What the platform told us about a clip, as a line of prompt context.
  *
  * The caption is worth passing on its own account: on short-form political content it is
  * frequently *the* claim, while the video is B-roll. Marked as the caption rather than
  * folded into the user's text, so the model can attribute it — the same distinction
  * `DirectMediaExtractor.mergeOnScreenText` draws on the Swift side.
  */
-function describeClip(resolved) {
+function describeClip(resolved, platform) {
   if (!resolved) return null;
   const facts = [];
   if (resolved.authorName) facts.push(`posted by ${resolved.authorName}`);
   if (resolved.duration) facts.push(`${Math.round(resolved.duration)}s`);
 
-  const header = `[Attached: the TikTok video from ${resolved.sourceURL}${
+  const header = `[Attached: the ${platform} video from ${resolved.sourceURL}${
     facts.length ? ` — ${facts.join(", ")}` : ""
   }.]`;
   if (!resolved.caption) return header;
@@ -681,9 +743,10 @@ function describeClip(resolved) {
  * watches the video itself — the same trick as the native-ingestion path in
  * GeminiVideoClient.swift, just without a dedicated transcription prompt.
  *
- * A TikTok link becomes the clip itself, because Gemini will not go and fetch one. The
- * bytes are obtained beforehand by `resolveTikTokParts`, whose result is passed in as
- * `tikTok`; without it, TikTok links are left as plain text and this function stays pure.
+ * A TikTok or Instagram link becomes the clip itself, because Gemini will not go and
+ * fetch one. The bytes are obtained beforehand by `resolveClipParts`, whose result is
+ * passed in as `clips`; without it, those links are left as plain text and this function
+ * stays pure.
  *
  * Two rules about which turns get media, both of which cost real money to get wrong:
  *
@@ -691,16 +754,16 @@ function describeClip(resolved) {
  *   rest of the conversation, so re-attaching it on a later turn — which the user does
  *   simply by quoting the link again, or which happens on every turn of a long thread
  *   about one video — makes Gemini ingest the same video several times in a single
- *   request and bills for each. For TikTok the bill is larger still: the bytes are in the
- *   request body, so a re-attach re-uploads the whole clip.
+ *   request and bills for each. For an attached clip the bill is larger still: the bytes
+ *   are in the request body, so a re-attach re-uploads the whole thing.
  * - **Never on an assistant turn.** A `model` turn is a record of what Gemini said, not
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
  */
-export function toGeminiContents(messages, { tikTok, attachVideos = true } = {}) {
+export function toGeminiContents(messages, { clips, attachVideos = true } = {}) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
-  const clips = tikTok?.attachments ?? new Map();
+  const attachments = clips?.attachments ?? new Map();
 
   return messages.map((message) => {
     const isUser = message.role !== "assistant";
@@ -728,19 +791,22 @@ export function toGeminiContents(messages, { tikTok, attachVideos = true } = {})
         parts.push({ file_data: { file_uri: canonicalYouTubeURL(id) } });
       }
 
-      for (const link of findTikTokLinks(text)) {
-        const entry = clips.get(link);
+      // The same provider list the links were resolved with, so a caller that narrowed or
+      // replaced it doesn't end up scanning for links its resolver never went and got.
+      for (const { link, provider } of findClipLinks(text, clips?.providers ?? CLIP_PROVIDERS)) {
+        const entry = attachments.get(link);
         if (!entry) continue;
+        const platform = entry.platform ?? provider.platform;
         if (entry.error) {
           // Most reasons are already written as sentences; don't punctuate them twice.
           const reason = entry.error.replace(/\.\s*$/, "");
-          notes.push(`[The TikTok video at ${link} could not be attached: ${reason}.]`);
+          notes.push(`[The ${platform} video at ${link} could not be attached: ${reason}.]`);
           continue;
         }
         if (attachedClips.has(entry.videoID)) continue;
         attachedClips.add(entry.videoID);
         parts.push(entry.part);
-        const context = describeClip(entry.resolved);
+        const context = describeClip(entry.resolved, platform);
         if (context) notes.push(context);
       }
     }
@@ -1057,7 +1123,7 @@ export async function* streamChat({
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS,
   attachMedia = true,
-  tikTokOptions = {},
+  clipOptions = {},
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
@@ -1067,30 +1133,34 @@ export async function* streamChat({
   sleep,
 }) {
   const deadline = new StreamDeadline(signal);
-  let tikTok = null;
+  let clips = null;
 
   try {
-    // TikTok clips are fetched before the first model call, not per model: the bytes are
-    // the same whichever model answers, and re-downloading them on each fall-through
-    // would turn one slow link into four.
+    // Clips are fetched before the first model call, not per model: the bytes are the same
+    // whichever model answers, and re-downloading them on each fall-through would turn one
+    // slow link into four.
     if (attachMedia) {
       // Announced before it starts, because it is the longest silence in the request and
-      // the one the user has least reason to expect: resolving an embed, downloading a
-      // clip and uploading it can run for tens of seconds before a single token exists to
-      // show for it. Unreported, that is indistinguishable from the app having hung.
-      if (messages.some((m) => m?.role !== "assistant" && findTikTokLinks(String(m?.content ?? "")).length > 0)) {
+      // the one the user has least reason to expect: resolving a post, downloading a clip
+      // and uploading it can run for tens of seconds before a single token exists to show
+      // for it. Unreported, that is indistinguishable from the app having hung.
+      if (
+        messages.some(
+          (m) => m?.role !== "assistant" && findClipLinks(String(m?.content ?? "")).length > 0,
+        )
+      ) {
         yield { type: "stage", stage: "attaching" };
       }
-      tikTok = await resolveTikTokParts(messages, {
+      clips = await resolveClipParts(messages, {
         apiKey,
         fetchImpl,
         signal,
-        ...tikTokOptions,
+        ...clipOptions,
       });
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { tikTok, attachVideos: attachMedia });
+    const contents = toGeminiContents(messages, { clips, attachVideos: attachMedia });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
@@ -1242,7 +1312,7 @@ export async function* streamChat({
     // Runs on every exit — including the consumer abandoning the generator, which calls
     // `.return()` and lands here. Anything we put in the project's Files quota comes back
     // out, whether or not the answer arrived.
-    await tikTok?.cleanup();
+    await clips?.cleanup();
   }
 }
 
