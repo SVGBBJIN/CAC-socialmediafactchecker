@@ -41,6 +41,12 @@ export function config(env = process.env) {
     // `thinkingBudgetTokens` — the smaller of the two is what gets sent. 0 means "use the
     // same budget as the answering round".
     toolRoundThinkingBudgetTokens: nonNegativeInt(env.TOOL_ROUND_THINKING_BUDGET_TOKENS, 1024),
+    // How long the final answer is held back before the reader sees any of it, so a
+    // mid-stream stop (Gemini ending a turn on RECITATION or SAFETY, which it does without
+    // warning) can fail over to the next model in silence instead of leaving a broken turn
+    // on screen. 0, the default, means no delay and no change from today's behaviour — see
+    // `DEFAULT_ANSWER_HOLD_MS` in lib/gemini.js for what turning it on costs and buys.
+    answerHoldMs: nonNegativeInt(env.ANSWER_HOLD_MS, 0),
   };
 }
 

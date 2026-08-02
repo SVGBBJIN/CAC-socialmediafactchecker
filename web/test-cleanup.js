@@ -152,6 +152,31 @@ test("each list item is its own claim", () => {
   assert.equal(text, "- Coverage fell [1]\n- Fatalities were flat [1]");
 });
 
+test("a line break between two markers is not a marker stack", () => {
+  // Both passes have to leave this alone, and they used to fail differently. The
+  // per-sentence pass reads one line at a time and never saw the pair; the renumber pass
+  // reads the whole answer at once, matched them as one group across the blank line, and
+  // rewrote them joined — deleting the paragraph break, moving [1] onto a sentence that
+  // never cited it, and leaving the sentence that did with nothing.
+  const { text } = cleanCitations("Summary line [2].\n\n[1] settles the rest.", FOUR());
+  assert.equal(text, "Summary line [1].\n\n[2] settles the rest.");
+
+  const flat = cleanCitations("The rate fell [1]\n[1]", FOUR(), { renumber: false });
+  assert.equal(flat.text, "The rate fell [1]\n[1]");
+  assert.equal(flat.removed.duplicateMarkers, 0);
+});
+
+test("markers side by side on one line are still one stack", () => {
+  // The other half of the same rule: a space or a tab between brackets is the stack this
+  // pass exists to collapse, and narrowing the pattern to line-internal whitespace must
+  // not have cost that.
+  const { text, removed } = cleanCitations("The figure was revised [1] [1]\t[2].", FOUR(), {
+    renumber: false,
+  });
+  assert.equal(text, "The figure was revised [1][2].");
+  assert.equal(removed.duplicateMarkers, 1);
+});
+
 /* ---------------- renumbering ---------------- */
 
 test("renumbering makes the markers ascend and closes the gaps", () => {
