@@ -103,12 +103,37 @@ let pendingFollowup = null; // { entryId, question, error? }
 /* ---------------------------------------------------------------- storage */
 
 function loadLibrary() {
+  let parsed;
   try {
-    const parsed = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    parsed = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "[]");
   } catch {
     return [];
   }
+  if (!Array.isArray(parsed)) return [];
+
+  // A `running` entry only means anything while the `runCheck` that set it is still
+  // alive, and that call dies with the page. Left as `running` across a reload, an entry
+  // is stuck for good: no request is coming back to finish it, `selectedDoneEntry()`
+  // returns null so there is no follow-up path either, and there is no retry button —
+  // that exists only on the error card. So any entry still `running` when the library is
+  // read back in was interrupted, not merely slow, and is reported as such: this is what
+  // gives it a retry button and an honest status instead of a permanent "Checking…".
+  let reaped = false;
+  for (const entry of parsed) {
+    if (entry?.status === "running") {
+      entry.status = "error";
+      entry.error = "This check was interrupted — the page was closed or reloaded before it finished.";
+      reaped = true;
+    }
+  }
+  if (reaped) {
+    try {
+      localStorage.setItem(LIBRARY_KEY, JSON.stringify(parsed));
+    } catch {
+      // Best-effort — the array returned below is already fixed either way.
+    }
+  }
+  return parsed;
 }
 
 function persistLibrary() {

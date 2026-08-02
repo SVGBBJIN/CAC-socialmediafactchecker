@@ -7,32 +7,56 @@ There are **two surfaces in this repository, and they are not equals.**
 
 | | What it is | State |
 |---|---|---|
-| **`web/`** | The fact-checker: link → transcript → research → cited verdict | **The product.** Ships, and is where the work happens |
-| **`Sources/`** | A Swift extraction pipeline: link → `ClaimContext` | **Extraction only.** No fact-check layer exists on this side |
+| **`web/`** | The fact-checker: link → transcript → research → cited verdict | **The product, and the canonical implementation.** Ships, and is where the work happens |
+| **`Sources/`** | A Swift extraction pipeline: link → `ClaimContext` | **Frozen — reference only.** No fact-check layer exists on this side, and it no longer receives ported fixes |
 
 Read that table before reading anything else, because the obvious assumption — that the
 Swift package is the app and `web/` is a viewer for it — is backwards.
 
-## The two are diverging, and that is the main thing to fix
+## `web/` is canonical. `Sources/` is frozen, not a second target.
 
-`web/lib/tiktok.js`, `web/lib/gemini-files.js` and their neighbours are ports of the Swift
-files they name in their header comments. Nothing keeps the pairs in step, and they have
-not stayed in step:
+This used to be an open question — "decide which surface is canonical before adding to
+either" — and every time it went unanswered, the same thing happened: a fix landed in
+`web/`, and `Sources/` either got the same fix rediscovered from scratch later, worse the
+first time, or never got it at all.
 
-- **The web side is where fixes land.** Over the last three months: 42 commits to `web/`,
-  12 to `Sources/`.
-- **Fixes get made twice.** The Files API poll ramp was written for `web/` on 2026-07-30
-  and then rediscovered from scratch for Swift on 2026-08-02 — initially in the worse
-  shape of the two, bounding the wait by a poll count where the web version had already
-  worked out that a varying interval needs a wall-clock bound. Both now use the clock.
-- **Swift lagged on things that mattered.** A missing CDN host allowlist, an unbounded
-  media download, and a model chain that gave up on `503`. All three were correct in
-  `web/` first and have now been backported (see below); nothing stops the next three.
+- **The web side is where fixes land.** Over three months: 42 commits to `web/`, 12 to
+  `Sources/`.
+- **Fixes got made twice.** The Files API poll ramp was written for `web/` on 2026-07-30
+  and rediscovered from scratch for Swift on 2026-08-02 — initially in the worse shape of
+  the two, bounding the wait by a poll count where the web version had already worked out
+  that a varying interval needs a wall-clock bound.
+- **Swift lagged on things that mattered, repeatedly.** A missing CDN host allowlist, an
+  unbounded media download, and a model chain that gave up on `503` were all correct in
+  `web/` first and have since been backported. A fourth instance turned up in the very
+  next audit pass — `Sources/SeerCore/Media/TikTokMediaResolver.swift`'s `TikTokURL` has no
+  host check on its short-link/video-ID parsing where `web/lib/tiktok.js`'s
+  `isTikTokHost`-gated equivalents do — and this one has been **deliberately left
+  unfixed**, not overlooked. See the next paragraph for why, and
+  [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md#sources-is-frozen) for exactly
+  what that means for anyone reading `Sources/` and wondering whether a gap like this one
+  is a bug to report or a known, accepted property of frozen code.
 
-**Decide which surface is canonical before adding to either.** If the Swift app is still a
-target, ports should now run web → Swift, because that is the direction the reference
-implementation actually points. If it isn't, deleting `Sources/` removes the whole problem
-and roughly 5,700 lines with it.
+**The decision: `web/` is canonical, full stop, and `Sources/` is frozen rather than a
+second target for incremental parity patches.** Three months of evidence all point the
+same direction, and continuing to patch `Sources/` piecemeal every time an audit finds the
+next divergence is the pattern that produced this section in the first place. Concretely,
+frozen means:
+
+- **No more parity ports into `Sources/`.** A fix that lands in `web/` stays in `web/`.
+  `Sources/` is not owed a backport, and a gap between the two — like the `TikTokURL` one
+  above — is not evidence of neglect; it is the expected shape of a frozen codebase next to
+  one that keeps moving.
+- **`Sources/` still compiles and its own tests still pass**, and a change that breaks
+  that is still a regression worth fixing — frozen is not the same as abandoned to bit rot.
+  What stops is *porting web's new work in*, not maintaining what is already there.
+- **Deleting `Sources/`** — named as the other branch of this decision before it was made,
+  and it removes the whole class of problem along with roughly 5,700 lines — **is not done
+  by this pass.** That is a repository-shape change with its own blast radius (the Swift
+  app, `SeerUIDemo`, the whole `docs/EXTRACTION_PIPELINE.md` narrative) and belongs to
+  whoever owns that decision, not to an audit fixing bugs. Freezing is the reversible half
+  of that choice; deleting is the irreversible half, and is worth doing deliberately once
+  the frozen state has been lived with for a while, not as a side effect of a bug-fix pass.
 
 ## Where things stand
 
@@ -89,9 +113,10 @@ post's shortcode, carrying a CSRF token from a plain GET of the homepage, return
 including `video_url`. That CDN link then serves the MP4 to an anonymous request.
 
 So a reel costs what a TikTok costs, and the App Review blocker is gone. `web/lib/instagram.js`
-ships this and the fact-checker attaches reels today; the Swift extractor has not been
-ported yet and is still the capture one. Verified live on 2026-08-02 against three public
-reels: 6.2 MB and 9.9 MB `video/mp4`, no credential.
+ships this and the fact-checker attaches reels today; the Swift extractor is still the
+capture one, unregistered, and — now that `Sources/` is frozen (see above) — stays that
+way rather than being ported. Verified live on 2026-08-02 against three public reels:
+6.2 MB and 9.9 MB `video/mp4`, no credential.
 [docs/SPIKE-instagram.md](docs/SPIKE-instagram.md)
 
 ## What the media path refuses to do
@@ -105,9 +130,10 @@ pipeline chosen by somebody else — reachable by anyone who can share a link.
 `Platform.allowedMediaHosts` lists the CDN families per platform and
 `allowsMediaHost(_:)` suffix-matches against a dot boundary, so `tiktokcdn.com.evil.test`
 is not a match for `tiktokcdn.com`. An empty list means *fetch nothing*, never *fetch
-anything*: a platform that hasn't declared its CDNs — Instagram, until the port lands —
-cannot download at all. A rejected host is named in the error, so a new CDN family is a
-one-line fix rather than an investigation.
+anything*: a platform that hasn't declared its CDNs — Instagram, on the Swift side, and
+permanently now that `Sources/` is frozen rather than pending a port — cannot download at
+all. A rejected host is named in the error, so a new CDN family is a one-line fix rather
+than an investigation.
 
 **It will not buffer an oversized clip into memory.** The ceiling used to be checked on
 `data.count` after the transport had already built the whole body, which cannot stop the
@@ -327,15 +353,18 @@ arm is strictly cheaper and less fragile than the one below it:
 All three conform to `ClaimExtractor` and produce the same `ClaimContext`. Adding X or
 Facebook means answering those questions, not rediscovering the fork.
 
-**Arm 3 is dead and should be deleted.** TikTok moved off it, which is what unblocked
-TikTok; Instagram — its last remaining occupant — turned out to belong on arm 2, and
-`web/lib/instagram.js` proves it by shipping that route today. What survives is
+**Arm 3 is dead in principle and permanent in practice.** TikTok moved off it, which is
+what unblocked TikTok; Instagram — its last remaining occupant — turned out to belong on
+arm 2, and `web/lib/instagram.js` proves it by shipping that route today. What survives is
 `SeerCapture/` plus `CaptureBasedExtractor`: an unregistered extractor for a platform that
 no longer needs it, carrying the unresolved ReplayKit audio bug, in the one module CI
 cannot even compile (everything there is behind `#if os(iOS)`, so Linux builds it to
-nothing). Porting the Instagram resolver retires the arm and the bug together. Until then,
-**do not spend anything on capture** — including tuning it; work done there is work spent
-on code the port deletes.
+nothing). Porting the Instagram resolver would retire the arm and the bug together — and
+used to be the recommendation here. It no longer is: `Sources/` is frozen (see above), and
+that port is exactly the kind of web → Swift work the freeze stops. So this arm is not
+scheduled to go anywhere; it stays as dead weight in a frozen module rather than being
+retired. **Do not spend anything on capture** either way — including tuning it; nothing
+there is getting less dead, only less maintained.
 
 ## Tests
 

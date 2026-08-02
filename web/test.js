@@ -11,6 +11,7 @@ import {
   shouldFallThrough,
   errorMessage,
   toGeminiContents,
+  findClipLinks,
   youTubeVideoID,
   findYouTubeVideoIDs,
   isInvalidKeyFailure,
@@ -1825,6 +1826,47 @@ test("a video is attached at its first mention, not on every turn that quotes it
   assert.equal(contents[0].parts.filter((p) => p.inline_data).length, 1);
   assert.equal(contents[1].parts.length, 1, "an assistant turn never carries media");
   assert.equal(contents[2].parts.length, 1, "re-quoting does not re-send the clip");
+});
+
+test("findClipLinks returns true first-seen order across platforms, not provider order", () => {
+  // The old implementation looped providers on the outside and links on the inside, so
+  // every TikTok link in a message sorted ahead of every Instagram link regardless of
+  // where either actually sat in the text — "first-seen" in name only. This pins the
+  // fix directly, on the exact shape from the audit finding.
+  const instagramLink = "https://www.instagram.com/reel/ABCDEfghij1/";
+  const tiktokLinks = [1, 2].map((n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`);
+  const text = `first ${instagramLink} then ${tiktokLinks[0]} and ${tiktokLinks[1]}`;
+
+  assert.deepEqual(
+    findClipLinks(text).map((f) => f.link),
+    [instagramLink, ...tiktokLinks],
+  );
+});
+
+test("the attachment cap is enforced in the order links actually appear, not provider order", async () => {
+  // Same bug, seen from where it actually bit: MAX_CLIP_ATTACHMENTS is enforced in
+  // findClipLinks's order, so provider-major ordering meant the platform visited later
+  // in CLIP_PROVIDERS could lose its slot to a link the user pasted *after* it. An
+  // Instagram link pasted first, followed by two TikToks, used to have its own Instagram
+  // link refused — the one link that was actually first — while both TikToks (pasted
+  // later) went through.
+  const instagramLink = "https://www.instagram.com/reel/ABCDEfghij1/";
+  const tiktokLinks = [1, 2].map((n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`);
+  const messages = [{ role: "user", content: `${instagramLink} ${tiktokLinks[0]} ${tiktokLinks[1]}` }];
+
+  const clips = await resolveClipParts(messages, {
+    maxAttachments: 2,
+    resolveImpl: async (link) => resolvedClip({ videoID: link, sourceURL: link }),
+    downloadImpl: async () => ({ bytes: Buffer.from("x"), mimeType: "video/mp4" }),
+  });
+
+  assert.equal(clips.attachments.get(instagramLink).error, undefined, "the first link typed keeps its slot");
+  assert.equal(clips.attachments.get(tiktokLinks[0]).error, undefined, "the second link typed keeps its slot");
+  assert.match(
+    clips.attachments.get(tiktokLinks[1]).error,
+    /only the first 2 TikTok videos/,
+    "the link typed last is the one turned away, whichever platform it happens to be",
+  );
 });
 
 test("only the first few clips in one message are fetched", async () => {

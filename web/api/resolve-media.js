@@ -8,8 +8,19 @@
 // YouTube needs no round trip: a video ID is enough to build an embed URL, so the client
 // resolves that itself and never calls this route for it.
 
-import { resolveTikTokVideo, isTikTokHost, TikTokError } from "../lib/tiktok.js";
-import { resolveInstagramVideo, isInstagramHost, InstagramError } from "../lib/instagram.js";
+import {
+  resolveTikTokVideo,
+  isTikTokHost,
+  TikTokError,
+  ALLOWED_MEDIA_HOSTS as TIKTOK_MEDIA_HOSTS,
+} from "../lib/tiktok.js";
+import {
+  resolveInstagramVideo,
+  isInstagramHost,
+  InstagramError,
+  ALLOWED_MEDIA_HOSTS as INSTAGRAM_MEDIA_HOSTS,
+} from "../lib/instagram.js";
+import { hostAllowed } from "../lib/media-fetch.js";
 import { authorize, config, GuardError } from "../lib/guard.js";
 
 function sendJSON(res, status, payload, headers = {}) {
@@ -71,7 +82,8 @@ export default async function handler(req, res) {
     return sendJSON(res, 400, { error: "Not a valid URL." });
   }
 
-  const resolve = isTikTokHost(hostname)
+  const isTikTok = isTikTokHost(hostname);
+  const resolve = isTikTok
     ? resolveTikTokVideo
     : isInstagramHost(hostname)
       ? resolveInstagramVideo
@@ -81,9 +93,27 @@ export default async function handler(req, res) {
       error: "Only TikTok and Instagram links resolve to a direct media URL.",
     });
   }
+  // Same list `downloadTikTokMedia`/`downloadInstagramMedia` fetch bytes against — see the
+  // README's media-path guarantees. This route never fetches the media itself, but it does
+  // hand the URL straight to the browser's own <video> tag, and that URL is read out of an
+  // undocumented third-party blob the same way the downloaders' input is. Skipping the
+  // check here would leave this the one exit where the platform's own stated invariant —
+  // "will not [point at] a host the platform doesn't serve from" — doesn't actually hold.
+  const allowedHosts = isTikTok ? TIKTOK_MEDIA_HOSTS : INSTAGRAM_MEDIA_HOSTS;
 
   try {
     const resolved = await resolve(url);
+    let mediaHost;
+    try {
+      mediaHost = new URL(resolved.mediaURL).hostname;
+    } catch {
+      console.error(`[resolve-media] resolver returned a media URL that isn't a URL: ${resolved.mediaURL}`);
+      return sendJSON(res, 502, { error: "Could not resolve that video." });
+    }
+    if (!hostAllowed(mediaHost, allowedHosts)) {
+      console.error(`[resolve-media] refusing to hand back an unexpected media host: ${mediaHost}`);
+      return sendJSON(res, 502, { error: "Could not resolve that video." });
+    }
     return sendJSON(res, 200, {
       mediaURL: resolved.mediaURL,
       mimeType: resolved.mimeType,

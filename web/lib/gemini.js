@@ -8,12 +8,14 @@
 
 import {
   findTikTokLinks,
+  isTikTokLink,
   resolveTikTokVideo,
   downloadTikTokMedia,
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
 import {
   findInstagramLinks,
+  isInstagramLink,
   resolveInstagramVideo,
   downloadInstagramMedia,
 } from "./instagram.js";
@@ -531,32 +533,53 @@ export const CLIP_PROVIDERS = [
   {
     platform: "TikTok",
     find: findTikTokLinks,
+    matches: isTikTokLink,
     resolve: resolveTikTokVideo,
     download: downloadTikTokMedia,
   },
   {
     platform: "Instagram",
     find: findInstagramLinks,
+    matches: isInstagramLink,
     resolve: resolveInstagramVideo,
     download: downloadInstagramMedia,
   },
 ];
 
+/** Same shape `findTikTokLinks`/`findInstagramLinks` scan with, kept in step by hand. */
+const CLIP_URL_PATTERN = /https?:\/\/[^\s<>"]+/g;
+
 /**
  * Every clip link in a piece of text, tagged with the platform that claimed it.
  *
- * First-seen order across providers, deduplicated by URL text — the same link is never
- * offered twice even if two providers' patterns could both match it.
+ * True first-seen order — the order the links actually appear in the message, across every
+ * platform at once — deduplicated by URL text so the same link is never offered twice even
+ * if two providers' patterns could both match it.
+ *
+ * This used to call each provider's own `find(text)` in turn and concatenate the results,
+ * which reads as first-seen but isn't: every TikTok link in a message sorted ahead of every
+ * Instagram link regardless of which was actually pasted first, because the *providers*
+ * were visited in order, not the *text*. That mattered downstream — `resolveClipParts`
+ * enforces `MAX_CLIP_ATTACHMENTS` in the order this function returns, so whichever platform
+ * lost the provider-ordering lottery was the one told "only the first N videos… are
+ * fetched", regardless of what the user actually typed first.
+ *
+ * So this scans the raw text once, in the same shape each provider's own finder does
+ * (`CLIP_URL_PATTERN`, then trim the trailing punctuation prose leaves on a URL — "watch
+ * this: <url>." — same as `findTikTokLinks`/`findInstagramLinks`), and asks each provider
+ * in turn whether *that one candidate* is theirs. A link is unambiguous by host, so which
+ * provider is asked first only matters when none of them claim it.
  */
 export function findClipLinks(text, providers = CLIP_PROVIDERS) {
   const found = [];
   const seen = new Set();
-  for (const provider of providers) {
-    for (const link of provider.find(text)) {
-      if (seen.has(link)) continue;
-      seen.add(link);
-      found.push({ link, provider });
-    }
+  for (const match of String(text).matchAll(CLIP_URL_PATTERN)) {
+    const candidate = match[0].replace(/[.,;:!?)\]]+$/, "");
+    if (seen.has(candidate)) continue;
+    const provider = providers.find((p) => p.matches(candidate));
+    if (!provider) continue;
+    seen.add(candidate);
+    found.push({ link: candidate, provider });
   }
   return found;
 }

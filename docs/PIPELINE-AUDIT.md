@@ -22,8 +22,9 @@ Findings are ordered by what they cost a reader, not by how hard they are to fix
 first three are all on the same seam — the server does careful work to salvage a damaged
 turn, and the browser throws the result away.
 
-**1–3 are fixed** (see the status line under each). 4–7 and everything below are still
-open.
+**1–5 and 7 are fixed; 6 was resolved by decision rather than by patch** (see the status
+line under each). Everything under "Smaller things" and "What looked wrong and isn't" is
+still open or, respectively, already known-fine.
 
 ---
 
@@ -117,6 +118,14 @@ renders the list, but it means the distinction `sourcesFrame` computes has no co
 
 ## 4. A check interrupted by a reload is stuck at "Checking…" forever — `web/public/app.js:658, 842`
 
+> **Fixed.** The reap now happens in `loadLibrary()` itself, the single place the library
+> is read back from storage: any entry still `status: "running"` at load time is one whose
+> `runCheck` died with the previous page, so it's converted to `status: "error"` with a
+> clear interruption message, and the fix is persisted immediately so the stale
+> `running` state doesn't keep reappearing on every subsequent load. That gives it back the
+> retry button and an honest sidebar label — both of which only ever existed on the error
+> card — instead of a `Checking…` that nothing will ever resolve.
+
 `runCheck` sets `entry.status = "running"` and calls `persistLibrary()` before the request
 starts, so an in-flight check is written to `localStorage` with that status. If the tab is
 closed or reloaded mid-check, the boot sequence at line 843 handles only `done` and
@@ -136,6 +145,19 @@ A one-line sweep at load (`running` → `error`, with a "this check was interrup
 restores the retry path.
 
 ## 5. `findClipLinks` is provider-major, not first-seen — `web/lib/gemini.js:551`
+
+> **Fixed.** `findClipLinks` now scans the raw text once — the same `URL_PATTERN` and
+> trailing-punctuation trim each provider's own finder already applied — and classifies
+> each candidate, in the order it actually appears, by asking every provider's own
+> `matches()` predicate (`isTikTokLink`/`isInstagramLink`, already exported and already
+> tested) whether that one link is theirs. `MAX_CLIP_ATTACHMENTS` is still enforced by
+> `resolveClipParts` in exactly the same way — a running counter over the returned list —
+> but the list itself is now true first-seen order across every platform at once, so the
+> two links that keep their slot are whichever two the user actually typed first,
+> regardless of which platform either one is. Two new tests pin this directly: one on
+> `findClipLinks` reproducing the audit's own repro, and one end-to-end through
+> `resolveClipParts` confirming an Instagram link pasted first — previously the one that
+> lost its slot to two later TikToks — now keeps it.
 
 The docstring promises "first-seen order across providers". The implementation loops
 providers on the outside and links on the inside, so every TikTok in a message sorts ahead
@@ -157,6 +179,15 @@ match index rather than by provider.
 
 ## 6. Swift `TikTokURL` does no host check; its JS counterpart does — `Sources/SeerCore/Media/TikTokMediaResolver.swift:214, 241`
 
+> **Not fixed — left as documented, intentional drift.** This finding is the fourth
+> instance of the same pattern (host allowlist, download cap, `503` handling, and now
+> this), and it's what tipped "decide which surface is canonical" from an open question in
+> the README into an actual decision: `web/` is canonical, `Sources/` is frozen, and a
+> backport here would be exactly the incremental parity-patch this repo has now stopped
+> doing. See the README's *"`web/` is canonical. `Sources/` is frozen"* section and
+> `docs/EXTRACTION_PIPELINE.md#sources-is-frozen`. The gap below is real and stays exactly
+> as found.
+
 `web/lib/tiktok.js` opens both URL predicates with a host check
 (`if (!isTikTokHost(url.hostname)) return null`, line 141; `isTikTokHost(host) && …`,
 line 181). The Swift port has neither:
@@ -173,10 +204,19 @@ Inside the pipeline this is unreachable — `DirectMediaExtractor.canHandle` gat
 `Platform.detect(from:) == .tikTok` first. But both functions are `public`, `TikTokURL` is
 documented as a standalone URL-shape helper, and `YouTubeExtractor.videoID` right next door
 carries an explicit comment about exactly this hazard ("it's `public static` and documented
-for standalone use, so it can't lean on that"). The web version is the correct one; backport
-it.
+for standalone use, so it can't lean on that"). The web version is the correct one — and,
+per the note above, that correctness stays a fact about `web/lib/tiktok.js` rather than
+becoming a change to `Sources/`.
 
 ## 7. `/api/resolve-media` returns the CDN URL without the host allowlist — `web/api/resolve-media.js:86`
+
+> **Fixed.** The handler now runs the resolved `mediaURL`'s hostname through the same
+> `hostAllowed()` check the downloaders use, against the same per-platform
+> `ALLOWED_MEDIA_HOSTS` list (imported directly from `lib/tiktok.js`/`lib/instagram.js`
+> rather than duplicated), before ever handing it back to the browser. Verified live
+> against a real TikTok video end to end: the route resolved and returned a
+> `tiktokcdn-us.com` URL successfully, confirming the new check doesn't disturb the
+> legitimate path — only an unexpected host would now be refused with a 502.
 
 The README's first media-path guarantee is *"It will not fetch a host the platform doesn't
 serve from"*, and both downloaders enforce it (`tiktok.js:422`, `instagram.js:577`) on the
