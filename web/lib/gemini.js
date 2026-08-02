@@ -1026,6 +1026,55 @@ export const OVERLOAD_SWEEPS = 2;
 export const OVERLOAD_BACKOFF_MS = 800;
 
 /**
+ * How long the answering round's output is held back before it starts reaching the reader,
+ * in milliseconds — or 0, the default, to send every token as it arrives with no delay at
+ * all. An operator setting, not a default: see `ANSWER_HOLD_MS` in `web/.env.example`.
+ *
+ * What this buys: right now, once the model has streamed even one token of the final
+ * answer, that round cannot fail over to another model — a mid-stream stop is unrecoverable
+ * by the time it happens, because the reader has already seen the start of an answer no
+ * other model can now continue. And a mid-stream stop is not a rare shape of failure here.
+ * Gemini ends a turn on `RECITATION` or `SAFETY` without warning, and this app's own design
+ * makes that more likely than in an ordinary chat: `find_in_page` returns page passages
+ * *verbatim* for the model to quote, and quoting a source closely is indistinguishable, to
+ * a recitation filter, from reciting one.
+ *
+ * Turned on, the answering round's frames — the `model` announcement and every `delta` —
+ * are buffered rather than yielded, for as long as `answerHoldMs` since the first one
+ * arrived. If the stream fails inside that window, nothing has reached the reader yet, so
+ * `walkChain` treats it exactly like a model that failed before answering at all: the
+ * buffer is dropped and the next model in the chain is tried, in silence. Past the window
+ * — or once the answer finishes, however short it turns out to be — everything held is
+ * flushed at once and every frame after that goes straight through, unbuffered, same as
+ * today. A failure after the window is unrecoverable exactly as it is now; the setting
+ * only widens the recoverable window, it does not remove the seam.
+ *
+ * **Not every mid-stream failure is retried, even inside the window.** An idle timeout —
+ * the model going silent rather than stopping outright — is excluded and stays exactly as
+ * terminal as it is today, because of a property of `StreamDeadline` this feature does not
+ * change: one deadline is shared across the whole message turn, its `AbortController` is
+ * one-shot, and once the idle timer fires it, every later fetch on that same deadline —
+ * including the next model this feature would otherwise try — is handed an
+ * already-aborted signal and answers with nothing rather than a real attempt. Only a
+ * stream that ends on its own account — RECITATION, SAFETY, a malformed frame — is safe to
+ * retry, because nothing about the shared deadline needed it to fail.
+ *
+ * Deliberately scoped to the answering round alone — see the call site in `streamChat` —
+ * not the earlier tool-calling rounds. Those rounds' own output is UI preamble the app
+ * already discourages the model from writing at length, so there is little to protect and
+ * delaying it would only add latency before the first search is dispatched, which is the
+ * wait this app works hardest elsewhere to cut down.
+ *
+ * The cost of turning it on is exactly `answerHoldMs` added to the wait before the first
+ * token of the answer appears, on every turn, whether or not that turn was ever going to
+ * fail. That is a real, guaranteed delay paid to insure against a failure that — outside
+ * heavy `find_in_page` use — is not the common case, which is why this defaults to off:
+ * making that trade is an operator's call to make deliberately, not a default to absorb
+ * silently into every request.
+ */
+export const DEFAULT_ANSWER_HOLD_MS = 0;
+
+/**
  * The model's own turn, reassembled from the stream so it can be sent back verbatim.
  *
  * Verbatim is the whole point, and the reason this is a class rather than a string join.
@@ -1130,6 +1179,7 @@ export async function* streamChat({
   health = modelHealth,
   budgetPressure = 0,
   overloadSweeps = OVERLOAD_SWEEPS,
+  answerHoldMs = DEFAULT_ANSWER_HOLD_MS,
   sleep,
 }) {
   const deadline = new StreamDeadline(signal);
@@ -1220,6 +1270,11 @@ export async function* streamChat({
         thinkingBudgetTokens: roundThinkingBudget,
         mediaResolution: media ? mediaResolution : null,
         overloadSweeps,
+        // Only the round that has no more tools to call is writing the verdict — see
+        // `DEFAULT_ANSWER_HOLD_MS`. A tool round's own frames are never held: there is
+        // little in them worth protecting, and holding them would add latency in front of
+        // the searches instead of the answer.
+        answerHoldMs: toolsThisRound ? 0 : answerHoldMs,
         // Only forwarded when the caller supplied one, so `streamRound` keeps its own
         // default rather than being handed `undefined` and losing it.
         ...(sleep ? { sleep } : {}),
@@ -1235,7 +1290,7 @@ export async function* streamChat({
           // the UI badge flicker for no reason. Keyed on the reason as well as the model,
           // so a round that lands on the same model for a *different* reason — quota now
           // rather than budget a moment ago — still updates what the badge says.
-          const key = `${frame.model} ${frame.reason ?? ""}`;
+          const key = `${frame.model} ${frame.reason ?? ""}`;
           if (key === announced) continue;
           announced = key;
         }
@@ -1342,6 +1397,7 @@ async function* streamRound({
   thinkingBudgetTokens = 0,
   mediaResolution = null,
   overloadSweeps = OVERLOAD_SWEEPS,
+  answerHoldMs = 0,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   let lastError = null;
@@ -1529,7 +1585,7 @@ async function* streamRound({
     health.markHealthy(model);
 
     const degraded = model !== plan.preferred;
-    yield {
+    const modelFrame = {
       type: "model",
       model,
       preferred: plan.preferred,
@@ -1546,20 +1602,73 @@ async function* streamRound({
         : { label: "", note: "" }),
     };
 
+    // `answerHoldMs` — see its doc comment for what this buys and why it defaults to off.
+    // Disabled, `flushed` starts true and every frame below is yielded exactly as it always
+    // was: the model frame, then each delta as it arrives, with no buffering at all.
+    const holdEnabled = answerHoldMs > 0;
+    let held = [];
+    let flushed = !holdEnabled;
+    const windowStart = Date.now();
+
+    if (flushed) yield modelFrame;
+    else held.push(modelFrame);
+
     // The stall clock starts here and is pushed back by every chunk that arrives, so
     // a long answer is fine and a dead connection is not.
     deadline.arm(idleTimeoutMs);
     try {
-      yield* parseSSE(response.body, deadline, idleTimeoutMs);
+      for await (const frame of parseSSE(response.body, deadline, idleTimeoutMs)) {
+        if (flushed) {
+          yield frame;
+          continue;
+        }
+        held.push(frame);
+        if (Date.now() - windowStart >= answerHoldMs) {
+          flushed = true;
+          yield* held;
+          held = [];
+        }
+      }
     } catch (error) {
       if (deadline.callerAborted) return void (abandoned = true);
+      // Checked before the unflushed fallback below, and deliberately excluded from it:
+      // `deadline` is one `StreamDeadline` shared across the whole message turn (every
+      // round, every model in every round's chain — see `streamChat`), and its
+      // `AbortController` is one-shot. Once the idle timer fires and aborts it, that
+      // abortedness is permanent for the rest of the turn: the *next* model's fetch is
+      // handed the same already-aborted `deadline.signal`, and `parseSSE`'s first check
+      // (`if (deadline.signal.aborted) return;`) then ends its stream having yielded
+      // nothing at all — a silent, contentless "success" rather than a real answer. So an
+      // idle timeout stays exactly as terminal as it always was, held or not; only a
+      // stream that ends on its own account (RECITATION, SAFETY, a malformed frame) is
+      // safe to retry silently, because nothing about the shared deadline needed it to
+      // fail in the first place.
       if (deadline.timedOut) {
         throw new GeminiError(
           `Gemini stopped sending data for ${Math.round(idleTimeoutMs / 1000)}s. Try again shortly.`,
           { status: 504, model, retryable: true },
         );
       }
+      if (!flushed) {
+        // Nothing in `held` has reached the reader — no model badge, no token of the
+        // answer, nothing — so silently trying the next model in the chain costs a few
+        // seconds and nothing else. This is the case `answerHoldMs` exists for: Gemini
+        // ending a stream on RECITATION or SAFETY, which it does without warning and
+        // often within the first line, because the answer is built out of verbatim quotes
+        // `find_in_page` was asked to return. Not an overload, so it must not be counted
+        // as one — see `allFull` below.
+        sawOther = true;
+        lastError = error;
+        continue;
+      }
       throw error;
+    }
+    // A short answer can finish before ever crossing the hold window — nothing failed,
+    // there was just never enough of it to trip the threshold. Whatever is still held gets
+    // shown now rather than lost.
+    if (!flushed) {
+      yield* held;
+      held = [];
     }
     // The stream is over, so the stall clock has nothing left to measure — and what comes
     // next is the tool round, which is *meant* to take seconds with no bytes arriving.

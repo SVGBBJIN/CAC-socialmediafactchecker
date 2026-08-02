@@ -136,6 +136,9 @@ export default async function handler(req, res) {
       // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
       // exactly as it was.
       budgetPressure: usage.pressure ?? 0,
+      // Off unless the operator opted in via ANSWER_HOLD_MS — see its doc comment in
+      // lib/guard.js and DEFAULT_ANSWER_HOLD_MS in lib/gemini.js for the trade it makes.
+      answerHoldMs: limits.answerHoldMs,
       signal: controller.signal,
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));

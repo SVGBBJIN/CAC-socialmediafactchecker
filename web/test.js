@@ -25,6 +25,7 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_BUDGET_TOKENS,
   DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS,
+  DEFAULT_ANSWER_HOLD_MS,
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
 } from "./lib/gemini.js";
@@ -333,6 +334,212 @@ test("a truncated answer reports where the tokens actually went, when Gemini say
     answerTokens: 1096,
     totalTokens: 4096,
   });
+});
+
+/* ---------------- answerHoldMs: recovering from a mid-stream stop ---------------- */
+
+test("ANSWER_HOLD_MS defaults to off", () => {
+  // A mid-stream RECITATION/SAFETY stop is terminal unless an operator opts in — see the
+  // doc comment on DEFAULT_ANSWER_HOLD_MS for the wait this trades for that recovery.
+  assert.equal(DEFAULT_ANSWER_HOLD_MS, 0);
+});
+
+test("held and unflushed, a mid-stream stop fails over to the next model in silence", async () => {
+  const tried = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["flaky", "steady"],
+      // Large enough that nothing in this synchronous test crosses it — the point is the
+      // failure lands with the buffer still unflushed, not that the clock runs out.
+      answerHoldMs: 60_000,
+      fetchImpl: async (url) => {
+        tried.push(url);
+        if (tried.length === 1) {
+          // A real RECITATION stop carries text first — the passage the model was quoting
+          // when the filter tripped — and this is exactly the shape that must never reach
+          // the reader: the delta is yielded into the hold buffer, and only the *next*
+          // pull discovers the stop and throws.
+          return sseResponse([frame("half a quoted", { finishReason: "RECITATION" })]);
+        }
+        return sseResponse([frame("the real answer")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2, "both models were tried");
+  const answer = answerFrames(frames);
+  assert.equal(answer[0].type, "model");
+  assert.equal(answer[0].model, "steady", "the reader is only ever told about the model that answered");
+  assert.deepEqual(
+    answer.filter((f) => f.type === "delta").map((f) => f.text),
+    ["the real answer"],
+    "nothing from the failed model reached the consumer",
+  );
+  assert.ok(
+    !frames.some((f) => JSON.stringify(f).includes("half a quoted")),
+    "the discarded model's text must not appear anywhere in the output, under any frame type",
+  );
+});
+
+test("an idle timeout is still terminal even inside the hold window — deadline is shared, not per model", async () => {
+  // `deadline` spans the whole message turn (see `streamChat`), and its `AbortController`
+  // is one-shot: once the idle timer fires it, that same signal is handed to whatever
+  // model this feature would otherwise try next, and a fetch given an already-aborted
+  // signal cannot make a real attempt. So this must behave exactly like the pre-existing
+  // "a stream that stalls mid-answer fails instead of hanging" test, unaffected by
+  // answerHoldMs — proving the hold buffer excludes this failure rather than mishandling
+  // it silently. Only one model is configured, so a wrongly "successful" silent retry
+  // would surface as a rejection anyway, but the point is the *reason*: this must reject
+  // with the idle-timeout message, not hang or answer with nothing.
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["m"],
+        idleTimeoutMs: 20,
+        answerHoldMs: 60_000,
+        fetchImpl: async (url, init) => ({
+          ok: true,
+          status: 200,
+          body: (async function* () {
+            yield encoder.encode(frame("stuck"));
+            await new Promise((_, reject) => {
+              init.signal.addEventListener("abort", () => reject(new Error("aborted")), {
+                once: true,
+              });
+            });
+          })(),
+        }),
+      }),
+    ),
+    (error) => error.status === 504 && /stopped sending data/.test(error.message),
+  );
+});
+
+test("a failure after the hold window has already flushed is terminal, same as today", async () => {
+  // The recoverable window is bounded, not unconditional — a stop that happens after the
+  // reader has already seen this model's output is exactly as unrecoverable as it always
+  // was. A tiny window guarantees the first chunk flushes immediately, well before the
+  // second one arrives and throws.
+  let calls = 0;
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["m"],
+        answerHoldMs: 1,
+        fetchImpl: async () => {
+          calls += 1;
+          return {
+            ok: true,
+            status: 200,
+            body: (async function* () {
+              const encoder = new TextEncoder();
+              yield encoder.encode(frame("already shown to the reader"));
+              // Give the 1ms hold window time to actually elapse and flush before the
+              // stop arrives, so this exercises the "already flushed" branch specifically.
+              await new Promise((r) => setTimeout(r, 10));
+              yield encoder.encode(frame("", { finishReason: "RECITATION" }));
+            })(),
+          };
+        },
+      }),
+    ),
+    /RECITATION/,
+  );
+  assert.equal(calls, 1, "no fallback once the reader has already seen this model's output");
+});
+
+test("a short answer that never crosses the hold window is still flushed in full", async () => {
+  // Nothing failed here — the answer just finished before answerHoldMs elapsed. The held
+  // buffer has to be flushed on natural completion, not only on the threshold firing mid-loop.
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      answerHoldMs: 60_000,
+      fetchImpl: async () => sseResponse([frame("a short, complete answer")]),
+    }),
+  );
+
+  const answer = answerFrames(frames);
+  assert.equal(answer[0].type, "model");
+  assert.equal(answer[0].model, "m");
+  assert.deepEqual(
+    answer.filter((f) => f.type === "delta").map((f) => f.text),
+    ["a short, complete answer"],
+  );
+});
+
+test("crossing the hold window mid-stream flushes what's held and streams the rest live", async () => {
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      idleTimeoutMs: 5_000,
+      // Short enough that the wait between chunks below reliably crosses it, long enough
+      // not to flush on the very first chunk — this is checking the mid-loop threshold
+      // branch, not the end-of-stream one the previous test already covers.
+      answerHoldMs: 15,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          const encoder = new TextEncoder();
+          yield encoder.encode(frame("held "));
+          await new Promise((r) => setTimeout(r, 30));
+          yield encoder.encode(frame("then live"));
+        })(),
+      }),
+    }),
+  );
+
+  const answer = answerFrames(frames);
+  assert.equal(answer[0].type, "model");
+  assert.deepEqual(
+    answer.filter((f) => f.type === "delta").map((f) => f.text),
+    ["held ", "then live"],
+    "both chunks arrive, in order, whichever side of the threshold they landed on",
+  );
+});
+
+test("tool-calling rounds are never held, only the round that writes the answer", async () => {
+  // A RECITATION-style stop is only worth insuring against on the round the reader actually
+  // sees finish — a tool round's own text is preamble the prompt already discourages, and
+  // holding it would add latency in front of the searches for nothing. Proven the same way
+  // "terminal, not a reason to try four more models" is proven above: by counting how many
+  // models actually got tried. If a tool round's hold were wrongly left on, this stop would
+  // be silently retried on "steady" instead of failing outright — that's the failure this
+  // test would catch.
+  const tools = [
+    { function_declarations: [{ name: "web_search", parameters: { type: "OBJECT", properties: {} } }] },
+  ];
+  let calls = 0;
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "k",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["flaky", "steady"],
+        answerHoldMs: 60_000,
+        tools,
+        toolRunner: async () => ({ response: { result: "ok" } }),
+        fetchImpl: async () => {
+          calls += 1;
+          return sseResponse([frame("about to search", { finishReason: "RECITATION" })]);
+        },
+      }),
+    ),
+    /RECITATION/,
+  );
+  assert.equal(calls, 1, "the tool round's hold must be 0, so this fails outright rather than silently retrying");
 });
 
 test("the API key travels as a header, never in the URL", async () => {
