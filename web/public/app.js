@@ -282,6 +282,10 @@ function dotClassFor(entry) {
 function statusLabel(entry) {
   if (entry.status === "running") return "Checking…";
   if (entry.status === "error") return "Failed";
+  // Same reasoning as `verdictHTML`: an incomplete turn that never reached a verdict must
+  // not be filed in the library under one. "Unclassified" would be a truthful label and a
+  // useless one — it reads as a property of the claim rather than of the check.
+  if (entry.incomplete && !entry.verdictKey) return entry.incomplete.label;
   return VERDICTS[entry.verdictKey]?.label ?? "Unclassified";
 }
 
@@ -471,6 +475,38 @@ function renderErrorCard(entry) {
   document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
 }
 
+/**
+ * The band saying an answer is less than a whole one.
+ *
+ * Sits between the text and the verdict because that is the order the two are read in: what
+ * it says, then how much of it there is, then what it concluded — and on an incomplete turn
+ * the third one is usually missing, which this is the explanation for.
+ */
+function incompleteHTML(incomplete) {
+  if (!incomplete) return "";
+  return `
+    <div class="notice ${escapeHTML(incomplete.kind)}" data-reveal>
+      <span class="notice-label">${escapeHTML(incomplete.label)}</span>
+      <span>${escapeHTML(incomplete.text)}</span>
+    </div>`;
+}
+
+/**
+ * The verdict badge, or nothing.
+ *
+ * Nothing when the turn is incomplete and no `VERDICT:` line was parsed off it — see the
+ * note in `runCheck`. A badge is the app asserting the check's finding, and there is no
+ * finding to assert when the answer stopped before it got to one.
+ */
+function verdictHTML(entry) {
+  if (entry.incomplete && !entry.verdictKey) return "";
+  const verdict = VERDICTS[entry.verdictKey] ?? VERDICTS.insufficient;
+  return `
+    <div class="badges">
+      <span class="badge verdict ${verdict.css}" data-reveal>${escapeHTML(verdict.label)}</span>
+    </div>`;
+}
+
 function sourcesHTML(sources) {
   if (!sources?.length) return "";
   return `
@@ -493,6 +529,7 @@ function threadHTML(entry) {
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(f.question)}</div>
           <div class="thread-a claim-text" data-reveal>${renderMarkdown(f.answer, f.sources)}</div>
+          ${incompleteHTML(f.incomplete)}
           ${sourcesHTML(f.sources)}
         </div>`,
     )
@@ -516,14 +553,12 @@ function threadHTML(entry) {
 }
 
 function renderResultCard(entry) {
-  const verdict = VERDICTS[entry.verdictKey] ?? VERDICTS.insufficient;
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
       <div class="claim-text" data-reveal>${renderMarkdown(entry.answer, entry.sources)}</div>
-      <div class="badges">
-        <span class="badge verdict ${verdict.css}" data-reveal>${escapeHTML(verdict.label)}</span>
-      </div>
+      ${incompleteHTML(entry.incomplete)}
+      ${verdictHTML(entry)}
       ${sourcesHTML(entry.sources)}
       ${threadHTML(entry)}
     </div>`;
@@ -557,9 +592,33 @@ function requestHeaders() {
   return headers;
 }
 
-/** Posts one turn to /api/chat and collects it into `{ answer, sources }`. Shared by a
- * fresh check and a follow-up — both are just different message histories over the same
- * stream contract. */
+/**
+ * Posts one turn to /api/chat and collects it into `{ answer, sources, incomplete }`.
+ * Shared by a fresh check and a follow-up — both are just different message histories over
+ * the same stream contract.
+ *
+ * ## An answer that arrived damaged is still an answer
+ *
+ * Two frames say a turn finished in a state the reader has to be told about, and both used
+ * to be dropped here.
+ *
+ * `truncated` means the model hit its output cap mid-sentence. `lib/gemini.js` emits it
+ * precisely because a cut-off fact-check "reads as a completed verdict, and the sentence it
+ * was cut off in is frequently the one carrying the citation" — so the one place that fact
+ * can reach a person is the one place it was being thrown away.
+ *
+ * `error` after text has already streamed is a stream that died part-way — Gemini ending
+ * its turn on RECITATION or SAFETY, which it does without warning. The server does real
+ * work for this case: `verified-chat.js` *holds* the failure, finishes the turn, sends the
+ * cleaned citations and the sources, and only then re-throws, so the surviving text stays
+ * checkable. Throwing on the frame unwound this function before it could return any of
+ * that, and the reader got a bare error card — the app discarding the evidence trail the
+ * server had just gone out of its way to preserve. So the error is recorded, the read
+ * stops, and whatever arrived is returned with it.
+ *
+ * An error with *no* text before it is unchanged: there is nothing to preserve, so it
+ * throws and the caller reports it as the whole outcome of the turn.
+ */
 async function streamChat(messages, { signal, onStage, onSearchCount } = {}) {
   const response = await fetch("/api/chat", {
     method: "POST",
@@ -585,13 +644,12 @@ async function streamChat(messages, { signal, onStage, onSearchCount } = {}) {
   let answer = "";
   let sources = [];
   let searchCount = 0;
+  let truncated = false;
+  let failure = null;
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) {
-      if (!answer) throw new Error("The connection closed before an answer arrived.");
-      break;
-    }
+    if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
     let boundary;
@@ -612,13 +670,52 @@ async function streamChat(messages, { signal, onStage, onSearchCount } = {}) {
       else if (frame.type === "break") answer += "\n\n";
       else if (frame.type === "answer") answer = frame.text;
       else if (frame.type === "search") onSearchCount?.(++searchCount);
+      else if (frame.type === "truncated") truncated = true;
       else if (frame.type === "sources") {
         if (!frame.provisional) sources = frame.sources;
-      } else if (frame.type === "error") throw new Error(frame.message);
+      } else if (frame.type === "error") failure = frame.message;
+    }
+
+    // The server sends `error` last and then closes, so there is nothing after it worth
+    // reading. Cancelling rather than draining releases the connection now.
+    if (failure) {
+      await reader.cancel().catch(() => {});
+      break;
     }
   }
 
-  return { answer, sources };
+  if (!answer.trim()) {
+    throw new Error(failure ?? "The connection closed before an answer arrived.");
+  }
+
+  return { answer, sources, incomplete: incompleteFrom({ truncated, failure }) };
+}
+
+/**
+ * Why an answer is less than a whole one, or null if it is whole.
+ *
+ * A single shape for the two ways a turn can arrive damaged, because the reader needs the
+ * same thing from both: the text above is not all of what was coming, and the sources under
+ * it are everything that was retrieved rather than everything that was cited.
+ */
+function incompleteFrom({ truncated, failure }) {
+  if (failure) {
+    // Most upstream messages are already written as sentences; don't punctuate them twice.
+    const reason = String(failure).trim().replace(/[.!?]+$/, "");
+    return {
+      kind: "interrupted",
+      label: "Interrupted",
+      text: `The model stopped part-way through this answer: ${reason}. What you can see is what arrived — the sources below are everything the check retrieved.`,
+    };
+  }
+  if (truncated) {
+    return {
+      kind: "truncated",
+      label: "Cut short",
+      text: "This answer ran into the model's output limit and stops mid-way, so the last point it was making — and any citation on it — is missing. The sources below are everything the check retrieved.",
+    };
+  }
+  return null;
 }
 
 function composeCheckPrompt(url) {
@@ -674,7 +771,7 @@ async function runCheck(url, existingId) {
   el.newCheckBtn.disabled = true;
 
   try {
-    const { answer, sources } = await streamChat([{ role: "user", content: prompt }], {
+    const { answer, sources, incomplete } = await streamChat([{ role: "user", content: prompt }], {
       signal: controller.signal,
       onStage: (frame) => {
         const status = document.getElementById("runStatus");
@@ -691,7 +788,13 @@ async function runCheck(url, existingId) {
     entry.rawAnswer = answer; // kept whole, VERDICT line included — history needs it verbatim
     entry.answer = text;
     entry.sources = sources;
-    entry.verdictKey = verdictKey ?? "insufficient";
+    entry.incomplete = incomplete;
+    // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
+    // would then stamp it "Insufficient evidence" — a finding, in the app's own voice, that
+    // the model never made and the reader has no way to tell from one it did. Left null when
+    // the turn is known to be incomplete; the notice above the card says what happened
+    // instead, which is the true answer to "why is there no verdict".
+    entry.verdictKey = verdictKey ?? (incomplete ? null : "insufficient");
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) renderResultCard(entry);
@@ -725,7 +828,7 @@ async function runFollowup(entry, question) {
   let settled = false;
 
   try {
-    const { answer, sources } = await streamChat([...historyFor(entry), { role: "user", content: question }], {
+    const { answer, sources, incomplete } = await streamChat([...historyFor(entry), { role: "user", content: question }], {
       signal: controller.signal,
       onStage: (frame) => {
         const status = document.getElementById("followupStatus");
@@ -733,7 +836,10 @@ async function runFollowup(entry, question) {
       },
     });
 
-    entry.followups.push({ question, answer, sources });
+    // Kept in the thread even when it came back damaged. A partial answer is text the model
+    // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
+    // so the next turn is not built on prose the reader was never told was cut off.
+    entry.followups.push({ question, answer, sources, incomplete });
     persistLibrary();
     renderLibrary(el.searchInput.value);
     settled = true;

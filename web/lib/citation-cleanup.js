@@ -63,8 +63,26 @@ function outsideCode(text, rewrite) {
   return out + rewrite(text.slice(start));
 }
 
-/** Markers, matched as whole groups so `[1, 2]` and `[1][2]` are both one thing. */
-const MARKER_GROUP = /\[\d+(?:\s*[,;]\s*\d+)*\](?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])*/g;
+/**
+ * Markers, matched as whole groups so `[1, 2]` and `[1][2]` are both one thing.
+ *
+ * The gap *between* two adjacent brackets is `[ \t]*`, not `\s*`, and that restriction is
+ * load-bearing rather than tidy. A group is rewritten by `formatMarkers`, which joins the
+ * numbers it kept with nothing between them — so whatever the pattern swallowed is what the
+ * rewrite deletes. Letting it swallow a newline meant the renumber pass (which, unlike the
+ * per-sentence pass, runs over the whole answer at once) read a marker ending one paragraph
+ * and a marker opening the next as one group, and emitted them joined:
+ *
+ *     "Summary line [2]\n\n[1] Some closing remark."
+ *   → "Summary line [1][2] Some closing remark."
+ *
+ * Three things wrong in one rewrite — the paragraph break gone, a marker hauled onto a
+ * sentence that never cited it, and the sentence that did cite it left bare — and all three
+ * are this file changing prose, which rule 2 above says it never does. Markers separated by
+ * a line break are separate citations on separate lines; only ones sitting side by side on
+ * one line are the stack this is meant to collapse.
+ */
+const MARKER_GROUP = /\[\d+(?:\s*[,;]\s*\d+)*\](?:[ \t]*\[\d+(?:\s*[,;]\s*\d+)*\])*/g;
 
 /**
  * Most sources one sentence may cite.

@@ -3,18 +3,37 @@
 A read of both pipelines for correctness bugs: `web/` (the fact-checker that ships) and
 `Sources/SeerCore/` (the Swift extraction pipeline). No code was changed.
 
-**Baseline.** `cd web && npm test` → 243 pass, 0 fail. `swift build` was not run: no Swift
-toolchain in this environment, so everything below about `Sources/` is from reading, and
-`SeerCapture`/`SeerUI` are unverified for the reason
+**Baseline.** `cd web && npm test` → 243 pass, 0 fail (245 after the fixes below).
+`swift build` was not run: no Swift toolchain in this environment, so everything below
+about `Sources/` is from reading, and `SeerCapture`/`SeerUI` are unverified for the reason
 [EXTRACTION_PIPELINE.md](EXTRACTION_PIPELINE.md#status) already gives.
+
+**On checking the browser fixes.** `npm test` covers `lib/` and `api/`; `public/app.js` has
+no test at all, and two of the three bugs below are in it — both of them cases where the
+code ran without erroring and simply showed the reader the wrong thing, which is exactly
+what a unit test of the server half cannot catch. They were verified by driving the real
+page in headless Chromium against a stubbed `/api/chat` that replays each frame sequence:
+truncated, interrupted-with-text, interrupted-with-nothing, and a clean turn as the
+control. That harness is not checked in — it needs a browser the repo doesn't currently
+depend on — but the frame fixtures it uses are written out in §2 and §3 and are cheap to
+rebuild.
 
 Findings are ordered by what they cost a reader, not by how hard they are to fix. The
 first three are all on the same seam — the server does careful work to salvage a damaged
 turn, and the browser throws the result away.
 
+**1–3 are fixed** (see the status line under each). 4–7 and everything below are still
+open.
+
 ---
 
 ## 1. Citation cleanup deletes prose between markers — `web/lib/citation-cleanup.js:249`
+
+> **Fixed.** `MARKER_GROUP`'s inter-bracket separator is now `[ \t]*` rather than `\s*`, so
+> a group cannot span a line break. Regression tests in `test-cleanup.js`: *"a line break
+> between two markers is not a marker stack"* and *"markers side by side on one line are
+> still one stack"* — the second because narrowing the pattern must not cost the collapsing
+> the pass exists for.
 
 `cleanCitations` states three rules, and the second is *"Only ever change markers. The
 prose the model wrote comes out byte-identical apart from the markers and the whitespace a
@@ -45,6 +64,12 @@ inter-group separator is `[ \t]*` rather than `\s*`.
 
 ## 2. A partial answer and its sources are discarded when the turn ends in an error — `web/public/app.js:617`
 
+> **Fixed.** An `error` frame arriving after text has streamed is recorded rather than
+> thrown: the reader is cancelled, and `streamChat` returns `{answer, sources, incomplete}`
+> with the reason attached. An error with no text before it still throws, since there is
+> nothing to preserve. The card renders the surviving answer, its linked markers, an
+> `Interrupted` notice naming the upstream reason, and the sources under it.
+
 `verifiedChat` goes to real trouble here. When the stream dies after the model has written
 something — Gemini ending a turn on `RECITATION` or `SAFETY` mid-answer, which it does
 without warning — the error is *held* rather than thrown (`verified-chat.js:639`), the
@@ -67,6 +92,13 @@ decide — a turn that has text is a turn worth showing with the failure noted a
 it. Same for the abort path.
 
 ## 3. Truncation never reaches the reader — `web/public/app.js:610-617`
+
+> **Fixed.** `truncated` is tracked through the same `incomplete` channel as 2 and shown as
+> a `Cut short` notice. One knock-on worth naming: a cut-off answer never reaches its
+> `VERDICT:` line, and the old `?? "insufficient"` fallback then stamped it *Insufficient
+> evidence* — the app asserting a finding the model never made, indistinguishable from one
+> it did. The verdict badge and the sidebar label are now suppressed on an incomplete turn
+> that parsed no verdict; the notice explains the gap instead.
 
 `gemini.js:930` explains that a fact-check cut off mid-sentence "reads as a completed
 verdict, and the sentence it was cut off in is frequently the one carrying the citation",
