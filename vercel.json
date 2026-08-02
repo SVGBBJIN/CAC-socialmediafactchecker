@@ -6,7 +6,7 @@
     { "src": "web/public/**", "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/(chat|config)", "dest": "/web/api/$1.js" },
+    { "src": "/api/(chat|config|resolve-media)", "dest": "/web/api/$1.js" },
     { "src": "/", "dest": "/web/public/index.html" },
     { "src": "/(.*)", "dest": "/web/public/$1" }
   ]

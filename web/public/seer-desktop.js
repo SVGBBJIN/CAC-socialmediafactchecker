@@ -19,6 +19,42 @@
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
 
+// How much faster than real time the TikTok pane plays back. There's no server-side
+// transcode in this pipeline (no ffmpeg step anywhere in the repo) — the cheap, correct
+// substitute for "a sped up version of the video" is the browser's own playbackRate on
+// the same MP4 the fact-check itself watches, not a second encoded file to keep in sync.
+const VIDEO_PLAYBACK_RATE = 1.5;
+
+// Mirrors `youTubeVideoID` in web/lib/gemini.js. Kept separate rather than shared: that
+// module is server-only (it also drives the Gemini attachment path), and duplicating this
+// one small regex-based parser is cheaper than wiring a shared module across the boundary.
+function youTubeVideoID(urlString) {
+  let url;
+  try {
+    url = new URL(urlString);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase().replace(/^(www|m|mobile|vm|vt)\./, "");
+  const isYouTube =
+    host === "youtube.com" || host === "youtu.be" || host === "youtube-nocookie.com" || host.endsWith(".youtube.com");
+  if (!isYouTube) return null;
+
+  const isValidID = (id) => /^[A-Za-z0-9_-]{11}$/.test(id);
+  const segments = url.pathname.split("/").filter(Boolean);
+
+  if (host === "youtu.be") return segments[0] && isValidID(segments[0]) ? segments[0] : null;
+
+  const queryID = url.searchParams.get("v");
+  if (queryID && isValidID(queryID)) return queryID;
+
+  const videoPathPrefixes = new Set(["shorts", "embed", "live", "v"]);
+  if (segments.length > 1 && videoPathPrefixes.has(segments[0].toLowerCase())) {
+    return isValidID(segments[1]) ? segments[1] : null;
+  }
+  return null;
+}
+
 const VERDICTS = {
   contradicted: { label: "Contradicted", css: "bad" },
   disputed: { label: "Disputed", css: "warn" },
@@ -38,6 +74,10 @@ const el = {
   videoChip: document.getElementById("videoChip"),
   videoTitle: document.getElementById("videoTitle"),
   videoLink: document.getElementById("videoLink"),
+  videoThumb: document.getElementById("videoThumb"),
+  videoPlaceholder: document.getElementById("videoPlaceholder"),
+  videoPlayer: document.getElementById("videoPlayer"),
+  videoEmbed: document.getElementById("videoEmbed"),
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
@@ -46,6 +86,15 @@ const el = {
 let library = loadLibrary();
 let selectedId = library[0]?.id ?? null;
 let inFlight = null;
+// Resolved video-pane media, keyed by entry id: { kind: "tiktok"|"youtube", mediaURL,
+// videoID }. In-memory only — a TikTok CDN URL is signed and short-lived (see
+// lib/tiktok.js), so caching it in localStorage would just persist a URL that 404s on
+// the next visit. Re-resolved each time an entry is (re)selected instead.
+const mediaCache = new Map();
+// Bumped every time the video pane switches entries, so a slow /api/resolve-media
+// response for an entry the user has since navigated away from can't land in the pane
+// after the fact.
+let videoPaneToken = 0;
 // A follow-up in flight (or one that just failed), keyed to the entry it belongs to.
 // Not persisted: a reload finds the thread as it was after the last *finished* turn,
 // same as the chat UI drops an in-progress bubble on refresh.
@@ -253,6 +302,7 @@ function renderEmptyState() {
   el.videoChip.textContent = "No link yet";
   el.videoTitle.textContent = "Paste a link below to start a check.";
   el.videoLink.href = "#";
+  clearVideoMedia();
   el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check.</p></div>`;
 }
 
@@ -275,10 +325,105 @@ function startNewCheck() {
 
 /* ---------------------------------------------------------------- video pane */
 
+// Fallback while a video's real dimensions are still unknown (before the TikTok API
+// response lands, or before the <video> element has decoded enough to know its own
+// size). Most short-form content is vertical, so this is the least-wrong guess, but
+// `setVideoAspect` below always overrides it with the real ratio as soon as one is known.
+const DEFAULT_VIDEO_ASPECT = "9 / 16";
+
+/** Resizes the pane itself to the video's ratio, so nothing gets cropped or letterboxed
+ * once the real size is known — object-fit: contain (see the CSS) only has to cover the
+ * brief gap before that happens. */
+function setVideoAspect(ratio) {
+  el.videoThumb.style.aspectRatio = ratio || DEFAULT_VIDEO_ASPECT;
+}
+
+/** Back to the play-icon placeholder — no video element holding stale media or playing. */
+function clearVideoMedia() {
+  el.videoPlayer.pause();
+  el.videoPlayer.removeAttribute("src");
+  el.videoPlayer.load();
+  el.videoPlayer.hidden = true;
+  el.videoEmbed.src = "";
+  el.videoEmbed.hidden = true;
+  el.videoPlaceholder.hidden = false;
+  setVideoAspect(DEFAULT_VIDEO_ASPECT);
+}
+
+function showVideoElement(media) {
+  el.videoPlaceholder.hidden = true;
+  // TikTok's own reported width/height, if the API returned one — corrected below by
+  // `loadedmetadata` against what the browser actually decoded, which is authoritative
+  // even when the API's numbers are missing or wrong.
+  if (media.width && media.height) setVideoAspect(`${media.width} / ${media.height}`);
+  el.videoPlayer.src = media.mediaURL;
+  el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
+  el.videoPlayer.hidden = false;
+  el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
+}
+
+/** Shorts are vertical, everything else on YouTube is 16:9 — there's no dimension field
+ * to read the way TikTok's embed state has one, so the URL shape is the only signal. */
+function youTubeAspectRatio(urlString) {
+  try {
+    return new URL(urlString).pathname.toLowerCase().includes("/shorts/") ? "9 / 16" : "16 / 9";
+  } catch {
+    return "16 / 9";
+  }
+}
+
+function showYouTubeEmbed(videoID, aspect) {
+  el.videoPlaceholder.hidden = true;
+  setVideoAspect(aspect);
+  // youtube-nocookie.com: this is a fact-check tool, not a place that should be dropping
+  // YouTube's regular tracking cookies on every pasted link.
+  el.videoEmbed.src = `https://www.youtube-nocookie.com/embed/${videoID}?rel=0`;
+  el.videoEmbed.hidden = false;
+}
+
+async function loadTikTokMedia(entry, token) {
+  const cached = mediaCache.get(entry.id);
+  if (cached?.kind === "tiktok") {
+    if (token === videoPaneToken) showVideoElement(cached);
+    return;
+  }
+  try {
+    const response = await fetch("/api/resolve-media", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ url: entry.url }),
+    });
+    if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
+    const { mediaURL, width, height } = await response.json();
+    if (!mediaURL) return;
+    const media = { kind: "tiktok", mediaURL, width, height };
+    mediaCache.set(entry.id, media);
+    if (token === videoPaneToken) showVideoElement(media);
+  } catch {
+    // Network hiccup or the passphrase dialog intercepting — the rest of the pane (title,
+    // link, and the fact-check itself) doesn't depend on this succeeding.
+  }
+}
+
 function renderVideoPane(entry) {
   el.videoChip.textContent = entry.platform;
   el.videoTitle.textContent = entry.title;
   el.videoLink.href = entry.url;
+
+  const token = ++videoPaneToken;
+  clearVideoMedia();
+
+  if (entry.platform === "TikTok") {
+    loadTikTokMedia(entry, token);
+    return;
+  }
+
+  const videoID = youTubeVideoID(entry.url);
+  if (entry.platform === "YouTube" && videoID) {
+    const aspect = youTubeAspectRatio(entry.url);
+    mediaCache.set(entry.id, { kind: "youtube", videoID, aspect });
+    showYouTubeEmbed(videoID, aspect);
+  }
 }
 
 /* ---------------------------------------------------------------- claim card */
@@ -673,6 +818,15 @@ el.linkInput.addEventListener("keydown", (event) => {
 
 el.linkInput.addEventListener("input", updateComposerMode);
 el.searchInput.addEventListener("input", () => renderLibrary(el.searchInput.value));
+
+// Fires once the browser has actually decoded the video's dimensions — overrides
+// whatever `setVideoAspect` guessed from the API/URL with the real ratio, so the pane
+// never stays letterboxed or cropped once playback is possible.
+el.videoPlayer.addEventListener("loadedmetadata", () => {
+  if (el.videoPlayer.videoWidth && el.videoPlayer.videoHeight) {
+    setVideoAspect(`${el.videoPlayer.videoWidth} / ${el.videoPlayer.videoHeight}`);
+  }
+});
 
 el.passForm.addEventListener("submit", () => {
   const value = el.passInput.value.trim();
