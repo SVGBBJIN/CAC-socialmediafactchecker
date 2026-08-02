@@ -31,6 +31,7 @@ const VERDICT_LINE = /\n?VERDICT:\s*(contradicted|disputed|corroborated|insuffic
 const el = {
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
+  newCheckBtn: document.getElementById("newCheckBtn"),
   libList: document.getElementById("libList"),
   searchInput: document.getElementById("searchInput"),
   claimsPane: document.getElementById("claimsPane"),
@@ -245,6 +246,31 @@ function selectEntry(id) {
   if (entry?.status === "done") renderResultCard(entry);
   else if (entry?.status === "error") renderErrorCard(entry);
   updateComposerMode();
+}
+
+/** The un-started state: nothing selected, video pane and claims pane both blank. */
+function renderEmptyState() {
+  el.videoChip.textContent = "No link yet";
+  el.videoTitle.textContent = "Paste a link below to start a check.";
+  el.videoLink.href = "#";
+  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check.</p></div>`;
+}
+
+/**
+ * Deselects whatever's open so the entry bar falls back to "Check" — the explicit escape
+ * hatch from follow-up mode. Without it, starting a new check while a result is on
+ * screen only works by remembering the no-space rule; this makes it a single click that
+ * needs no rule at all.
+ */
+function startNewCheck() {
+  if (inFlight) return; // Same guard as switching library items mid-run.
+  selectedId = null;
+  pendingFollowup = null;
+  el.linkInput.value = "";
+  renderLibrary(el.searchInput.value);
+  renderEmptyState();
+  updateComposerMode();
+  el.linkInput.focus();
 }
 
 /* ---------------------------------------------------------------- video pane */
@@ -495,6 +521,7 @@ async function runCheck(url, existingId) {
   const controller = new AbortController();
   inFlight = controller;
   el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
 
   try {
     const { answer, sources } = await streamChat([{ role: "user", content: prompt }], {
@@ -528,6 +555,7 @@ async function runCheck(url, existingId) {
   } finally {
     inFlight = null;
     el.checkBtn.disabled = false;
+    el.newCheckBtn.disabled = false;
     updateComposerMode();
   }
 }
@@ -543,6 +571,7 @@ async function runFollowup(entry, question) {
   const controller = new AbortController();
   inFlight = controller;
   el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
   let settled = false;
 
   try {
@@ -570,6 +599,7 @@ async function runFollowup(entry, question) {
     if (settled) pendingFollowup = null;
     inFlight = null;
     el.checkBtn.disabled = false;
+    el.newCheckBtn.disabled = false;
     if (selectedId === entry.id) renderResultCard(entry);
     updateComposerMode();
   }
@@ -632,6 +662,8 @@ el.checkBtn.addEventListener("click", () => {
   if (url) runCheck(url);
 });
 
+el.newCheckBtn.addEventListener("click", startNewCheck);
+
 el.linkInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -657,7 +689,7 @@ if (selectedId) {
     else if (entry.status === "error") renderErrorCard(entry);
   }
 } else {
-  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check.</p></div>`;
+  renderEmptyState();
 }
 updateComposerMode();
 loadServerConfig();

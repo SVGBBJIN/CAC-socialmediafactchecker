@@ -60,6 +60,26 @@
   .sidebar-header .mark svg { width: 100%; height: 100%; }
   .sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); }
 
+  .new-check {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
+  .new-check:hover { border-color: var(--accent); color: var(--accent); }
+  .new-check:hover svg { color: var(--accent); }
+  .new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .new-check:disabled { opacity: 0.5; cursor: default; }
+
   .search {
     width: 100%;
     padding: 9px 12px;
@@ -346,6 +366,10 @@
         <div class="mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg></div>
         <div class="wordmark">Library</div>
       </div>
+      <button type="button" class="new-check" id="newCheckBtn">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        New check
+      </button>
       <input class="search" id="searchInput" placeholder="Search checks…" />
       <ul class="lib-list" id="libList"></ul>
     </aside>
