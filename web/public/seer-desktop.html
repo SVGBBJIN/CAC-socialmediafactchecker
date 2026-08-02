@@ -279,6 +279,31 @@
   }
   .retry-button:hover { border-color: var(--accent); color: var(--accent); }
 
+  /* ---------- Follow-up thread ---------- */
+  .thread {
+    border-top: 1px solid var(--border);
+    margin-top: 16px; padding-top: 16px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .thread-item { display: flex; flex-direction: column; gap: 8px; }
+  .thread-q {
+    align-self: flex-start;
+    font-size: 12.5px; color: var(--ink);
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 7px 13px;
+  }
+  .thread-a.claim-text { font-size: 14.5px; margin: 0; }
+  .thread-error { font-size: 12.5px; color: var(--bad); }
+  .thread-pending { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-dim); }
+  .thread-spinner {
+    width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: thread-spin 0.8s linear infinite;
+  }
+  @keyframes thread-spin { to { transform: rotate(360deg); } }
+
   .note {
     padding: 10px 24px;
     color: #666d7a; font-family: var(--font-body);
@@ -309,7 +334,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .sources, .seal-check { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .sources, .seal-check, .thread-spinner { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
