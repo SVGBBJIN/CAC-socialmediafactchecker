@@ -83,13 +83,13 @@ Sources/SeerCapture/       iOS-only: WKWebView + RPScreenRecorder + diagnostic
 Sources/SeerUI/            SwiftUI progress animation + its observable model
 Sources/SeerUIDemo/        Runnable harness for the above — no key, no network
 Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
-web/                       Chat UI — static front end, Gemini key held server-side
+web/                       Library UI — static front end, Gemini key held server-side
 ```
 
-## Chat UI
+## Library UI
 
-`web/` is a chat interface over Gemini: static front end, one server route that holds the
-key. No build step, no dependencies.
+`web/` is a fact-checking library interface over Gemini: static front end, one server
+route that holds the key. No build step, no dependencies.
 
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY

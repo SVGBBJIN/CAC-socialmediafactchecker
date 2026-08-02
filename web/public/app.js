@@ -1,86 +1,169 @@
-// Chat front end. Holds conversations in localStorage and talks to /api/chat.
+// Library UI. Same /api/chat and /api/config the chat front end uses — no separate
+// backend, no verdict schema. A link pasted here becomes a fact-check user turn exactly
+// like a pasted link in the chat UI: the server detects it and attaches the video itself
+// (see gemini.js's URL_PATTERN scan), so this file's job is presentation, not extraction.
 //
-// Note what is absent: there is no API key here, and no code path that could obtain
-// one. The server sends tokens, never credentials.
+// There is no per-claim verdict from the server — `verified-chat.js` returns one narrated,
+// cited answer, not a claims array. Rather than fabricate badges from unstructured prose,
+// the outgoing message asks the model to end its answer with one machine-readable line
+// (`VERDICT: …`), which is parsed off and rendered as the badge, then stripped from what's
+// shown. Everything else in the card — the analysis text, the sources — is exactly what the
+// chat UI would have shown, just laid out for one link instead of a conversation.
+//
+// A finished check isn't a dead end: the same entry bar doubles as a follow-up composer
+// once a result is on screen. Sending a follow-up replays the original prompt and answer
+// as history (`historyFor`) so the model is continuing one conversation, not starting cold
+// — exactly what the chat UI already does across turns, just anchored to one link instead
+// of scrolling.
 
-const STORAGE_KEY = "seer.chat.conversations.v1";
-const ACTIVE_KEY = "seer.chat.active.v1";
-const PASSPHRASE_KEY = "seer.chat.pass";
+const LIBRARY_KEY = "seer.library.v1";
+const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
+
+// How much faster than real time the video pane plays back. There's no server-side
+// transcode in this pipeline (no ffmpeg step anywhere in the repo) — the cheap, correct
+// substitute for "a sped up version of the video" is the browser's own playbackRate on
+// the same MP4 the fact-check itself watches, not a second encoded file to keep in sync.
+const VIDEO_PLAYBACK_RATE = 1.5;
+
+// Mirrors `youTubeVideoID` in web/lib/gemini.js. Kept separate rather than shared: that
+// module is server-only (it also drives the Gemini attachment path), and duplicating this
+// one small regex-based parser is cheaper than wiring a shared module across the boundary.
+function youTubeVideoID(urlString) {
+  let url;
+  try {
+    url = new URL(urlString);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase().replace(/^(www|m|mobile|vm|vt)\./, "");
+  const isYouTube =
+    host === "youtube.com" || host === "youtu.be" || host === "youtube-nocookie.com" || host.endsWith(".youtube.com");
+  if (!isYouTube) return null;
+
+  const isValidID = (id) => /^[A-Za-z0-9_-]{11}$/.test(id);
+  const segments = url.pathname.split("/").filter(Boolean);
+
+  if (host === "youtu.be") return segments[0] && isValidID(segments[0]) ? segments[0] : null;
+
+  const queryID = url.searchParams.get("v");
+  if (queryID && isValidID(queryID)) return queryID;
+
+  const videoPathPrefixes = new Set(["shorts", "embed", "live", "v"]);
+  if (segments.length > 1 && videoPathPrefixes.has(segments[0].toLowerCase())) {
+    return isValidID(segments[1]) ? segments[1] : null;
+  }
+  return null;
+}
+
+const VERDICTS = {
+  contradicted: { label: "Contradicted", css: "bad" },
+  disputed: { label: "Disputed", css: "warn" },
+  corroborated: { label: "Corroborated", css: "good" },
+  insufficient: { label: "Insufficient evidence", css: "muted" },
+};
+
+const VERDICT_LINE = /\n?VERDICT:\s*(contradicted|disputed|corroborated|insufficient(?:\s+evidence)?)\.?\s*$/i;
 
 const el = {
-  app: document.getElementById("app"),
-  conversations: document.getElementById("conversations"),
-  messages: document.getElementById("messages"),
-  emptyState: document.getElementById("empty-state"),
-  composer: document.getElementById("composer"),
-  input: document.getElementById("input"),
-  send: document.getElementById("send"),
-  stop: document.getElementById("stop"),
-  hint: document.getElementById("composer-hint"),
-  title: document.getElementById("chat-title"),
-  modelBadge: document.getElementById("model-badge"),
-  newChat: document.getElementById("new-chat"),
-  toggleSidebar: document.getElementById("toggle-sidebar"),
-  statusDot: document.getElementById("status-dot"),
-  statusText: document.getElementById("status-text"),
+  linkInput: document.getElementById("linkInput"),
+  checkBtn: document.getElementById("checkBtn"),
+  newCheckBtn: document.getElementById("newCheckBtn"),
+  libList: document.getElementById("libList"),
+  searchInput: document.getElementById("searchInput"),
+  claimsPane: document.getElementById("claimsPane"),
+  videoChip: document.getElementById("videoChip"),
+  videoTitle: document.getElementById("videoTitle"),
+  videoLink: document.getElementById("videoLink"),
+  videoThumb: document.getElementById("videoThumb"),
+  videoPlaceholder: document.getElementById("videoPlaceholder"),
+  videoPlayer: document.getElementById("videoPlayer"),
+  videoEmbed: document.getElementById("videoEmbed"),
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
 };
 
-let conversations = load();
-let activeId = localStorage.getItem(ACTIVE_KEY);
+let library = loadLibrary();
+let selectedId = library[0]?.id ?? null;
 let inFlight = null;
-let serverConfig = { requiresPassword: false, apiKeyConfigured: true, maxInputChars: 8000, maxTurns: 20 };
-// What the pill shows: the last `model` frame, or the server's degradation snapshot from
-// /api/config before any answer has arrived. Held here rather than read back off the DOM
-// so re-rendering the message list can't lose it.
-let modelState = null;
+// Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
+// videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
+// lib/tiktok.js and lib/instagram.js), so caching it in localStorage would just persist a
+// URL that 404s on the next visit. Re-resolved each time an entry is (re)selected instead.
+const mediaCache = new Map();
+// Bumped every time the video pane switches entries, so a slow /api/resolve-media
+// response for an entry the user has since navigated away from can't land in the pane
+// after the fact.
+let videoPaneToken = 0;
+// A follow-up in flight (or one that just failed), keyed to the entry it belongs to.
+// Not persisted: a reload finds the thread as it was after the last *finished* turn,
+// same as the chat UI drops an in-progress bubble on refresh.
+let pendingFollowup = null; // { entryId, question, error? }
 
-/* ---------------- storage ---------------- */
+/* ---------------------------------------------------------------- storage */
 
-function load() {
+function loadLibrary() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+    const parsed = JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? "[]");
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-function persist() {
+function persistLibrary() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-    if (activeId) localStorage.setItem(ACTIVE_KEY, activeId);
-  } catch (error) {
-    // Quota is the realistic failure. Say so rather than silently losing history.
-    setHint("Couldn't save history to this browser — it may be full.", true);
+    localStorage.setItem(LIBRARY_KEY, JSON.stringify(library));
+  } catch {
+    // Full or disabled storage just means history won't survive a reload — not fatal.
   }
 }
 
-function activeConversation() {
-  return conversations.find((c) => c.id === activeId) ?? null;
+function findEntry(id) {
+  return library.find((entry) => entry.id === id) ?? null;
 }
 
-function newConversation() {
-  const conversation = {
-    id: crypto.randomUUID(),
-    title: "New chat",
-    messages: [],
-    createdAt: Date.now(),
-  };
-  conversations.unshift(conversation);
-  activeId = conversation.id;
-  persist();
-  return conversation;
+/** The selected entry, but only once it has something a follow-up can build on. */
+function selectedDoneEntry() {
+  const entry = selectedId ? findEntry(selectedId) : null;
+  return entry?.status === "done" ? entry : null;
 }
 
-function titleFrom(text) {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > 42 ? `${flat.slice(0, 42)}…` : flat || "New chat";
+/* ---------------------------------------------------------- link + text helpers */
+
+function platformFor(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (host === "tiktok.com" || host.endsWith(".tiktok.com")) return "TikTok";
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be") return "YouTube";
+    if (host === "instagram.com" || host.endsWith(".instagram.com")) return "Instagram";
+    return host;
+  } catch {
+    return "Link";
+  }
 }
 
-/* ---------------- rendering ---------------- */
+function normalizeLink(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+/**
+ * A bare link never has whitespace in it; a follow-up question almost always does
+ * ("what about the second claim?"). Cheap, and it means pasting a new URL always starts
+ * a new check even while a result is on screen — the one case that must never be
+ * ambiguous.
+ */
+function looksLikeFollowup(raw) {
+  return /\s/.test(raw.trim());
+}
+
+function truncate(text, max) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/* ---------------------------------------- markdown + citations */
 
 function escapeHTML(text) {
   return text
@@ -90,51 +173,6 @@ function escapeHTML(text) {
     .replace(/"/g, "&quot;");
 }
 
-/**
- * Minimal markdown: fenced code, inline code, bold. Everything is HTML-escaped first
- * and the only tags introduced afterwards are ones this function writes, so model
- * output cannot inject markup.
- */
-function renderMarkdown(text, sources) {
-  // Odd segments are the insides of ``` fences; leave those untouched.
-  const segments = text.split(/```/);
-  return segments
-    .map((segment, index) => {
-      if (index % 2 === 1) {
-        // Drop the language tag line, and the newline the closing fence sits on.
-        const body = segment.replace(/^[a-zA-Z0-9-]*\n/, "").replace(/\n$/, "");
-        return `<pre><code>${escapeHTML(body)}</code></pre>`;
-      }
-      // The container is `white-space: pre-wrap`, so newlines butting up against a
-      // <pre> would render on top of its own margins as a blank gap. The block breaks
-      // the line by itself; strip the redundant ones.
-      let plain = segment;
-      if (index > 0) plain = plain.replace(/^\n+/, "");
-      if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
-      return linkCitations(
-        escapeHTML(plain)
-          .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"),
-        sources,
-      );
-    })
-    .join("");
-}
-
-/**
- * Turn `[3]` into a link to source 3.
- *
- * A marker the reader cannot follow is only marginally better than no marker: the whole
- * point of the citation rule is that a claim can be checked, and "can be checked" means
- * one click, not scrolling to a list and matching a number by eye. Markers with no
- * matching source are left as plain text, and should never arrive — the server deletes a
- * marker naming a source it never retrieved before the answer is sent. This is the
- * belt-and-braces for that: linking one somewhere plausible would be worse than showing it
- * inert.
- *
- * Runs on already-escaped HTML and only ever inserts a URL that came from the server's
- * ledger, escaped again here.
- */
 function linkCitations(html, sources) {
   if (!sources?.length) return html;
   const byNumber = new Map(sources.map((s) => [String(s.n), s]));
@@ -145,465 +183,370 @@ function linkCitations(html, sources) {
   });
 }
 
-/**
- * The model pill.
- *
- * It exists to answer one question — *what actually produced this answer* — and until now
- * it only answered half of it. The chain steps down when the preferred model is out of
- * quota or the day's budget is nearly spent, and a badge that reads `gemini-2.0-flash`
- * with no explanation looks like a misconfiguration rather than a system working as
- * designed. Degradation is a state worth seeing: it is temporary, it changes how much the
- * answer is worth trusting, and it recovers on its own, so the reader wants to know both
- * that it happened and roughly when it will stop.
- *
- * `state` is the server's `model` frame, or the `health` block from /api/config.
- */
-function renderModelBadge(state) {
-  if (!state?.model) {
-    el.modelBadge.hidden = true;
-    return;
-  }
-  el.modelBadge.hidden = false;
-  el.modelBadge.textContent = state.degraded && state.label
-    ? `${state.model} · ${state.label}`
-    : state.model;
-  el.modelBadge.classList.toggle("degraded", Boolean(state.degraded));
-  // The note names both models and the recovery time; the pill has room for neither.
-  el.modelBadge.title = state.note || `Answering on ${state.model}.`;
+function renderMarkdown(text, sources) {
+  const segments = text.split(/```/);
+  return segments
+    .map((segment, index) => {
+      if (index % 2 === 1) {
+        const body = segment.replace(/^[a-zA-Z0-9-]*\n/, "").replace(/\n$/, "");
+        return `<pre><code>${escapeHTML(body)}</code></pre>`;
+      }
+      let plain = segment;
+      if (index > 0) plain = plain.replace(/^\n+/, "");
+      if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
+      return linkCitations(
+        escapeHTML(plain)
+          .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+          .replace(/\n/g, "<br>"),
+        sources,
+      );
+    })
+    .join("");
+}
+
+/** Pulls the trailing `VERDICT: …` line the initial prompt asks for off the answer text. */
+function splitVerdict(answer) {
+  const match = answer.match(VERDICT_LINE);
+  if (!match) return { text: answer, verdictKey: null };
+  const key = match[1].toLowerCase().replace(/\s+evidence$/, "");
+  return { text: answer.slice(0, match.index).trimEnd(), verdictKey: VERDICTS[key] ? key : null };
 }
 
 /**
- * What the server says it is doing right now, in the reader's words.
- *
- * Every one of these is a phase that produces no text: fetching a clip, waiting on a model
- * that has to watch it, a model thinking before it searches. They are most of the wait on
- * a video, and until they were reported the bubble simply sat empty through all of them —
- * which looks exactly like a request that has died, and gives no way to tell the two apart.
+ * Turns on the `.in` transitions a beat after the markup lands, instead of baking the
+ * class into the HTML string. Baked-in means the element's first paint *is* its final
+ * state — there's no "before" for the transition to run from, so nothing animates.
+ * Two rAFs: the first lands after the browser has laid the new nodes out, the second
+ * after it has committed that layout — the gap a transition needs to actually fire.
  */
-function stageText(stage) {
-  switch (stage?.stage) {
+function revealIn(root) {
+  const targets = root.querySelectorAll("[data-reveal]");
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      targets.forEach((node) => node.classList.add("in"));
+    });
+  });
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+function renderLibrary(filter = "") {
+  el.libList.replaceChildren();
+  const needle = filter.trim().toLowerCase();
+  const visible = needle ? library.filter((e) => e.title.toLowerCase().includes(needle)) : library;
+
+  if (visible.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "lib-empty";
+    empty.textContent = library.length === 0 ? "No checks yet — paste a link below." : "No matches.";
+    el.libList.append(empty);
+    return;
+  }
+
+  for (const entry of visible) {
+    const item = document.createElement("li");
+    item.className = `lib-item${entry.id === selectedId ? " active" : ""}`;
+    item.tabIndex = 0;
+
+    const thumb = document.createElement("div");
+    thumb.className = "lib-thumb";
+
+    const meta = document.createElement("div");
+    meta.className = "lib-meta";
+    const title = document.createElement("div");
+    title.className = "lib-title";
+    title.textContent = entry.title;
+    const sub = document.createElement("div");
+    sub.className = "lib-sub";
+    const dot = document.createElement("span");
+    dot.className = `dot ${dotClassFor(entry)}`;
+    sub.append(dot, document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`));
+    meta.append(title, sub);
+
+    item.append(thumb, meta);
+    item.addEventListener("click", () => selectEntry(entry.id));
+    item.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") selectEntry(entry.id);
+    });
+    el.libList.append(item);
+  }
+}
+
+function dotClassFor(entry) {
+  if (entry.status === "running") return "warn";
+  if (entry.status === "error") return "muted";
+  return VERDICTS[entry.verdictKey]?.css ?? "muted";
+}
+
+function statusLabel(entry) {
+  if (entry.status === "running") return "Checking…";
+  if (entry.status === "error") return "Failed";
+  return VERDICTS[entry.verdictKey]?.label ?? "Unclassified";
+}
+
+function selectEntry(id) {
+  if (inFlight) return; // Don't let a click yank the pane out from under a running turn.
+  selectedId = id;
+  pendingFollowup = null;
+  renderLibrary(el.searchInput.value);
+  const entry = findEntry(id);
+  if (entry) renderVideoPane(entry);
+  if (entry?.status === "done") renderResultCard(entry);
+  else if (entry?.status === "error") renderErrorCard(entry);
+  updateComposerMode();
+}
+
+/** The un-started state: nothing selected, video pane and claims pane both blank. */
+function renderEmptyState() {
+  el.videoChip.textContent = "No link yet";
+  el.videoTitle.textContent = "Paste a link below to start a check.";
+  el.videoLink.href = "#";
+  clearVideoMedia();
+  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check.</p></div>`;
+}
+
+/**
+ * Deselects whatever's open so the entry bar falls back to "Check" — the explicit escape
+ * hatch from follow-up mode. Without it, starting a new check while a result is on
+ * screen only works by remembering the no-space rule; this makes it a single click that
+ * needs no rule at all.
+ */
+function startNewCheck() {
+  if (inFlight) return; // Same guard as switching library items mid-run.
+  selectedId = null;
+  pendingFollowup = null;
+  el.linkInput.value = "";
+  renderLibrary(el.searchInput.value);
+  renderEmptyState();
+  updateComposerMode();
+  el.linkInput.focus();
+}
+
+/* ---------------------------------------------------------------- video pane */
+
+// Fallback while a video's real dimensions are still unknown (before the resolver's
+// response lands, or before the <video> element has decoded enough to know its own
+// size). Most short-form content is vertical, so this is the least-wrong guess, but
+// `setVideoAspect` below always overrides it with the real ratio as soon as one is known.
+const DEFAULT_VIDEO_ASPECT = "9 / 16";
+
+/** Resizes the pane itself to the video's ratio, so nothing gets cropped or letterboxed
+ * once the real size is known — object-fit: contain (see the CSS) only has to cover the
+ * brief gap before that happens. */
+function setVideoAspect(ratio) {
+  el.videoThumb.style.aspectRatio = ratio || DEFAULT_VIDEO_ASPECT;
+}
+
+/** Back to the play-icon placeholder — no video element holding stale media or playing. */
+function clearVideoMedia() {
+  el.videoPlayer.pause();
+  el.videoPlayer.removeAttribute("src");
+  el.videoPlayer.load();
+  el.videoPlayer.hidden = true;
+  el.videoEmbed.src = "";
+  el.videoEmbed.hidden = true;
+  el.videoPlaceholder.hidden = false;
+  setVideoAspect(DEFAULT_VIDEO_ASPECT);
+}
+
+function showVideoElement(media) {
+  el.videoPlaceholder.hidden = true;
+  // The platform's own reported width/height, if the API returned one — corrected below by
+  // `loadedmetadata` against what the browser actually decoded, which is authoritative
+  // even when the API's numbers are missing or wrong.
+  if (media.width && media.height) setVideoAspect(`${media.width} / ${media.height}`);
+  el.videoPlayer.src = media.mediaURL;
+  el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
+  el.videoPlayer.hidden = false;
+  el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
+}
+
+/** Shorts are vertical, everything else on YouTube is 16:9 — there's no dimension field
+ * to read the way TikTok's embed state has one, so the URL shape is the only signal. */
+function youTubeAspectRatio(urlString) {
+  try {
+    return new URL(urlString).pathname.toLowerCase().includes("/shorts/") ? "9 / 16" : "16 / 9";
+  } catch {
+    return "16 / 9";
+  }
+}
+
+function showYouTubeEmbed(videoID, aspect) {
+  el.videoPlaceholder.hidden = true;
+  setVideoAspect(aspect);
+  // youtube-nocookie.com: this is a fact-check tool, not a place that should be dropping
+  // YouTube's regular tracking cookies on every pasted link.
+  el.videoEmbed.src = `https://www.youtube-nocookie.com/embed/${videoID}?rel=0`;
+  el.videoEmbed.hidden = false;
+}
+
+/**
+ * TikTok and Instagram both arrive as a plain MP4 on a signed CDN URL — neither has an
+ * embed that plays for a logged-out visitor — so one loader covers both. The server does
+ * the resolving; see api/resolve-media.js.
+ */
+async function loadDirectMedia(entry, token) {
+  const cached = mediaCache.get(entry.id);
+  if (cached?.kind === "direct") {
+    if (token === videoPaneToken) showVideoElement(cached);
+    return;
+  }
+  try {
+    const response = await fetch("/api/resolve-media", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ url: entry.url }),
+    });
+    if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
+    const { mediaURL, width, height } = await response.json();
+    if (!mediaURL) return;
+    const media = { kind: "direct", mediaURL, width, height };
+    mediaCache.set(entry.id, media);
+    if (token === videoPaneToken) showVideoElement(media);
+  } catch {
+    // Network hiccup or the passphrase dialog intercepting — the rest of the pane (title,
+    // link, and the fact-check itself) doesn't depend on this succeeding.
+  }
+}
+
+function renderVideoPane(entry) {
+  el.videoChip.textContent = entry.platform;
+  el.videoTitle.textContent = entry.title;
+  el.videoLink.href = entry.url;
+
+  const token = ++videoPaneToken;
+  clearVideoMedia();
+
+  if (entry.platform === "TikTok" || entry.platform === "Instagram") {
+    loadDirectMedia(entry, token);
+    return;
+  }
+
+  const videoID = youTubeVideoID(entry.url);
+  if (entry.platform === "YouTube" && videoID) {
+    const aspect = youTubeAspectRatio(entry.url);
+    mediaCache.set(entry.id, { kind: "youtube", videoID, aspect });
+    showYouTubeEmbed(videoID, aspect);
+  }
+}
+
+/* ---------------------------------------------------------------- claim card */
+
+function irisMarkup() {
+  return `
+    <div class="iris-wrap">
+      <svg viewBox="0 0 100 100">
+        <g>
+          <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
+        </g>
+        <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>`;
+}
+
+function renderRunningCard() {
+  el.claimsPane.innerHTML = `
+    <div class="claim-card">
+      <div class="card-loading">
+        ${irisMarkup()}
+        <div class="status-text" id="runStatus">Sending to the model…</div>
+        <div class="source-counter" id="runCounter">&nbsp;</div>
+      </div>
+    </div>`;
+}
+
+function renderErrorCard(entry) {
+  el.claimsPane.innerHTML = `
+    <div class="claim-card">
+      <div class="eyebrow">Check failed</div>
+      <p class="claim-text in">${escapeHTML(entry.error || "Something went wrong.")}</p>
+      <button type="button" class="retry-button" id="retryBtn">Try again</button>
+    </div>`;
+  document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
+}
+
+function sourcesHTML(sources) {
+  if (!sources?.length) return "";
+  return `
+    <div class="sources" data-reveal>
+      <div class="sources-label">Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}</div>
+      ${sources
+        .map(
+          (s) =>
+            `<div class="source-item"><span><a class="citation" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.title)}</a></span><span>${escapeHTML(s.domain)}</span></div>`,
+        )
+        .join("")}
+    </div>`;
+}
+
+/** Past follow-ups, plus one in flight or freshly failed, as a thread under the analysis. */
+function threadHTML(entry) {
+  const settled = entry.followups
+    .map(
+      (f) => `
+        <div class="thread-item">
+          <div class="thread-q">${escapeHTML(f.question)}</div>
+          <div class="thread-a claim-text" data-reveal>${renderMarkdown(f.answer, f.sources)}</div>
+          ${sourcesHTML(f.sources)}
+        </div>`,
+    )
+    .join("");
+
+  const pending =
+    pendingFollowup?.entryId === entry.id
+      ? `
+        <div class="thread-item">
+          <div class="thread-q">${escapeHTML(pendingFollowup.question)}</div>
+          ${
+            pendingFollowup.error
+              ? `<div class="thread-error">${escapeHTML(pendingFollowup.error)}</div>`
+              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus">Asking…</span></div>`
+          }
+        </div>`
+      : "";
+
+  if (!settled && !pending) return "";
+  return `<div class="thread">${settled}${pending}</div>`;
+}
+
+function renderResultCard(entry) {
+  const verdict = VERDICTS[entry.verdictKey] ?? VERDICTS.insufficient;
+  el.claimsPane.innerHTML = `
+    <div class="claim-card">
+      <div class="eyebrow">Analysis</div>
+      <div class="claim-text" data-reveal>${renderMarkdown(entry.answer, entry.sources)}</div>
+      <div class="badges">
+        <span class="badge verdict ${verdict.css}" data-reveal>${escapeHTML(verdict.label)}</span>
+      </div>
+      ${sourcesHTML(entry.sources)}
+      ${threadHTML(entry)}
+    </div>`;
+  revealIn(el.claimsPane);
+}
+
+/* ---------------------------------------------------------------- streaming */
+
+function stageText(frame) {
+  switch (frame?.stage) {
     case "attaching":
       return "Fetching the video";
     case "waiting":
-      if (stage.media) return "Watching the video";
-      return stage.round > 0 ? "Reading the sources" : "Asking the model";
+      if (frame.media) return "Watching the video";
+      return frame.round > 0 ? "Reading the sources" : "Asking the model";
     case "thinking":
-      return stage.round > 0 ? "Working through the sources" : "Working out what to check";
+      return frame.round > 0 ? "Working through the sources" : "Working out what to check";
     case "busy":
-      // Named as Google's problem, not the app's. A reader who thinks they broke something
-      // starts checking their key; one who knows the service is full just waits.
       return "Every Gemini model is busy — waiting a moment and trying again";
     case "rewriting":
       return "Rewriting — the first answer failed the citation check";
     default:
       return "Working";
-  }
-}
-
-/**
- * The status line, with a clock.
- *
- * The elapsed count is the part that earns its place: "Watching the video" alone is
- * reassuring for five seconds and ambiguous at forty. With a number next to it the reader
- * can see the difference between slow and stuck, and decide whether to wait or press Stop.
- */
-function statusElement() {
-  const wrap = document.createElement("div");
-  wrap.className = "stage";
-  const label = document.createElement("span");
-  label.className = "stage-label";
-  const clock = document.createElement("span");
-  clock.className = "stage-clock";
-  wrap.append(label, clock);
-
-  const startedAt = Date.now();
-  let text = "Working";
-  const paint = () => {
-    label.textContent = `${text}…`;
-    const seconds = Math.round((Date.now() - startedAt) / 1000);
-    clock.textContent = seconds >= 3 ? `${seconds}s` : "";
-  };
-  paint();
-  const timer = setInterval(paint, 1000);
-
-  return {
-    element: wrap,
-    /** Name the current step, and show the line if text had hidden it. */
-    set(next) {
-      text = next;
-      wrap.hidden = false;
-      paint();
-    },
-    /**
-     * Stand down while the answer is arriving.
-     *
-     * Hidden rather than removed: an answer can be followed by another silent phase — the
-     * citation check sending it back for a rewrite — and the line has to be able to come
-     * back without losing the clock, which is measuring the whole request.
-     */
-    hide() {
-      wrap.hidden = true;
-    },
-    /** Seconds the request has been running — what an unexplained ending gets measured in. */
-    elapsed() {
-      return Math.round((Date.now() - startedAt) / 1000);
-    },
-    stop() {
-      clearInterval(timer);
-      wrap.remove();
-    },
-  };
-}
-
-/** The banner an answer earns by running into the output-token cap. */
-function truncatedElement() {
-  const wrap = document.createElement("div");
-  wrap.className = "truncated";
-  wrap.textContent =
-    "This answer hit the reply-length limit and stops mid-thought. Ask for the rest, or for a shorter version.";
-  return wrap;
-}
-
-/**
- * The searches, as chips above the answer.
- *
- * `pending` are searches the server has dispatched but not yet heard back from. They are
- * shown because they are the wait: a fact-check runs several searches at once and then
- * spends seconds reading the results, and without them the reader watches an empty bubble
- * and concludes the app has hung. A chip that says what is being looked up turns the same
- * seconds into visible progress.
- */
-function searchListElement(searches, pending = [], pendingReads = []) {
-  const wrap = document.createElement("div");
-  wrap.className = "searches";
-  for (const item of searches) {
-    const chip = document.createElement("div");
-    if (item.type === "find") {
-      // A read is a different act from a search and is labelled as one. It is also the step
-      // that most needs saying out loud: opening a page and scanning it is the slowest thing
-      // the server does, and an unlabelled pause there is indistinguishable from a hang.
-      chip.className = item.error ? "search-chip failed" : "search-chip read";
-      chip.textContent = item.error
-        ? `Couldn’t read ${item.domain || item.url} — ${item.error}`
-        : item.matches > 0
-          ? `Read ${item.domain || item.url} · ${item.matches} passage${item.matches === 1 ? "" : "s"} on “${item.find}”`
-          : `Read ${item.domain || item.url} · nothing on “${item.find}”`;
-      if (item.claim) chip.title = `Checking: ${item.claim}`;
-      wrap.append(chip);
-      continue;
-    }
-    chip.className = item.error ? "search-chip failed" : "search-chip";
-    chip.textContent = item.error
-      ? `Search failed: ${item.query || "(invalid query)"} — ${item.error}`
-      : `Searched “${item.query}” · ${item.results.length} source${
-          item.results.length === 1 ? "" : "s"
-        }`;
-    if (item.claim) chip.title = `Checking: ${item.claim}`;
-    wrap.append(chip);
-  }
-  for (const item of pending) {
-    const chip = document.createElement("div");
-    chip.className = "search-chip pending";
-    chip.textContent = `Searching “${item.query}”…`;
-    if (item.claim) chip.title = `Checking: ${item.claim}`;
-    wrap.append(chip);
-  }
-  for (const item of pendingReads) {
-    const chip = document.createElement("div");
-    chip.className = "search-chip pending read";
-    chip.textContent = `Reading ${domainOf(item.url)} for “${item.find}”…`;
-    if (item.claim) chip.title = `Checking: ${item.claim}`;
-    wrap.append(chip);
-  }
-  return wrap;
-}
-
-/** Host of a URL, for a chip that has no room for the whole thing. */
-function domainOf(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return url;
-  }
-}
-
-/**
- * The links, listed out.
- *
- * This used to print under every answer, and it no longer does. Every `[3]` in the answer is
- * now a link to source 3 where it stands — see `linkCitations` — so a numbered list
- * underneath repeats the entire evidence trail in the one form nobody reads, and its length
- * is what made a two-source answer look like a literature review. The links themselves are
- * still kept for every answer, stored with the message and used to resolve the markers; what
- * changed is that printing them is now conditional.
- *
- * Two conditions, and each is a case where the inline links cannot do the job alone:
- *
- * - `provisional` — the list sent while the searches are still landing. There is no answer
- *   yet, so there are no inline markers to be links, and this is the reader's only view of
- *   the evidence during the longest silence in the turn.
- * - `fallback` — the server says the finished answer's own links are not enough: it cited
- *   nothing, or it was cut off, or it failed the citation check. Whenever the reader is
- *   being asked to check something themselves, they get everything that was retrieved.
- */
-function sourceListElement(sources, { provisional = false, fallback = false } = {}) {
-  const wrap = document.createElement("div");
-  wrap.className = provisional ? "sources provisional" : "sources";
-
-  const heading = document.createElement("div");
-  heading.className = "sources-heading";
-  heading.textContent = provisional
-    ? `Sources found (${sources.length}) — retrieved by the app; reading them now`
-    : fallback
-      ? `Every source retrieved (${sources.length}) — listed in full because the answer above does not link them all`
-      : `Sources (${sources.length}) — retrieved by the app, not written by the model`;
-  wrap.append(heading);
-
-  const list = document.createElement("ol");
-  for (const source of sources) {
-    const item = document.createElement("li");
-    item.value = source.n;
-    const link = document.createElement("a");
-    link.href = source.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = source.title;
-    const domain = document.createElement("span");
-    domain.className = "source-domain";
-    domain.textContent = ` ${source.domain}`;
-    item.append(link, domain);
-    // The passage the page reader pulled off this page, when there is one. It is the
-    // sentence the citation actually rests on, and showing it is the difference between a
-    // list of domain names and a list the reader can judge without opening anything.
-    if (source.quote) {
-      const quote = document.createElement("div");
-      quote.className = "source-quote";
-      quote.textContent = `“${source.quote}”`;
-      item.append(quote);
-    }
-    list.append(item);
-  }
-  wrap.append(list);
-  return wrap;
-}
-
-/**
- * @param conversationId - Passed only for the conversation's *final* message, which is
- *   the only one a retry can safely rebuild. Omitted for the in-progress bubble
- *   streamAnswer builds before the answer has a home to retry into.
- */
-function messageElement(message, conversationId) {
-  const wrap = document.createElement("div");
-  wrap.className = `message ${message.role}`;
-
-  const who = document.createElement("div");
-  who.className = "who";
-  who.textContent =
-    message.role === "user" ? "You" : message.role === "error" ? "Error" : "Assistant";
-
-  const body = document.createElement("div");
-  body.className = "body";
-  if (message.role === "assistant") {
-    body.innerHTML = renderMarkdown(message.content, message.sources);
-  } else {
-    body.textContent = message.content;
-  }
-
-  wrap.append(who);
-  // The evidence trail is part of the message, so it is stored with it and re-rendered
-  // from history — an answer whose sources vanished on reload would be unauditable the
-  // moment the page refreshed.
-  if (message.searches?.length) wrap.append(searchListElement(message.searches));
-  wrap.append(body);
-  // The links are stored with every answer and used above to resolve its markers; the list
-  // is printed only when the server said the inline links could not carry the evidence on
-  // their own. See `sourceListElement`.
-  if (message.sources?.length && message.sourcesFallback) {
-    wrap.append(sourceListElement(message.sources, { fallback: true }));
-  }
-  if (message.truncated) wrap.append(truncatedElement());
-
-  // `retryable` distinguishes "Gemini is overloaded, try again" from "that request was
-  // malformed and will fail identically" — retrying the latter just burns another round
-  // trip to reproduce the same error.
-  if (message.role === "error" && message.retryable && conversationId) {
-    const retryButton = document.createElement("button");
-    retryButton.type = "button";
-    retryButton.className = "retry-button";
-    retryButton.textContent = "Try again";
-    retryButton.addEventListener("click", () => retry(conversationId, message.restorePoint));
-    wrap.append(retryButton);
-  }
-
-  return wrap;
-}
-
-function renderMessages() {
-  const conversation = activeConversation();
-  el.messages.replaceChildren();
-
-  if (!conversation || conversation.messages.length === 0) {
-    el.messages.append(el.emptyState);
-    el.emptyState.hidden = false;
-    // Nothing has answered yet, so there is no model to report — except a degradation,
-    // which is true of the next message the user sends and is worth showing before they
-    // send it.
-    renderModelBadge(modelState?.degraded ? modelState : null);
-  } else {
-    renderModelBadge(modelState);
-    el.emptyState.hidden = true;
-    conversation.messages.forEach((message, index) => {
-      // Only the last message gets a retry button. Retrying rebuilds the conversation
-      // from the failed turn onwards, so offering it on an error further up would
-      // discard every exchange that came after it — the user asked to re-run one turn,
-      // not to delete the rest of the thread.
-      const isLast = index === conversation.messages.length - 1;
-      el.messages.append(messageElement(message, isLast ? conversation.id : undefined));
-    });
-  }
-
-  el.title.textContent = conversation?.title ?? "New chat";
-  scrollToBottom();
-}
-
-function renderSidebar() {
-  el.conversations.replaceChildren();
-
-  for (const conversation of conversations) {
-    const row = document.createElement("div");
-    row.className = `conversation${conversation.id === activeId ? " active" : ""}`;
-
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "conversation-title";
-    open.textContent = conversation.title;
-    open.addEventListener("click", () => selectConversation(conversation.id));
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "conversation-delete";
-    remove.textContent = "×";
-    remove.title = "Delete conversation";
-    remove.setAttribute("aria-label", `Delete ${conversation.title}`);
-    remove.addEventListener("click", (event) => {
-      event.stopPropagation();
-      deleteConversation(conversation.id);
-    });
-
-    row.append(open, remove);
-    el.conversations.append(row);
-  }
-}
-
-function scrollToBottom() {
-  el.messages.scrollTop = el.messages.scrollHeight;
-}
-
-function setHint(text, isWarning = false) {
-  el.hint.textContent = text;
-  el.hint.classList.toggle("warn", isWarning);
-}
-
-function setStatus(text, state) {
-  el.statusText.textContent = text;
-  el.statusDot.className = `dot ${state ?? ""}`.trim();
-}
-
-function setBusy(busy) {
-  el.send.hidden = busy;
-  el.stop.hidden = !busy;
-  el.input.disabled = false; // Stay typeable — the next message can be queued mentally.
-  // A retry from an earlier failed turn while a new one is already streaming would
-  // truncate the conversation out from under it — `retry()` guards against that too,
-  // but disabling the button is what stops the click from looking like it did nothing.
-  for (const button of el.messages.querySelectorAll(".retry-button")) {
-    button.disabled = busy;
-  }
-}
-
-/* ---------------- actions ---------------- */
-
-function selectConversation(id) {
-  if (inFlight) inFlight.abort();
-  activeId = id;
-  persist();
-  renderSidebar();
-  renderMessages();
-  el.app.classList.remove("sidebar-open");
-  el.input.focus();
-}
-
-function deleteConversation(id) {
-  conversations = conversations.filter((c) => c.id !== id);
-  if (activeId === id) {
-    if (inFlight) inFlight.abort();
-    activeId = conversations[0]?.id ?? null;
-  }
-  persist();
-  renderSidebar();
-  renderMessages();
-}
-
-function startNewChat() {
-  if (inFlight) inFlight.abort();
-  const existing = activeConversation();
-  // Don't stack up empty "New chat" rows if the button gets pressed twice.
-  if (existing && existing.messages.length === 0) {
-    el.input.focus();
-    return;
-  }
-  newConversation();
-  renderSidebar();
-  renderMessages();
-  el.input.focus();
-}
-
-async function loadServerConfig() {
-  try {
-    const response = await fetch("/api/config");
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const received = await response.json();
-    // Merged over the defaults rather than replacing them: a partial or unexpected
-    // payload would otherwise leave `maxInputChars` undefined, and every length
-    // comparison against it silently false — losing the client-side cap entirely.
-    serverConfig = {
-      ...serverConfig,
-      ...received,
-      maxInputChars:
-        Number.isFinite(received?.maxInputChars) && received.maxInputChars > 0
-          ? received.maxInputChars
-          : serverConfig.maxInputChars,
-      maxTurns:
-        Number.isFinite(received?.maxTurns) && received.maxTurns > 0
-          ? received.maxTurns
-          : serverConfig.maxTurns,
-    };
-  } catch {
-    setStatus("Server unreachable", "bad");
-    return;
-  }
-
-  if (!serverConfig.apiKeyConfigured) {
-    setStatus("No API key on server", "bad");
-    setHint(
-      "The server has no GEMINI_API_KEY. Copy web/.env.example to web/.env.local, add your key, and restart.",
-      true,
-    );
-    el.send.disabled = true;
-    return;
-  }
-
-  setStatus(serverConfig.requiresPassword ? "Key on server · gated" : "Key on server", "ok");
-
-  // Only a degradation is worth showing before the first answer: naming the preferred
-  // model on a fresh page would be a promise the chain hasn't made yet.
-  if (serverConfig.health?.degraded) {
-    modelState = serverConfig.health;
-    renderModelBadge(modelState);
-  }
-
-  if (serverConfig.requiresPassword && !sessionStorage.getItem(PASSPHRASE_KEY)) {
-    el.passDialog.showModal();
   }
 }
 
@@ -614,381 +557,299 @@ function requestHeaders() {
   return headers;
 }
 
-/**
- * Streams one assistant reply into `conversationId`'s existing history and appends the
- * result — an `assistant` message, an `error` message, or both if a partial answer
- * arrived before the failure.
- *
- * Shared by `send()` (a fresh user turn) and `retry()` (re-attempting one already in
- * history), so a retry replays the same history rather than appending a duplicate user
- * turn.
- */
-async function streamAnswer(conversationId) {
-  const conversation = conversations.find((c) => c.id === conversationId);
-  if (!conversation) return;
+/** Posts one turn to /api/chat and collects it into `{ answer, sources }`. Shared by a
+ * fresh check and a follow-up — both are just different message histories over the same
+ * stream contract. */
+async function streamChat(messages, { signal, onStage, onSearchCount } = {}) {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: requestHeaders(),
+    body: JSON.stringify({ messages }),
+    signal,
+  });
 
-  // Whatever this call appends from here on is exactly what `retry()` undoes before
-  // its own attempt — recorded now, before anything is added, so a retry truncates
-  // back to precisely "just the user's turn" and never eats history from an earlier
-  // exchange.
-  const restorePoint = conversation.messages.length;
+  if (response.status === 401) {
+    sessionStorage.removeItem(PASSPHRASE_KEY);
+    el.passDialog.showModal();
+    throw new Error("This library is password-protected. Unlock it and try again.");
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error ?? `Request failed (HTTP ${response.status}).`);
+  }
+  if (!response.body) throw new Error("The server sent an empty response.");
 
-  // Only real turns go upstream — a previous error bubble is UI, not context. Trimmed to
-  // the server's own MAX_TURNS before it ever leaves the browser: the server drops
-  // anything older on arrival regardless, so uploading it first only spends the reader's
-  // bandwidth — and the wait — on a video-heavy thread's history to have it thrown away.
-  const history = conversation.messages
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role, content: m.content }))
-    .slice(-serverConfig.maxTurns);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer = "";
+  let sources = [];
+  let searchCount = 0;
 
-  const bubble = messageElement({ role: "assistant", content: "" });
-  const body = bubble.querySelector(".body");
-  body.classList.add("caret");
-  el.messages.append(bubble);
-  scrollToBottom();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      if (!answer) throw new Error("The connection closed before an answer arrived.");
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary;
+    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      const raw = buffer.slice(0, boundary).trim();
+      buffer = buffer.slice(boundary + 2);
+      if (!raw.startsWith("data:")) continue;
+
+      let frame;
+      try {
+        frame = JSON.parse(raw.slice(5).trim());
+      } catch {
+        continue;
+      }
+
+      if (frame.type === "stage") onStage?.(frame);
+      else if (frame.type === "delta") answer += frame.text;
+      else if (frame.type === "break") answer += "\n\n";
+      else if (frame.type === "answer") answer = frame.text;
+      else if (frame.type === "search") onSearchCount?.(++searchCount);
+      else if (frame.type === "sources") {
+        if (!frame.provisional) sources = frame.sources;
+      } else if (frame.type === "error") throw new Error(frame.message);
+    }
+  }
+
+  return { answer, sources };
+}
+
+function composeCheckPrompt(url) {
+  return (
+    `Fact-check this video: ${url}\n\n` +
+    "List the distinct factual claims it makes, check each one, and explain what the evidence " +
+    "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
+    "|Insufficient evidence>` summarizing the main claim — no other text on that line."
+  );
+}
+
+/** The conversation an entry represents so far: the original check, then every follow-up
+ * that's already settled — what a new follow-up continues, not restarts. */
+function historyFor(entry) {
+  const history = [
+    { role: "user", content: entry.prompt },
+    { role: "assistant", content: entry.rawAnswer },
+  ];
+  for (const f of entry.followups) {
+    history.push({ role: "user", content: f.question }, { role: "assistant", content: f.answer });
+  }
+  return history;
+}
+
+/* ---------------------------------------------------------------- the two turns */
+
+async function runCheck(url, existingId) {
+  if (inFlight) return;
+
+  const id = existingId ?? crypto.randomUUID();
+  const prompt = composeCheckPrompt(url);
+  let entry = findEntry(id);
+  if (!entry) {
+    entry = { id, url, platform: platformFor(url), title: url, createdAt: Date.now(), status: "running", prompt, followups: [] };
+    library.unshift(entry);
+  } else {
+    entry.status = "running";
+    entry.error = undefined;
+    entry.prompt = prompt;
+    entry.followups = [];
+  }
+  selectedId = id;
+  pendingFollowup = null;
+  persistLibrary();
+  renderLibrary(el.searchInput.value);
+  renderVideoPane(entry);
+  renderRunningCard();
+  updateComposerMode();
 
   const controller = new AbortController();
   inFlight = controller;
-  setBusy(true);
-  setHint("");
-
-  let answer = "";
-  let failed = null;
-  let retryable = false;
-  const searches = [];
-  // Dispatched but not yet returned, in the order the server will report them.
-  let pendingSearches = [];
-  // Pages the server has opened but not finished scanning, shown for the same reason.
-  let pendingReads = [];
-  let sources = [];
-  let sourcesFallback = false;
-  let truncated = false;
-
-  // Live containers for the evidence trail. Created up front and left empty so the
-  // ordering — searches, answer, sources, warning — is fixed by the DOM rather than by
-  // the order frames happen to arrive in.
-  let searchesEl = document.createElement("div");
-  searchesEl.className = "searches";
-  bubble.insertBefore(searchesEl, body);
-  // Above the searches, because it describes the step in progress and the searches are
-  // the record of steps already taken. Shown from the moment the request is sent: the
-  // silence before the first frame is exactly the silence it exists to explain.
-  const status = statusElement();
-  bubble.insertBefore(status.element, searchesEl);
-  let sourcesEl = document.createElement("div");
-  let truncatedEl = document.createElement("div");
-  bubble.append(sourcesEl, truncatedEl);
-
-  /** Swap a placeholder for freshly rendered content, keeping the handle pointing at it. */
-  const replace = (element, next) => {
-    element.replaceWith(next);
-    return next;
-  };
-
-  // Re-parsing and re-rendering the whole answer on every delta is O(n) per token and
-  // O(n^2) over a long reply, and it also blows away any text selection the reader had
-  // mid-stream. Batched to at most one render per animation frame instead: `answer`
-  // keeps accumulating at whatever rate deltas arrive, but the DOM only actually
-  // updates as fast as the screen can show it — a fast model emitting many small
-  // chunks between two frames costs one render, not many.
-  let renderScheduled = false;
-  function scheduleRender() {
-    if (renderScheduled) return;
-    renderScheduled = true;
-    requestAnimationFrame(() => {
-      renderScheduled = false;
-      body.innerHTML = renderMarkdown(answer, sources);
-      scrollToBottom();
-    });
-  }
+  el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
 
   try {
-    let response;
-    try {
-      response = await fetch("/api/chat", {
-        method: "POST",
-        headers: requestHeaders(),
-        body: JSON.stringify({ messages: history }),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (error.name === "AbortError") throw error;
-      // Couldn't even reach the server — a network blip, not a request Gemini itself
-      // rejected. Worth another try once the network recovers.
-      retryable = true;
-      throw new Error(`Could not reach the server: ${error.message}`);
-    }
+    const { answer, sources } = await streamChat([{ role: "user", content: prompt }], {
+      signal: controller.signal,
+      onStage: (frame) => {
+        const status = document.getElementById("runStatus");
+        if (status) status.textContent = stageText(frame);
+      },
+      onSearchCount: (n) => {
+        const counter = document.getElementById("runCounter");
+        if (counter) counter.textContent = `Source ${n}`;
+      },
+    });
 
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      if (response.status === 401) {
-        sessionStorage.removeItem(PASSPHRASE_KEY);
-        el.passDialog.showModal();
-      }
-      // 429 is the one pre-stream failure that resolves on its own by waiting. The rest
-      // — a malformed request, the wrong passphrase, no key configured server-side —
-      // fail identically on a retry, so offering one would just spend a round trip to
-      // reproduce the same error.
-      retryable = response.status === 429;
-      throw new Error(payload.error ?? `Request failed (HTTP ${response.status}).`);
-    }
-
-    if (!response.body) throw new Error("The server sent an empty response.");
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        // The server closed without ever sending an answer or an error. That is not a
-        // completed turn, and until now it was reported as one: the bubble was left empty,
-        // nothing was stored, and the next render removed it — the user watched a request
-        // vanish with no idea whether it failed or was still going. The usual cause is the
-        // host killing the function mid-flight, so the elapsed time is quoted; on Vercel
-        // it lands suspiciously close to the configured max duration.
-        if (!answer) {
-          retryable = true;
-          throw new Error(
-            `The connection closed after ${status.elapsed()}s without an answer. If this ` +
-              `happens on every video, the server is being cut off before it can finish — ` +
-              `raise the function timeout (Vercel: Settings → Functions → Max Duration).`,
-          );
-        }
-        break;
-      }
-      buffer += decoder.decode(value, { stream: true });
-
-      let boundary;
-      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-        const raw = buffer.slice(0, boundary).trim();
-        buffer = buffer.slice(boundary + 2);
-        // Anything that isn't a `data:` line is a comment or a field we don't use —
-        // the server's keep-alive pings arrive here as `: keep-alive`.
-        if (!raw.startsWith("data:")) continue;
-
-        let frame;
-        try {
-          frame = JSON.parse(raw.slice(5).trim());
-        } catch {
-          // One unreadable frame is not worth throwing away an answer in progress.
-          continue;
-        }
-
-        if (frame.type === "stage") {
-          status.set(stageText(frame));
-          scrollToBottom();
-        } else if (frame.type === "model") {
-          modelState = frame;
-          renderModelBadge(modelState);
-        } else if (frame.type === "truncated") {
-          truncated = true;
-          truncatedEl = replace(truncatedEl, truncatedElement());
-        } else if (frame.type === "delta") {
-          answer += frame.text;
-          // Text is arriving; the reader can see for themselves that it is working.
-          if (frame.text) status.hide();
-          scheduleRender();
-        } else if (frame.type === "searching") {
-          pendingSearches = frame.searches ?? [];
-          pendingReads = frame.reads ?? [];
-          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches, pendingReads));
-          scrollToBottom();
-        } else if (frame.type === "search") {
-          searches.push(frame);
-          // Results come back in the order the round dispatched them, so the oldest
-          // outstanding chip is the one this frame just resolved.
-          pendingSearches = pendingSearches.slice(1);
-          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches, pendingReads));
-          scrollToBottom();
-        } else if (frame.type === "find") {
-          // A page was read. Filed in the same trail as the searches, in the order the
-          // server did the work, because that order is the story of how the answer was
-          // arrived at: searched, then read the two that mattered.
-          searches.push(frame);
-          pendingReads = pendingReads.slice(1);
-          searchesEl = replace(searchesEl, searchListElement(searches, pendingSearches, pendingReads));
-          scrollToBottom();
-        } else if (frame.type === "answer") {
-          // The finished answer, with its citations tidied. It replaces everything streamed
-          // so far rather than adding to it — the tidy-up can only run on a whole answer, so
-          // it necessarily arrives after the last token of the untidied one.
-          answer = frame.text;
-          scheduleRender();
-        } else if (frame.type === "break") {
-          // The model stopped to run a tool and has started writing again. A paragraph
-          // boundary, not an erasure: the search that caused it is already showing in the
-          // trail above, and the text on either side of it is text the reader is entitled
-          // to keep. This replaced a `reset` frame that blanked the bubble mid-reply,
-          // which is what made a normal answer look like the app coming apart.
-          answer += "\n\n";
-          scheduleRender();
-        } else if (frame.type === "sources") {
-          sources = frame.sources;
-          // Held whether or not the list is drawn: these rows are what turn every `[n]` in
-          // the answer into a link, which is the whole point of not drawing the list.
-          sourcesFallback = Boolean(frame.fallback);
-          // Hide the bibliography during source lookup (while provisional: true) and only
-          // show it once searching is complete with final results.
-          const show = !frame.provisional && sourcesFallback;
-          sourcesEl = replace(
-            sourcesEl,
-            show
-              ? sourceListElement(sources, { provisional: frame.provisional, fallback: sourcesFallback })
-              : document.createElement("div"),
-          );
-          // Re-render so the markers become links.
-          scheduleRender();
-          scrollToBottom();
-        } else if (frame.type === "error") {
-          // The server already classified this — a quota/5xx/timeout failure sets it,
-          // a policy refusal or a malformed request doesn't.
-          retryable = Boolean(frame.retryable);
-          throw new Error(frame.message);
-        }
-      }
-    }
+    const { text, verdictKey } = splitVerdict(answer);
+    entry.status = "done";
+    entry.rawAnswer = answer; // kept whole, VERDICT line included — history needs it verbatim
+    entry.answer = text;
+    entry.sources = sources;
+    entry.verdictKey = verdictKey ?? "insufficient";
+    persistLibrary();
+    renderLibrary(el.searchInput.value);
+    if (selectedId === id) renderResultCard(entry);
   } catch (error) {
-    if (error.name !== "AbortError") failed = error.message;
+    if (error.name === "AbortError") return;
+    entry.status = "error";
+    entry.error = error.message;
+    persistLibrary();
+    renderLibrary(el.searchInput.value);
+    if (selectedId === id) renderErrorCard(entry);
   } finally {
-    status.stop();
-    // Whatever was still in flight when the stream ended is not in flight any more —
-    // a "Searching…" chip left spinning under a finished answer says the app is still
-    // working when it has stopped, which is the one thing the chip exists to prevent.
-    if (pendingSearches.length > 0 || pendingReads.length > 0) {
-      pendingSearches = [];
-      pendingReads = [];
-      searchesEl = replace(searchesEl, searchListElement(searches));
-    }
-    // Flushed synchronously rather than left to a pending rAF: the bubble has to show
-    // the final `answer` the instant streaming stops, not up to one frame late.
-    body.innerHTML = renderMarkdown(answer, sources);
-    body.classList.remove("caret");
     inFlight = null;
-    setBusy(false);
+    el.checkBtn.disabled = false;
+    el.newCheckBtn.disabled = false;
+    updateComposerMode();
   }
-
-  // Re-look up rather than reusing the conversation found at the top: if it was
-  // deleted mid-stream it is no longer in `conversations`, and appending to the
-  // detached object would persist nothing while leaving the message on screen until
-  // the next render.
-  const target = conversations.find((c) => c.id === conversationId);
-  if (target) {
-    if (answer) {
-      // Stored alongside the text, so the answer keeps its evidence across a reload:
-      // `searches` is what was asked, and `sources` is what came back — the rows the
-      // markers in `content` point at, which is why they are stored rather than redrawn.
-      target.messages.push({
-        role: "assistant",
-        content: answer,
-        searches: searches.length ? searches : undefined,
-        sources: sources.length ? sources : undefined,
-        // Whether the list was printed under the answer, so a reload renders the same thing
-        // rather than quietly deciding for itself.
-        sourcesFallback: sourcesFallback || undefined,
-        truncated: truncated || undefined,
-      });
-    }
-    if (failed) target.messages.push({ role: "error", content: failed, retryable, restorePoint });
-    persist();
-  }
-
-  renderMessages();
-  el.input.focus();
 }
 
-async function send(text) {
-  const conversation = activeConversation() ?? newConversation();
-  const conversationId = conversation.id;
-
-  conversation.messages.push({ role: "user", content: text });
-  if (conversation.messages.filter((m) => m.role === "user").length === 1) {
-    conversation.title = titleFrom(text);
-  }
-  persist();
-  renderSidebar();
-  renderMessages();
-
-  await streamAnswer(conversationId);
-}
-
-/**
- * Re-attempts the turn that failed at `restorePoint`, replaying the same history
- * rather than appending a duplicate user message.
- */
-function retry(conversationId, restorePoint) {
-  if (inFlight) return; // A stream from a different turn is already in flight.
-  const conversation = conversations.find((c) => c.id === conversationId);
-  if (!conversation || restorePoint === undefined) return;
-
-  // Everything from `restorePoint` on must be the failed attempt's own output — a
-  // partial assistant reply, the error, or both. If anything else is there, this button
-  // outlived the turn it belonged to and truncating would destroy a later exchange.
-  const tail = conversation.messages.slice(restorePoint);
-  if (tail.some((m) => m.role === "user")) return;
-
-  // Drops exactly what that attempt appended, and nothing from before it —
-  // `restorePoint` was recorded at its start, so the user's turn is left intact.
-  conversation.messages.length = restorePoint;
-  persist();
-  renderMessages();
-  streamAnswer(conversationId);
-}
-
-/* ---------------- wiring ---------------- */
-
-el.composer.addEventListener("submit", (event) => {
-  event.preventDefault();
+async function runFollowup(entry, question) {
   if (inFlight) return;
 
-  const text = el.input.value.trim();
-  if (!text) return;
-  if (text.length > serverConfig.maxInputChars) {
-    setHint(
-      `That message is ${text.length} characters; the limit is ${serverConfig.maxInputChars}.`,
-      true,
-    );
+  pendingFollowup = { entryId: entry.id, question, error: null };
+  el.linkInput.value = "";
+  renderResultCard(entry);
+  updateComposerMode();
+
+  const controller = new AbortController();
+  inFlight = controller;
+  el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
+  let settled = false;
+
+  try {
+    const { answer, sources } = await streamChat([...historyFor(entry), { role: "user", content: question }], {
+      signal: controller.signal,
+      onStage: (frame) => {
+        const status = document.getElementById("followupStatus");
+        if (status) status.textContent = stageText(frame);
+      },
+    });
+
+    entry.followups.push({ question, answer, sources });
+    persistLibrary();
+    renderLibrary(el.searchInput.value);
+    settled = true;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      pendingFollowup = null;
+      return;
+    }
+    // Left as the pending item, with its error — not pushed into `followups`, since a
+    // turn with no real answer would corrupt the history the next follow-up replays.
+    pendingFollowup = { entryId: entry.id, question, error: error.message };
+  } finally {
+    if (settled) pendingFollowup = null;
+    inFlight = null;
+    el.checkBtn.disabled = false;
+    el.newCheckBtn.disabled = false;
+    if (selectedId === entry.id) renderResultCard(entry);
+    updateComposerMode();
+  }
+}
+
+/* ---------------------------------------------------------------- entry-bar mode */
+
+/**
+ * The entry bar is either "start a new check" or "continue this one" — never both at
+ * once, and which one it is has to be legible before the reader presses anything. Button
+ * label and placeholder track it live as they type, so the switch never lands as a
+ * surprise on submit.
+ */
+function updateComposerMode() {
+  const entry = selectedDoneEntry();
+  if (!entry) {
+    el.checkBtn.textContent = "Check";
+    el.linkInput.placeholder = "Paste a TikTok, YouTube, or Instagram link…";
     return;
   }
+  const asking = looksLikeFollowup(el.linkInput.value);
+  el.checkBtn.textContent = asking ? "Ask" : "Check";
+  el.linkInput.placeholder = asking
+    ? "Ask a follow-up…"
+    : `Ask a follow-up about "${truncate(entry.title, 44)}", or paste a new link…`;
+}
 
-  el.input.value = "";
-  el.input.style.height = "auto";
-  send(text);
+/* ---------------------------------------------------------------- config + gating */
+
+async function loadServerConfig() {
+  try {
+    const response = await fetch("/api/config");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const config = await response.json();
+    if (!config.apiKeyConfigured) {
+      el.checkBtn.disabled = true;
+      el.linkInput.placeholder = "Server has no GEMINI_API_KEY — see web/README.md";
+      return;
+    }
+    if (config.requiresPassword && !sessionStorage.getItem(PASSPHRASE_KEY)) {
+      el.passDialog.showModal();
+    }
+  } catch {
+    el.checkBtn.disabled = true;
+    el.linkInput.placeholder = "Server unreachable";
+  }
+}
+
+/* ---------------------------------------------------------------- wiring */
+
+el.checkBtn.addEventListener("click", () => {
+  const entry = selectedDoneEntry();
+  const raw = el.linkInput.value;
+  if (entry && looksLikeFollowup(raw)) {
+    const question = raw.trim();
+    if (question) runFollowup(entry, question);
+    return;
+  }
+  const url = normalizeLink(raw);
+  if (url) runCheck(url);
 });
 
-el.input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
+el.newCheckBtn.addEventListener("click", startNewCheck);
+
+el.linkInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
     event.preventDefault();
-    el.composer.requestSubmit();
+    el.checkBtn.click();
   }
 });
 
-el.input.addEventListener("input", () => {
-  el.input.style.height = "auto";
-  el.input.style.height = `${el.input.scrollHeight}px`;
-});
+el.linkInput.addEventListener("input", updateComposerMode);
+el.searchInput.addEventListener("input", () => renderLibrary(el.searchInput.value));
 
-el.stop.addEventListener("click", () => inFlight?.abort());
-el.newChat.addEventListener("click", startNewChat);
-el.toggleSidebar.addEventListener("click", () => {
-  el.app.classList.toggle("sidebar-open");
-  el.app.classList.toggle("sidebar-hidden");
+// Fires once the browser has actually decoded the video's dimensions — overrides
+// whatever `setVideoAspect` guessed from the API/URL with the real ratio, so the pane
+// never stays letterboxed or cropped once playback is possible.
+el.videoPlayer.addEventListener("loadedmetadata", () => {
+  if (el.videoPlayer.videoWidth && el.videoPlayer.videoHeight) {
+    setVideoAspect(`${el.videoPlayer.videoWidth} / ${el.videoPlayer.videoHeight}`);
+  }
 });
 
 el.passForm.addEventListener("submit", () => {
   const value = el.passInput.value.trim();
-  // sessionStorage, not localStorage: closing the tab should end the session.
   if (value) sessionStorage.setItem(PASSPHRASE_KEY, value);
   el.passInput.value = "";
 });
 
-if (conversations.length === 0 || !activeConversation()) {
-  newConversation();
+renderLibrary();
+if (selectedId) {
+  const entry = findEntry(selectedId);
+  if (entry) {
+    renderVideoPane(entry);
+    if (entry.status === "done") renderResultCard(entry);
+    else if (entry.status === "error") renderErrorCard(entry);
+  }
+} else {
+  renderEmptyState();
 }
-
-renderSidebar();
-renderMessages();
+updateComposerMode();
 loadServerConfig();
-el.input.focus();
+el.linkInput.focus();
