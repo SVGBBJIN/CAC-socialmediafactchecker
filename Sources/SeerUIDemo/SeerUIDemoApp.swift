@@ -29,6 +29,16 @@ struct SeerUIDemoApp: App {
         #if os(macOS)
         .defaultSize(width: 460, height: 720)
         #endif
+
+        // A second window for `LibraryConceptView` — see that file's header for why it's
+        // scripted mock data rather than a pipeline consumer.
+        WindowGroup("Seer — library concept") {
+            LibraryConceptView()
+                .preferredColorScheme(.dark)
+        }
+        #if os(macOS)
+        .defaultSize(width: 1040, height: 660)
+        #endif
     }
 }
 
