@@ -148,8 +148,16 @@ public struct GeminiFilesClient: Sendable {
         return try Self.parseFile(try await client.send(request))
     }
 
+    /// Polls with a short first wait that ramps up to `pollInterval`, rather than
+    /// sleeping the full interval before every check including the first. Most clips
+    /// this path handles turn `ACTIVE` in well under `pollInterval`, so a flat cadence
+    /// means paying it in full on every upload regardless of how fast this one actually
+    /// processed. Ramping never waits *longer* than the flat cadence would have — each
+    /// step is capped at `pollInterval` — so the worst case is unchanged.
     private func waitUntilActive(_ file: UploadedFile, apiKey: String) async throws -> UploadedFile {
         var current = file
+        var interval = min(0.5, pollInterval)
+        var elapsed: TimeInterval = 0
         for _ in 0..<maxPolls {
             if current.isActive { return current }
             guard current.isProcessing else {
@@ -159,7 +167,9 @@ public struct GeminiFilesClient: Sendable {
                 )
             }
             try Task.checkCancellation()
-            try await sleeper.sleep(for: pollInterval)
+            try await sleeper.sleep(for: interval)
+            elapsed += interval
+            interval = min(interval * 2, pollInterval)
 
             var request = URLRequest(url: baseURL.appendingPathComponent(current.name))
             request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
@@ -168,7 +178,7 @@ public struct GeminiFilesClient: Sendable {
             )
             current = try Self.parseFile(try await client.send(request))
         }
-        throw ExtractionError.timedOut(after: pollInterval * Double(maxPolls))
+        throw ExtractionError.timedOut(after: elapsed)
     }
 
     // MARK: - Wire
