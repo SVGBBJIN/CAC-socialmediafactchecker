@@ -7,6 +7,37 @@ import FoundationNetworking
 /// tests without a live endpoint.
 public protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
+
+    /// Send, refusing to hold more than `maxBytes` of response body in memory.
+    ///
+    /// Distinct from checking `data.count` after ``send(_:)`` returns, which is what the
+    /// media downloader used to do: by then the allocation the ceiling exists to prevent
+    /// has already happened. Every other call in this pipeline is a small JSON body, so
+    /// this is a requirement with a default rather than the primary method — only the
+    /// media path needs it.
+    func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse)
+}
+
+extension HTTPTransport {
+    /// Buffer first, then check — the behaviour a transport gets when it has no bounded
+    /// path of its own.
+    ///
+    /// This does **not** bound the allocation; it only stops an oversized body being
+    /// passed downstream to be base64-encoded and uploaded. Conformances that can do
+    /// better should say so, and ``URLSessionTransport`` does. Test doubles keep this,
+    /// which is what makes their fixtures behave the same as before.
+    public func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await send(request)
+        try Self.checkSize(data.count, against: maxBytes)
+        return (data, response)
+    }
+
+    static func checkSize(_ byteCount: Int, against maxBytes: Int) throws {
+        guard byteCount > maxBytes else { return }
+        throw ExtractionError.emptyResult(
+            reason: "media file is \(byteCount / 1_048_576) MB, over the \(maxBytes / 1_048_576) MB limit"
+        )
+    }
 }
 
 /// Suspends between retries. Injected so tests don't spend real seconds asleep.
@@ -59,6 +90,41 @@ public struct URLSessionTransport: HTTPTransport {
         }
         return (data, http)
     }
+
+    #if canImport(Darwin)
+    /// Streams the body to a temporary file, checks its size, and only then reads it in.
+    ///
+    /// The point is where the bytes accumulate. `data(for:)` builds the whole body in
+    /// memory before anything can inspect it, so a ceiling applied afterwards cannot stop
+    /// a share extension being killed for the allocation — the process is already dead or
+    /// it isn't. Downloading to disk moves the unbounded part onto storage, which is not
+    /// what jetsam counts, and keeps the in-memory copy bounded by `maxBytes`.
+    ///
+    /// What this deliberately does not do is abort mid-transfer: an oversized file is
+    /// pulled down in full before being rejected. Cancelling on the first chunk past the
+    /// ceiling needs a `URLSessionDataDelegate`, and the bandwidth saved is not worth that
+    /// machinery while the ceiling exists to protect memory rather than the network.
+    ///
+    /// Darwin only. `swift-corelibs-foundation` does not carry the async `download(for:)`,
+    /// and Linux is CI rather than a place this ships, so it keeps the buffered default.
+    public func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
+        let (fileURL, response) = try await session.download(for: request)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw ExtractionError.malformedResponse("non-HTTP response")
+        }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let size = attributes[.size] as? Int
+        else {
+            throw ExtractionError.malformedResponse("could not size the downloaded file")
+        }
+        try Self.checkSize(size, against: maxBytes)
+
+        let data = try Data(contentsOf: fileURL)
+        return (data, http)
+    }
+    #endif
 }
 
 /// Wraps a transport with the retry policy.
@@ -87,12 +153,22 @@ public struct RetryingHTTPClient: Sendable {
         try await sendReturningResponse(request).0
     }
 
+    /// As ``send(_:)``, bounded. See ``HTTPTransport/send(_:maxBytes:)``.
+    public func send(_ request: URLRequest, maxBytes: Int) async throws -> Data {
+        try await sendReturningResponse(request, maxBytes: maxBytes).0
+    }
+
     /// As ``send(_:)``, but hands back the response too.
     ///
     /// Needed by the callers that read something other than the body: Gemini's resumable
     /// upload returns its session URL in a header, and short-link resolution reads the
     /// post-redirect `URLResponse.url`.
-    public func sendReturningResponse(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    /// - Parameter maxBytes: when set, the body is bounded as it is received rather than
+    ///   checked afterwards. Only the media path passes this; everything else here is a
+    ///   small JSON body.
+    public func sendReturningResponse(
+        _ request: URLRequest, maxBytes: Int? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
         let deadline = Date().addingTimeInterval(policy.overallTimeout)
         var lastError: Error?
 
@@ -104,7 +180,13 @@ public struct RetryingHTTPClient: Sendable {
             }
 
             do {
-                let (data, response) = try await transport.send(request)
+                let data: Data
+                let response: HTTPURLResponse
+                if let maxBytes {
+                    (data, response) = try await transport.send(request, maxBytes: maxBytes)
+                } else {
+                    (data, response) = try await transport.send(request)
+                }
                 if (200..<300).contains(response.statusCode) {
                     return (data, response)
                 }

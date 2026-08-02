@@ -1,7 +1,52 @@
-# Seer — extraction pipeline
+# Seer
 
-Share a link from YouTube, TikTok or Instagram; get back one shape the fact-check layer
-can work with, regardless of where it came from.
+Paste a link to a short-form video; get its claims checked against live sources, each one
+carrying a citation you can follow.
+
+There are **two surfaces in this repository, and they are not equals.**
+
+| | What it is | State |
+|---|---|---|
+| **`web/`** | The fact-checker: link → transcript → research → cited verdict | **The product.** Ships, and is where the work happens |
+| **`Sources/`** | A Swift extraction pipeline: link → `ClaimContext` | **Extraction only.** No fact-check layer exists on this side |
+
+Read that table before reading anything else, because the obvious assumption — that the
+Swift package is the app and `web/` is a viewer for it — is backwards.
+
+## The two are diverging, and that is the main thing to fix
+
+`web/lib/tiktok.js`, `web/lib/gemini-files.js` and their neighbours are ports of the Swift
+files they name in their header comments. Nothing keeps the pairs in step, and they have
+not stayed in step:
+
+- **The web side is where fixes land.** Over the last three months: 42 commits to `web/`,
+  12 to `Sources/`.
+- **Fixes get made twice.** The Files API poll ramp was written for `web/` on 2026-07-30
+  and then rediscovered from scratch for Swift on 2026-08-02 — initially in the worse
+  shape of the two, bounding the wait by a poll count where the web version had already
+  worked out that a varying interval needs a wall-clock bound. Both now use the clock.
+- **Swift lagged on things that mattered.** A missing CDN host allowlist, an unbounded
+  media download, and a model chain that gave up on `503`. All three were correct in
+  `web/` first and have now been backported (see below); nothing stops the next three.
+
+**Decide which surface is canonical before adding to either.** If the Swift app is still a
+target, ports should now run web → Swift, because that is the direction the reference
+implementation actually points. If it isn't, deleting `Sources/` removes the whole problem
+and roughly 5,700 lines with it.
+
+## Where things stand
+
+| Platform | Path | web | Swift |
+|---|---|---|---|
+| **YouTube** | Gemini native URL ingestion | Working | Working |
+| **TikTok** | embed page → CDN MP4 → Gemini Flash | Working | Working — Gemini leg needs a key to confirm |
+| **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
+
+Only platforms that can actually be served get registered, so an Instagram link shared
+*to the Swift app* gets an honest "not supported yet" rather than an empty result. The web
+app answers it.
+
+## The Swift extraction pipeline
 
 ```swift
 let pipeline = SeerPipelineBuilder.makePipeline(.init(secrets: secrets))
@@ -13,19 +58,10 @@ context.candidateClaims   // claims the extractor noticed in passing — hints, 
 context.provenance        // platform, source URL, which path produced it
 ```
 
-Nothing downstream of `ClaimContext` knows which platform a claim came from.
-
-## Where things stand
-
-| Platform | Path | Status |
-|---|---|---|
-| **YouTube** | Gemini native URL ingestion | **Working** — verified against the live API |
-| **TikTok** | embed page → CDN MP4 → Gemini Flash | **Working** — resolve + download verified live; Gemini leg needs a key to confirm |
-| **Instagram** | post query → CDN MP4 → Gemini Flash | **Working in the web app** — resolve + download verified live 2026-08-02. The Swift extractor is still the capture one, still unregistered |
-
-Only platforms that can actually be served are registered, so a user sharing an Instagram
-link *to the Swift app* today still gets an honest "not supported yet" instead of an empty
-result. The web app answers it.
+Nothing downstream of `ClaimContext` knows which platform a claim came from. Note the
+shape of that promise: `ClaimContext` is documented as what "claim detection, retrieval and
+verdict rendering" consume, and **on the Swift side none of those exist.** Everything past
+extraction — search, citations, verdicts — lives only in `web/`.
 
 ### TikTok no longer needs screen capture
 
@@ -58,6 +94,35 @@ ported yet and is still the capture one. Verified live on 2026-08-02 against thr
 reels: 6.2 MB and 9.9 MB `video/mp4`, no credential.
 [docs/SPIKE-instagram.md](docs/SPIKE-instagram.md)
 
+## What the media path refuses to do
+
+Three guarantees on the `directMediaFetch` arm, all of which the web app had first and the
+Swift side has now been brought up to:
+
+**It will not fetch a host the platform doesn't serve from.** The media URL is read out of
+TikTok's undocumented `__FRONTITY_CONNECT_STATE__` blob, which makes it the one URL in the
+pipeline chosen by somebody else — reachable by anyone who can share a link.
+`Platform.allowedMediaHosts` lists the CDN families per platform and
+`allowsMediaHost(_:)` suffix-matches against a dot boundary, so `tiktokcdn.com.evil.test`
+is not a match for `tiktokcdn.com`. An empty list means *fetch nothing*, never *fetch
+anything*: a platform that hasn't declared its CDNs — Instagram, until the port lands —
+cannot download at all. A rejected host is named in the error, so a new CDN family is a
+one-line fix rather than an investigation.
+
+**It will not buffer an oversized clip into memory.** The ceiling used to be checked on
+`data.count` after the transport had already built the whole body, which cannot stop the
+allocation it exists to prevent — a share extension is killed for the memory or it isn't,
+and by then it is. `HTTPTransport.send(_:maxBytes:)` streams to a temporary file, sizes it
+on disk, and only reads it in once it is known to fit. It does not abort mid-transfer;
+disk is not what jetsam counts.
+
+**It will not give up on a model that is merely full.** Capacity in Gemini is metered per
+model, and the newest model in the chain is the one most likely to be overloaded — so a
+`503` is the *common* upstream failure, not an exotic one. It now falls through to the next
+model instead of failing the request. A bare `500` with no overload wording still doesn't:
+that is an outage, and walking the chain through one adds four more failed requests to a
+service already in trouble.
+
 ## Two things to action
 
 1. **Rotate the Gemini API key.** It was shared in a chat message during handoff — assume
@@ -83,10 +148,20 @@ Sources/SeerCapture/       iOS-only: WKWebView + RPScreenRecorder + diagnostic
 Sources/SeerUI/            SwiftUI progress animation + its observable model
 Sources/SeerUIDemo/        Runnable harness for the above — no key, no network
 Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
-web/                       Library UI — static front end, Gemini key held server-side
+web/                       The fact-checker. Static front end, Gemini key server-side
+  lib/tiktok.js            ⟷ Sources/SeerCore/Media/TikTokMediaResolver.swift
+  lib/gemini-files.js      ⟷ Sources/SeerCore/Gemini/GeminiFilesClient.swift
+  lib/gemini.js            ⟷ Sources/SeerCore/Gemini/GeminiVideoClient.swift
+  lib/media-fetch.js       ⟷ Sources/SeerCore/Media/MediaDownloader.swift
+  lib/instagram.js         no Swift counterpart — the unported resolver
+  lib/search.js            no Swift counterpart — research, citations, verdicts
+  lib/verified-chat.js     ⌟
 ```
 
-## Library UI
+The `⟷` pairs are the duplicated pipeline. They are ports, not shared code, and keeping
+them honest is manual — which is the problem described at the top of this file.
+
+## The fact-checker
 
 `web/` is a fact-checking library interface over Gemini: static front end, one server
 route that holds the key. No build step, no dependencies.
@@ -247,15 +322,20 @@ arm is strictly cheaper and less fragile than the one below it:
 2. **Can we get at the media file?** (TikTok, via its embed page) → `directMediaFetch`.
    Resolve, download, hand the bytes over.
 3. **Neither** → `screenCapture`. Render the embed, record the screen, transcribe. Slow,
-   needs a recording permission, and blocked on ReplayKit audio. Nothing should land here:
-   Instagram was the last platform on this arm and it turned out to belong on arm 2 (see
-   below), so the arm is carried only until that port lands.
+   needs a recording permission, and blocked on ReplayKit audio.
 
 All three conform to `ClaimExtractor` and produce the same `ClaimContext`. Adding X or
 Facebook means answering those questions, not rediscovering the fork.
 
-TikTok moved from arm 3 to arm 2, which is what unblocked it. Worth checking arm 2 for any
-platform sitting on arm 3 before investing in capture.
+**Arm 3 is dead and should be deleted.** TikTok moved off it, which is what unblocked
+TikTok; Instagram — its last remaining occupant — turned out to belong on arm 2, and
+`web/lib/instagram.js` proves it by shipping that route today. What survives is
+`SeerCapture/` plus `CaptureBasedExtractor`: an unregistered extractor for a platform that
+no longer needs it, carrying the unresolved ReplayKit audio bug, in the one module CI
+cannot even compile (everything there is behind `#if os(iOS)`, so Linux builds it to
+nothing). Porting the Instagram resolver retires the arm and the bug together. Until then,
+**do not spend anything on capture** — including tuning it; work done there is work spent
+on code the port deletes.
 
 ## Tests
 

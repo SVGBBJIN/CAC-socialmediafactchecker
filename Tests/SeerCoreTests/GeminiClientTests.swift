@@ -195,12 +195,29 @@ final class GeminiModelChainTests: XCTestCase {
         XCTAssertFalse(isQuotaFailure(status: 400, message: "invalid argument"))
     }
 
-    /// Server errors are the retry layer's job. Falling through would burn the whole chain
-    /// on a transient blip and land on the weakest model.
+    /// Capacity, like quota, is metered per model — and the newest model in the chain is
+    /// the one most likely to be full, so this is the *common* upstream failure rather
+    /// than an exotic one. This used to assert the opposite: a 503 was treated as an
+    /// outage and killed the request outright while four models that would have answered
+    /// went untried.
+    func testFallsThroughOnAnOverloadedModel() {
+        XCTAssertTrue(shouldFallThrough(on: ExtractionError.upstreamFailure(
+            service: "Gemini", status: 503, message: "The model is overloaded."
+        )))
+        XCTAssertTrue(shouldFallThrough(on: ExtractionError.upstreamFailure(
+            service: "Gemini", status: 500, message: "The service is currently unavailable."
+        )))
+        XCTAssertTrue(isOverloadedFailure(status: 500, message: "model is busy, try again"))
+    }
+
+    /// A bare 500 is an outage, not a full model. Walking the chain through one adds four
+    /// more failed requests to a service already in trouble, so the wording is what
+    /// separates them — not the status.
     func testDoesNotFallThroughOnTransientFailures() {
         XCTAssertFalse(shouldFallThrough(on: ExtractionError.upstreamFailure(
-            service: "Gemini", status: 503, message: "overloaded"
+            service: "Gemini", status: 500, message: "internal error"
         )))
+        XCTAssertFalse(isOverloadedFailure(status: 502, message: "overloaded"))
         XCTAssertFalse(shouldFallThrough(on: ExtractionError.upstreamFailure(
             service: "Gemini", status: 400, message: "request payload is malformed"
         )))

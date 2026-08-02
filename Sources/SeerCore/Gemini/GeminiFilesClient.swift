@@ -39,7 +39,7 @@ public struct GeminiFilesClient: Sendable {
     private let baseURL: URL
     private let uploadURL: URL
     private let pollInterval: TimeInterval
-    private let maxPolls: Int
+    private let maxPollWait: TimeInterval
 
     public init(
         transport: any HTTPTransport = URLSessionTransport.videoUnderstanding(),
@@ -49,7 +49,7 @@ public struct GeminiFilesClient: Sendable {
         baseURL: URL = URL(string: "https://generativelanguage.googleapis.com/v1beta")!,
         uploadURL: URL = URL(string: "https://generativelanguage.googleapis.com/upload/v1beta/files")!,
         pollInterval: TimeInterval = 2,
-        maxPolls: Int = 60
+        maxPollWait: TimeInterval = 120
     ) {
         self.transport = transport
         self.secrets = secrets
@@ -58,7 +58,7 @@ public struct GeminiFilesClient: Sendable {
         self.baseURL = baseURL
         self.uploadURL = uploadURL
         self.pollInterval = pollInterval
-        self.maxPolls = maxPolls
+        self.maxPollWait = maxPollWait
     }
 
     /// A file the API is holding for us.
@@ -148,17 +148,26 @@ public struct GeminiFilesClient: Sendable {
         return try Self.parseFile(try await client.send(request))
     }
 
-    /// Polls with a short first wait that ramps up to `pollInterval`, rather than
-    /// sleeping the full interval before every check including the first. Most clips
-    /// this path handles turn `ACTIVE` in well under `pollInterval`, so a flat cadence
-    /// means paying it in full on every upload regardless of how fast this one actually
-    /// processed. Ramping never waits *longer* than the flat cadence would have — each
-    /// step is capped at `pollInterval` — so the worst case is unchanged.
+    /// Polls with a short first wait that ramps up to `pollInterval`, bounded by
+    /// `maxPollWait` on the clock.
+    ///
+    /// A flat cadence is the right interval for a slow transcode and the wrong one for
+    /// the file this app actually uploads: a short-form clip is typically ready within a
+    /// few hundred milliseconds of finalizing, and a flat interval cannot discover that
+    /// sooner than its own length — so the fast case paid the interval in full, every
+    /// time, on the critical path before the model had even been called. Starting short
+    /// and backing off catches it almost immediately while a genuinely slow transcode
+    /// still settles to the same lazy cadence instead of hammering the API.
+    ///
+    /// The ceiling is a duration rather than a poll count for the same reason the web
+    /// implementation's is: once the interval varies, a count of polls no longer
+    /// describes how long anything waits, and the bound that matters is the clock.
     private func waitUntilActive(_ file: UploadedFile, apiKey: String) async throws -> UploadedFile {
         var current = file
-        var interval = min(0.5, pollInterval)
-        var elapsed: TimeInterval = 0
-        for _ in 0..<maxPolls {
+        var interval = min(0.25, pollInterval)
+        let deadline = Date().addingTimeInterval(maxPollWait)
+
+        while true {
             if current.isActive { return current }
             guard current.isProcessing else {
                 throw ExtractionError.upstreamFailure(
@@ -167,9 +176,11 @@ public struct GeminiFilesClient: Sendable {
                 )
             }
             try Task.checkCancellation()
-            try await sleeper.sleep(for: interval)
-            elapsed += interval
-            interval = min(interval * 2, pollInterval)
+
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { throw ExtractionError.timedOut(after: maxPollWait) }
+            try await sleeper.sleep(for: min(interval, remaining))
+            interval = min(interval * 1.6, pollInterval)
 
             var request = URLRequest(url: baseURL.appendingPathComponent(current.name))
             request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
@@ -178,7 +189,6 @@ public struct GeminiFilesClient: Sendable {
             )
             current = try Self.parseFile(try await client.send(request))
         }
-        throw ExtractionError.timedOut(after: elapsed)
     }
 
     // MARK: - Wire

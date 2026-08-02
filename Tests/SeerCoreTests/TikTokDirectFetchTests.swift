@@ -257,13 +257,81 @@ final class TikTokResolverNetworkTests: XCTestCase {
 }
 
 final class MediaDownloaderTests: XCTestCase {
+    /// A host TikTok actually serves from. Not incidental: the downloader refuses any
+    /// host outside ``Platform/allowedMediaHosts``, so a made-up CDN name here would
+    /// test the rejection path rather than the download.
     static let resolved = ResolvedMedia(
         sourceURL: TikTokEmbedParsingTests.sourceURL,
         platform: .tikTok,
-        mediaURL: URL(string: "https://cdn.example/video.mp4")!,
+        mediaURL: URL(string: "https://v16m.tiktokcdn-us.com/video.mp4")!,
         mimeType: "video/mp4",
         referer: URL(string: "https://www.tiktok.com/")
     )
+
+    /// The media URL is read out of TikTok's own JSON blob, which makes it the one URL in
+    /// the pipeline chosen by someone else. Anyone who can share a link can influence it.
+    func testRefusesAHostThePlatformDoesNotServeFrom() async {
+        let hostile = [
+            // Somewhere else entirely.
+            "https://evil.test/video.mp4",
+            // Suffix-matched, not substring-matched: this must not pass for tiktokcdn.com.
+            "https://tiktokcdn.com.evil.test/video.mp4",
+            // The local network, which is the reason this check is not merely tidiness.
+            "http://169.254.169.254/latest/meta-data/",
+        ]
+        for string in hostile {
+            var media = Self.resolved
+            media.mediaURL = URL(string: string)!
+            let transport = StubTransport([.init(status: 200, body: Data(repeating: 1, count: 16))])
+            let downloader = MediaDownloader(transport: transport, sleeper: ImmediateSleeper())
+
+            do {
+                _ = try await downloader.download(media)
+                XCTFail("expected \(string) to be refused")
+            } catch let error as ExtractionError {
+                guard case .upstreamFailure(_, _, let message) = error else {
+                    return XCTFail("expected upstreamFailure, got \(error)")
+                }
+                XCTAssertTrue(message.contains("refusing to fetch"), message)
+            } catch {
+                XCTFail("unexpected \(error)")
+            }
+            // The point of the check is that nothing was fetched at all.
+            let count = await transport.requestCount
+            XCTAssertEqual(count, 0, "\(string) should not have been requested")
+        }
+    }
+
+    /// Instagram is still on the capture arm and has declared no CDN hosts, so the
+    /// direct-fetch path must refuse it rather than fetch whatever it is handed. An
+    /// empty allowlist means "nothing", never "anything".
+    func testAPlatformWithNoDeclaredHostsCannotDownload() async {
+        var media = Self.resolved
+        media.platform = .instagram
+        media.mediaURL = URL(string: "https://scontent.cdninstagram.com/v.mp4")!
+        let transport = StubTransport([.init(status: 200, body: Data(repeating: 1, count: 16))])
+        let downloader = MediaDownloader(transport: transport, sleeper: ImmediateSleeper())
+
+        do {
+            _ = try await downloader.download(media)
+            XCTFail("expected the download to be refused")
+        } catch let error as ExtractionError {
+            guard case .upstreamFailure = error else {
+                return XCTFail("expected upstreamFailure, got \(error)")
+            }
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    func testAcceptsTikTokCDNSubdomains() {
+        for host in ["v16m.tiktokcdn-us.com", "tiktokcdn.com", "p16.tiktokv.com", "x.muscdn.com"] {
+            XCTAssertTrue(Platform.tikTok.allowsMediaHost(host), host)
+        }
+        for host in ["tiktokcdn.com.evil.test", "eviltiktokcdn.com", "", "cdn.example"] {
+            XCTAssertFalse(Platform.tikTok.allowsMediaHost(host), host)
+        }
+    }
 
     func testDownloadsAndSendsReferer() async throws {
         let payload = Data(repeating: 3, count: 4096)

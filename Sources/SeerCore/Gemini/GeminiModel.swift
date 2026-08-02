@@ -60,14 +60,21 @@ public struct GeminiModelChain: Sendable, Equatable {
 ///   meters quota per model, so the next model in the chain has its own and frequently
 ///   answers. Treating it as terminal, as this did, meant the chain covered the rare
 ///   failure (a retired model ID) and not the common one.
-/// - Everything else (5xx, policy refusals, a bad key) is terminal; falling through would
-///   hammer an outage or re-spend a credential that cannot work.
+/// - 503, or a 500 whose body says the model is overloaded: fall through. Capacity in
+///   Gemini is metered **per model** exactly as quota is, and the newest model in the
+///   chain is the one most likely to be full — so this is the single most common
+///   transient upstream failure, and treating it as terminal killed requests outright
+///   while four models that would have answered went untried. See
+///   ``isOverloadedFailure(status:message:)``.
+/// - Everything else (a plain 5xx, policy refusals, a bad key) is terminal; falling
+///   through would hammer an outage or re-spend a credential that cannot work.
 func shouldFallThrough(on error: Error) -> Bool {
     guard case let ExtractionError.upstreamFailure(_, status, message) = error else { return false }
     // First, and unconditionally: a bad key arrives as a 400 or 403, both of which the
     // rules below would otherwise wave through.
     if isInvalidKeyFailure(status: status, message: message) { return false }
     if isQuotaFailure(status: status, message: message) { return true }
+    if isOverloadedFailure(status: status, message: message) { return true }
     switch status {
     case 404, 403:
         return true
@@ -98,6 +105,31 @@ func isQuotaFailure(status: Int?, message: String) -> Bool {
         || lowered.contains("rate limit")
         || lowered.contains("resource_exhausted")
         || lowered.contains("resource exhausted")
+}
+
+/// Whether a failure means "this model has no capacity right this second".
+///
+/// 503 is the documented status. A 500 counts too when the body says overloaded —
+/// Gemini's own guidance for `INTERNAL` is to retry or try a different model, which is
+/// the same remedy the chain applies.
+///
+/// Kept separate from ``isQuotaFailure(status:message:)`` even though both fall through,
+/// because they are different conditions and worth telling apart in a log: quota is an
+/// allowance that ran out and may take a minute to refresh, overload is Google's capacity
+/// at this instant and usually clears in seconds.
+///
+/// A plain 500 with no such wording is deliberately **not** included. That is an outage,
+/// and walking the whole chain through one adds four failed requests to a service that is
+/// already in trouble.
+func isOverloadedFailure(status: Int?, message: String) -> Bool {
+    if status == 503 { return true }
+    guard status == 500 else { return false }
+    let lowered = message.lowercased()
+    return lowered.contains("overload")
+        || lowered.contains("unavailable")
+        || lowered.contains("try again")
+        || lowered.contains("capacity")
+        || lowered.contains("busy")
 }
 
 /// Whether a failure is really "that key is no good", whatever status it arrived under.
