@@ -21,7 +21,7 @@ import {
   supportsThinkingBudget,
   retryAfterMs,
   REQUEST_TIMEOUT_MS,
-  resolveTikTokParts,
+  resolveClipParts,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_BUDGET_TOKENS,
   DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS,
@@ -45,6 +45,16 @@ import {
   downloadTikTokMedia,
   TikTokError,
 } from "./lib/tiktok.js";
+import {
+  instagramShortcode,
+  isInstagramShortLink,
+  findInstagramLinks,
+  parseMediaResponse,
+  resolveInstagramVideo,
+  downloadInstagramMedia,
+  resetInstagramSession,
+  InstagramError,
+} from "./lib/instagram.js";
 import { parseFile, uploadFile } from "./lib/gemini-files.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
 import {
@@ -1522,12 +1532,12 @@ test("the CDN's content type wins over the resolver's guess", async () => {
 
 test("a small clip rides inline, as base64 next to the text", async () => {
   const bytes = Buffer.from("fake mp4 bytes");
-  const tikTok = await resolveTikTokParts([{ role: "user", content: `check ${SOURCE_URL}` }], {
+  const clips = await resolveClipParts([{ role: "user", content: `check ${SOURCE_URL}` }], {
     resolveImpl: async () => resolvedClip(),
     downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
   });
 
-  const contents = toGeminiContents([{ role: "user", content: `check ${SOURCE_URL}` }], { tikTok });
+  const contents = toGeminiContents([{ role: "user", content: `check ${SOURCE_URL}` }], { clips });
   assert.deepEqual(contents[0].parts[0], {
     inline_data: { mime_type: "video/mp4", data: bytes.toString("base64") },
   });
@@ -1540,7 +1550,7 @@ test("a clip past the inline ceiling goes through the Files API and is deleted a
   const deleted = [];
   const messages = [{ role: "user", content: SOURCE_URL }];
 
-  const tikTok = await resolveTikTokParts(messages, {
+  const clips = await resolveClipParts(messages, {
     apiKey: "k",
     inlineByteLimit: 8,
     resolveImpl: async () => resolvedClip(),
@@ -1549,19 +1559,19 @@ test("a clip past the inline ceiling goes through the Files API and is deleted a
     deleteImpl: async (file) => deleted.push(file.name),
   });
 
-  const contents = toGeminiContents(messages, { tikTok });
+  const contents = toGeminiContents(messages, { clips });
   assert.deepEqual(contents[0].parts[0], {
     file_data: { file_uri: "https://files/abc", mime_type: "video/mp4" },
   });
 
   assert.deepEqual(deleted, [], "nothing is cleaned up until the caller says so");
-  await tikTok.cleanup();
+  await clips.cleanup();
   assert.deepEqual(deleted, ["files/abc"], "an uploaded clip does not stay in the Files quota");
 });
 
 test("a video that can't be fetched becomes a note, not a failed conversation", async () => {
   const messages = [{ role: "user", content: `is this true? ${SOURCE_URL}` }];
-  const tikTok = await resolveTikTokParts(messages, {
+  const clips = await resolveClipParts(messages, {
     resolveImpl: async () => {
       throw new TikTokError("TikTok returned no video for this link — it may be private", {
         kind: "unavailable",
@@ -1569,7 +1579,7 @@ test("a video that can't be fetched becomes a note, not a failed conversation", 
     },
   });
 
-  const contents = toGeminiContents(messages, { tikTok });
+  const contents = toGeminiContents(messages, { clips });
   assert.equal(contents[0].parts.length, 1, "no media part");
   assert.match(contents[0].parts[0].text, /could not be attached: TikTok returned no video/);
   assert.match(contents[0].parts[0].text, /is this true\?/, "the user's own words survive");
@@ -1580,7 +1590,7 @@ test("a short link and the URL it redirects to are one video, attached once", as
   const messages = [{ role: "user", content: `${short} and ${SOURCE_URL}` }];
   let downloads = 0;
 
-  const tikTok = await resolveTikTokParts(messages, {
+  const clips = await resolveClipParts(messages, {
     resolveImpl: async () => resolvedClip(),
     downloadImpl: async () => {
       downloads += 1;
@@ -1589,7 +1599,7 @@ test("a short link and the URL it redirects to are one video, attached once", as
   });
 
   assert.equal(downloads, 1, "the second link resolves to a video already in hand");
-  const parts = toGeminiContents(messages, { tikTok })[0].parts;
+  const parts = toGeminiContents(messages, { clips })[0].parts;
   assert.equal(parts.filter((p) => p.inline_data).length, 1);
 });
 
@@ -1599,12 +1609,12 @@ test("a video is attached at its first mention, not on every turn that quotes it
     { role: "assistant", content: `About ${SOURCE_URL}: it claims...` },
     { role: "user", content: `but ${SOURCE_URL} also says...` },
   ];
-  const tikTok = await resolveTikTokParts(messages, {
+  const clips = await resolveClipParts(messages, {
     resolveImpl: async () => resolvedClip(),
     downloadImpl: async () => ({ bytes: Buffer.from("x"), mimeType: "video/mp4" }),
   });
 
-  const contents = toGeminiContents(messages, { tikTok });
+  const contents = toGeminiContents(messages, { clips });
   assert.equal(contents[0].parts.filter((p) => p.inline_data).length, 1);
   assert.equal(contents[1].parts.length, 1, "an assistant turn never carries media");
   assert.equal(contents[2].parts.length, 1, "re-quoting does not re-send the clip");
@@ -1615,7 +1625,7 @@ test("only the first few clips in one message are fetched", async () => {
   const messages = [{ role: "user", content: links.join(" ") }];
   let downloads = 0;
 
-  const tikTok = await resolveTikTokParts(messages, {
+  const clips = await resolveClipParts(messages, {
     maxAttachments: 2,
     resolveImpl: async (link) => resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link }),
     downloadImpl: async () => {
@@ -1625,7 +1635,7 @@ test("only the first few clips in one message are fetched", async () => {
   });
 
   assert.equal(downloads, 2);
-  const parts = toGeminiContents(messages, { tikTok })[0].parts;
+  const parts = toGeminiContents(messages, { clips })[0].parts;
   assert.equal(parts.filter((p) => p.inline_data).length, 2);
   assert.match(parts.at(-1).text, /only the first 2 TikTok videos/);
 });
@@ -1639,7 +1649,7 @@ test("resolving and downloading two distinct clips overlaps instead of running i
   let downloading = 0;
   let maxConcurrentDownloads = 0;
 
-  await resolveTikTokParts(messages, {
+  await resolveClipParts(messages, {
     resolveImpl: async (link) => {
       resolving += 1;
       maxConcurrentResolves = Math.max(maxConcurrentResolves, resolving);
@@ -1662,10 +1672,10 @@ test("resolving and downloading two distinct clips overlaps instead of running i
 
 test("with no TikTok link, contents are byte-for-byte what they were before", async () => {
   const messages = [{ role: "user", content: "hi" }];
-  const tikTok = await resolveTikTokParts(messages, {
+  const clips = await resolveClipParts(messages, {
     resolveImpl: async () => assert.fail("must not resolve anything"),
   });
-  assert.deepEqual(toGeminiContents(messages, { tikTok }), toGeminiContents(messages));
+  assert.deepEqual(toGeminiContents(messages, { clips }), toGeminiContents(messages));
 });
 
 test("streamChat attaches the clip and cleans up its upload when the answer is done", async () => {
@@ -1682,7 +1692,7 @@ test("streamChat attaches the clip and cleans up its upload when the answer is d
       messages: [{ role: "user", content: SOURCE_URL }],
       models: ["gemini-3.6-flash"],
       fetchImpl,
-      tikTokOptions: {
+      clipOptions: {
         inlineByteLimit: 1,
         resolveImpl: async () => resolvedClip(),
         downloadImpl: async () => ({ bytes: Buffer.alloc(32), mimeType: "video/mp4" }),
@@ -1718,6 +1728,399 @@ test("attachMedia: false leaves a link as plain text and fetches nothing", async
 
   assert.equal(sentBody.contents[0].parts.length, 1);
   assert.equal(sentBody.contents[0].parts[0].text, SOURCE_URL);
+});
+
+/* ---------------- Instagram ---------------- */
+
+// The payload below is **real**. It is the `xdt_shortcode_media` object Instagram's
+// `/graphql/query` returned for `https://www.instagram.com/reel/DbbSK7rD-SW/` to an
+// anonymous request on 2026-08-02, trimmed to the fields the parser reads and with the
+// signed query strings on the media URLs cut, because they expire.
+//
+// Same reasoning as the TikTok fixture above: this is an undocumented internal payload,
+// so a fixture written from an idea of its shape would prove nothing.
+const IG_SHORTCODE = "DbbSK7rD-SW";
+const IG_SOURCE_URL = `https://www.instagram.com/reel/${IG_SHORTCODE}/`;
+const IG_MEDIA_URL =
+  "https://scontent-lga3-1.cdninstagram.com/o1/v/t2/f2/m86/" +
+  "AQODeSQK_V6RlXKL1Fk8C2RCRSrsWEM712HOLP2TOjtw.mp4?_nc_cat=103&_nc_sid=5e9851";
+
+function igMedia(overrides = {}) {
+  return {
+    __typename: "XDTGraphVideo",
+    id: "3952833014052938902",
+    shortcode: IG_SHORTCODE,
+    dimensions: { height: 1920, width: 1080 },
+    is_video: true,
+    video_url: IG_MEDIA_URL,
+    video_duration: 53.589,
+    has_audio: true,
+    product_type: "clips",
+    video_view_count: 843934,
+    owner: { id: "528817151", username: "nasa", full_name: "NASA", is_private: false },
+    edge_media_to_caption: {
+      edges: [{ node: { text: "We’re about to see the bigger picture. 🌌" } }],
+    },
+    ...overrides,
+  };
+}
+
+const igPayload = (media = igMedia()) => ({ data: { xdt_shortcode_media: media } });
+
+/** The shape `resolveInstagramVideo` hands to the downloader, without doing the fetch. */
+function resolvedReel(overrides = {}) {
+  return {
+    sourceURL: IG_SOURCE_URL,
+    videoID: IG_SHORTCODE,
+    mediaURL: IG_MEDIA_URL,
+    mimeType: "video/mp4",
+    referer: "https://www.instagram.com/",
+    duration: 53.589,
+    width: 1080,
+    height: 1920,
+    authorName: "nasa",
+    caption: "We’re about to see the bigger picture. 🌌",
+    ...overrides,
+  };
+}
+
+/**
+ * A stub standing in for both legs of a resolve: the homepage GET that seeds the CSRF
+ * cookie, and the POST that runs the query. Records what the query was sent with, since
+ * the token riding on it is the difference between a 200 and Instagram's 403 shell.
+ */
+function igFetch(responder) {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    if (String(url) === "https://www.instagram.com/") {
+      return {
+        ok: true,
+        status: 200,
+        url: String(url),
+        headers: {
+          get: (name) =>
+            String(name).toLowerCase() === "set-cookie"
+              ? "csrftoken=tok123; Path=/, mid=abc; Path=/"
+              : null,
+        },
+        body: null,
+      };
+    }
+    return responder(String(url), init, calls);
+  };
+  return { fetchImpl, calls };
+}
+
+function igQueryResponse(payload, { status = 200 } = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    url: "https://www.instagram.com/graphql/query",
+    headers: { get: () => null },
+    json: async () => payload,
+    text: async () => JSON.stringify(payload),
+    body: null,
+  };
+}
+
+test("recognizes Instagram post URLs in every share format", () => {
+  assert.equal(instagramShortcode(IG_SOURCE_URL), IG_SHORTCODE);
+  assert.equal(instagramShortcode(`https://www.instagram.com/reels/${IG_SHORTCODE}/`), IG_SHORTCODE);
+  assert.equal(instagramShortcode(`https://www.instagram.com/p/${IG_SHORTCODE}/`), IG_SHORTCODE);
+  assert.equal(instagramShortcode(`https://www.instagram.com/tv/${IG_SHORTCODE}/`), IG_SHORTCODE);
+  // The share sheet's profile-prefixed form, and the tracking parameter it appends.
+  assert.equal(instagramShortcode(`https://www.instagram.com/nasa/reel/${IG_SHORTCODE}/`), IG_SHORTCODE);
+  assert.equal(instagramShortcode(`${IG_SOURCE_URL}?igsh=MWx5eHo%3D`), IG_SHORTCODE);
+});
+
+test("rejects profiles, non-post links and lookalike hosts", () => {
+  assert.equal(instagramShortcode("https://www.instagram.com/nasa/"), null);
+  assert.equal(instagramShortcode("https://www.instagram.com/explore/tags/space/"), null);
+  assert.equal(instagramShortcode(`https://instagram.com.evil.test/reel/${IG_SHORTCODE}/`), null);
+  assert.equal(instagramShortcode("https://www.tiktok.com/@u/video/6718335390845095173"), null);
+  assert.equal(instagramShortcode("not a url"), null);
+});
+
+test("share links are recognised but carry no shortcode of their own", () => {
+  for (const link of [
+    "https://www.instagram.com/share/reel/BAbCdEfGh/",
+    "https://www.instagram.com/share/p/BAbCdEfGh/",
+    "https://www.instagram.com/share/BAbCdEfGh/",
+  ]) {
+    assert.equal(isInstagramShortLink(link), true, link);
+    // The code in a share URL is not a shortcode; reading it as one would query for a
+    // post that doesn't exist.
+    assert.equal(instagramShortcode(link), null, link);
+  }
+  assert.equal(isInstagramShortLink(IG_SOURCE_URL), false);
+});
+
+test("finds distinct Instagram links in prose, without trailing punctuation", () => {
+  const text = `look at ${IG_SOURCE_URL}, then ${IG_SOURCE_URL} again, and https://www.instagram.com/share/reel/AbC1/.`;
+  assert.deepEqual(findInstagramLinks(text), [
+    IG_SOURCE_URL,
+    "https://www.instagram.com/share/reel/AbC1/",
+  ]);
+});
+
+test("parses the real post payload", () => {
+  const clip = parseMediaResponse(igPayload(), {
+    shortcode: IG_SHORTCODE,
+    sourceURL: IG_SOURCE_URL,
+  });
+
+  assert.equal(new URL(clip.mediaURL).hostname, "scontent-lga3-1.cdninstagram.com");
+  assert.equal(clip.mimeType, "video/mp4");
+  assert.equal(clip.videoID, IG_SHORTCODE);
+  assert.equal(Math.round(clip.duration), 54);
+  assert.equal(clip.width, 1080);
+  assert.equal(clip.height, 1920);
+  assert.equal(clip.authorName, "nasa");
+  assert.match(clip.caption, /bigger picture/);
+});
+
+test("a carousel is searched for its video slide, and photo posts are declined by name", () => {
+  const carousel = igPayload({
+    __typename: "XDTGraphSidecar",
+    shortcode: "DbYaLffE2DD",
+    edge_sidecar_to_children: {
+      edges: [
+        { node: { __typename: "XDTGraphImage", dimensions: { width: 1080, height: 720 } } },
+        {
+          node: {
+            __typename: "XDTGraphVideo",
+            video_url: IG_MEDIA_URL,
+            video_duration: 12,
+            dimensions: { width: 1080, height: 1350 },
+          },
+        },
+      ],
+    },
+  });
+  const clip = parseMediaResponse(carousel, { shortcode: "DbYaLffE2DD", sourceURL: IG_SOURCE_URL });
+  assert.equal(clip.mediaURL, IG_MEDIA_URL);
+  assert.equal(clip.height, 1350, "the slide's own dimensions, not the post's");
+
+  // A post with nothing playable in it is a "that isn't a video" answer, not a parse bug.
+  for (const [payload, expected] of [
+    [igPayload({ __typename: "XDTGraphImage", is_video: false, video_url: null }), /photo post/],
+    [
+      igPayload({
+        __typename: "XDTGraphSidecar",
+        is_video: false,
+        video_url: null,
+        edge_sidecar_to_children: { edges: [{ node: { __typename: "XDTGraphImage" } }] },
+      }),
+      /carousel of stills/,
+    ],
+  ]) {
+    assert.throws(
+      () => parseMediaResponse(payload, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL }),
+      (error) => error instanceof InstagramError && error.kind === "notAVideo" && expected.test(error.message),
+    );
+  }
+});
+
+test("a missing post reads as unavailable; a rejected query names the doc_id to rotate", () => {
+  assert.throws(
+    () =>
+      parseMediaResponse({ data: { xdt_shortcode_media: null } }, {
+        shortcode: IG_SHORTCODE,
+        sourceURL: IG_SOURCE_URL,
+      }),
+    (error) => error.kind === "unavailable" && /private, removed/.test(error.message),
+  );
+
+  // This is the failure most likely to be waiting when Instagram rotates the query, so the
+  // message has to say what to change rather than just that something went wrong.
+  assert.throws(
+    () =>
+      parseMediaResponse(
+        { data: null, errors: [{ message: "execution error", severity: "CRITICAL" }] },
+        { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL },
+      ),
+    (error) => error.kind === "malformed" && /INSTAGRAM_DOC_ID/.test(error.message),
+  );
+});
+
+test("the query carries a CSRF token seeded from the homepage, and reuses it", async () => {
+  resetInstagramSession();
+  const { fetchImpl, calls } = igFetch(() => igQueryResponse(igPayload()));
+
+  const first = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl });
+  assert.equal(first.videoID, IG_SHORTCODE);
+
+  assert.equal(calls[0].url, "https://www.instagram.com/");
+  const query = calls[1];
+  assert.equal(query.url, "https://www.instagram.com/graphql/query");
+  assert.equal(query.init.method, "POST");
+  assert.equal(query.init.headers["x-csrftoken"], "tok123");
+  assert.match(query.init.headers.cookie, /csrftoken=tok123/);
+  assert.match(query.init.body, /shortcode/);
+  assert.match(query.init.body, new RegExp(IG_SHORTCODE));
+
+  // Anonymous traffic is rate-limited hard enough that a homepage load per resolve is a
+  // real cost, and the token outlives a single request.
+  await resolveInstagramVideo(`https://www.instagram.com/p/${IG_SHORTCODE}/`, { fetchImpl });
+  assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 1);
+});
+
+test("concurrent resolves share one homepage seed", async () => {
+  resetInstagramSession();
+  const { fetchImpl, calls } = igFetch(() => igQueryResponse(igPayload()));
+
+  await Promise.all([
+    resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl }),
+    resolveInstagramVideo(`https://www.instagram.com/reel/DbYmqpplO_N/`, { fetchImpl }),
+  ]);
+
+  assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 1);
+});
+
+test("a throttled query is reported as try-again, not as a broken link", async () => {
+  resetInstagramSession();
+  const { fetchImpl } = igFetch(() => igQueryResponse({}, { status: 429 }));
+
+  await assert.rejects(
+    resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl }),
+    (error) => error.kind === "rateLimited" && error.retryable && /rate-limiting/.test(error.message),
+  );
+});
+
+test("a 403 re-seeds the session once before giving up", async () => {
+  resetInstagramSession();
+  let queries = 0;
+  const { fetchImpl, calls } = igFetch(() => {
+    queries += 1;
+    // The stale-token case: the first query is refused, the one after the re-seed works.
+    return queries === 1 ? igQueryResponse({}, { status: 403 }) : igQueryResponse(igPayload());
+  });
+
+  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl });
+  assert.equal(clip.videoID, IG_SHORTCODE);
+  assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 2);
+});
+
+test("a share link is followed, and the shortcode read off where it landed", async () => {
+  resetInstagramSession();
+  const share = "https://www.instagram.com/share/reel/AbC1dEf/";
+  const { fetchImpl, calls } = igFetch((url) => {
+    if (url === share) {
+      return { ok: true, status: 200, url: IG_SOURCE_URL, headers: { get: () => null }, body: null };
+    }
+    return igQueryResponse(igPayload());
+  });
+
+  const clip = await resolveInstagramVideo(share, { fetchImpl });
+  assert.equal(clip.videoID, IG_SHORTCODE);
+  assert.equal(calls[0].url, share);
+});
+
+test("media is fetched only from Instagram's own CDNs", async () => {
+  // The media URL comes out of Instagram's JSON. Without the allowlist the endpoint would
+  // fetch whatever that JSON named.
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    return mediaResponse(Buffer.from("nope"));
+  };
+
+  await assert.rejects(
+    downloadInstagramMedia(resolvedReel({ mediaURL: "https://evil.test/payload.mp4" }), { fetchImpl }),
+    /unexpected host \(evil\.test\)/,
+  );
+  await assert.rejects(
+    downloadInstagramMedia(resolvedReel({ mediaURL: "https://cdninstagram.com.evil.test/x.mp4" }), {
+      fetchImpl,
+    }),
+    /unexpected host/,
+  );
+  assert.equal(called, false, "no request should leave the process");
+
+  // Both families Instagram serves media from are allowed.
+  for (const host of ["scontent-lga3-1.cdninstagram.com", "video-lhr6-1.xx.fbcdn.net"]) {
+    const media = await downloadInstagramMedia(
+      resolvedReel({ mediaURL: `https://${host}/v/reel.mp4` }),
+      { fetchImpl: async () => mediaResponse(Buffer.from("bytes")) },
+    );
+    assert.equal(media.mimeType, "video/mp4", host);
+  }
+});
+
+test("an oversized reel is refused from its content-length, before a byte is buffered", async () => {
+  let pulled = false;
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (n) => (n === "content-length" ? String(200 * 1024 * 1024) : null) },
+    body: (async function* () {
+      pulled = true;
+      yield Buffer.alloc(10);
+    })(),
+  });
+
+  await assert.rejects(
+    downloadInstagramMedia(resolvedReel(), { fetchImpl, maxBytes: 1024 }),
+    (error) => error.kind === "tooLarge" && /200 MB/.test(error.message),
+  );
+  assert.equal(pulled, false, "the declared size is enough — don't start the transfer");
+});
+
+test("an Instagram reel is attached the same way a TikTok is", async () => {
+  resetInstagramSession();
+  const bytes = Buffer.from("fake mp4 bytes");
+  const messages = [{ role: "user", content: `is this real? ${IG_SOURCE_URL}` }];
+
+  const clips = await resolveClipParts(messages, {
+    resolveImpl: async () => resolvedReel(),
+    downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
+  });
+
+  const parts = toGeminiContents(messages, { clips })[0].parts;
+  assert.deepEqual(parts[0], {
+    inline_data: { mime_type: "video/mp4", data: bytes.toString("base64") },
+  });
+  assert.match(parts[1].text, /Attached: the Instagram video/);
+  assert.match(parts[1].text, /posted by nasa/);
+  assert.match(parts[1].text, /Its caption reads: We’re about to see/);
+});
+
+test("a failed reel becomes a note naming Instagram, not a failed conversation", async () => {
+  const messages = [{ role: "user", content: `check ${IG_SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    resolveImpl: async () => {
+      throw new InstagramError("Instagram returned no post for that link — it may be private", {
+        kind: "unavailable",
+      });
+    },
+  });
+
+  const parts = toGeminiContents(messages, { clips })[0].parts;
+  assert.equal(parts.length, 1, "no media part");
+  assert.match(parts[0].text, /The Instagram video at .* could not be attached: Instagram returned no post/);
+});
+
+test("one message holding both platforms attaches both, and the cap counts across them", async () => {
+  const messages = [
+    { role: "user", content: `${SOURCE_URL} and ${IG_SOURCE_URL} and https://www.instagram.com/reel/DbYmqpplO_N/` },
+  ];
+
+  const clips = await resolveClipParts(messages, {
+    maxAttachments: 2,
+    resolveImpl: async (link) =>
+      link.includes("tiktok")
+        ? resolvedClip({ sourceURL: link })
+        : resolvedReel({ videoID: instagramShortcode(link), sourceURL: link }),
+    downloadImpl: async () => ({ bytes: Buffer.from("x"), mimeType: "video/mp4" }),
+  });
+
+  const parts = toGeminiContents(messages, { clips })[0].parts;
+  assert.equal(parts.filter((p) => p.inline_data).length, 2, "the cap is two clips per message");
+  assert.match(parts.at(-1).text, /Attached: the TikTok video/);
+  assert.match(parts.at(-1).text, /Attached: the Instagram video/);
+  // The third link is over the cap and says so, rather than vanishing.
+  assert.match(parts.at(-1).text, /only the first 2 Instagram videos/);
 });
 
 /* ---------------- Gemini Files ---------------- */

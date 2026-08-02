@@ -74,8 +74,9 @@ Directory → `web`** in project settings instead also works — then Vercel see
 the project root, zero-config detection applies, and the root `vercel.json` is ignored.
 Either path deploys correctly; neither one requires the other.
 
-**Check the function timeout before trusting video on a deployment.** A TikTok link is the
-slowest request this app makes: resolve the embed, download the clip, possibly upload it,
+**Check the function timeout before trusting video on a deployment.** A TikTok or
+Instagram link is the slowest request this app makes: resolve the post, download the clip,
+possibly upload it,
 *then* wait for Gemini to watch it. That runs well past Vercel's default max duration
 (10s on Hobby), and a function killed mid-flight used to look to the user like the answer
 simply stopped — no error, no text, an empty bubble that vanished on the next render. It
@@ -123,6 +124,8 @@ web/
   lib/citations.js The ledger: every source the model may cite, numbered as retrieved.
   lib/citation-cleanup.js  Merge, dedupe, cap, renumber, and delete invented markers.
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
+  lib/instagram.js  Instagram link → post query → CDN URL → the MP4 bytes.
+  lib/media-fetch.js  What both of those share: deadline, host allowlist, capped read.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
@@ -135,6 +138,46 @@ web/
   test-cleanup.js  Tests for citation cleanup — what it removes, and what it must not.
   test-ui.mjs      Browser tests for app.js. Opt-in — see below.
 ```
+
+## How a pasted video reaches the model
+
+Three shapes, in order of what they cost us:
+
+| Platform | How it reaches Gemini | Credential |
+| --- | --- | --- |
+| YouTube | the watch URL, as a `file_data` part — Gemini fetches and watches it | none |
+| TikTok | `/embed/v2/<id>` → `__FRONTITY_CONNECT_STATE__` → CDN MP4 → bytes in the request | none |
+| Instagram | `/graphql/query` by shortcode → `video_url` → CDN MP4 → bytes in the request | none |
+
+Only YouTube is fetched by Gemini itself. The other two arrive as bytes: inline base64 up
+to ~14 MB, and through the Files API past that (`lib/gemini-files.js`), which is also why
+they are the slowest requests the app makes and why the cap is two clips per message.
+
+**Instagram, specifically.** `docs/SPIKE-instagram.md` originally shelved this platform:
+the legacy oEmbed endpoint is dead, the Graph replacement needs an App-Review-gated Meta
+token, and the embed iframe carries no media — re-checked on 2026-08-02, it still serves a
+React shell with nothing in it, and `/api/v1/media/<id>/info/` redirects to login.
+
+What works without any of that is the query instagram.com's own web client runs: a POST to
+`/graphql/query` with a `doc_id` and `{"shortcode": …}`, carrying a CSRF token taken from a
+plain GET of the homepage. It returns the post — including `video_url`, a signed CDN link
+that then serves the MP4 to an anonymous request. Reels, video posts, IGTV and the video
+slide of a mixed carousel all resolve; share links (`/share/…`) are followed first, because
+their code is not the post's shortcode.
+
+Two things that will eventually break, and what they look like when they do:
+
+- **`doc_id` is a rotating server-side query hash, not an API.** When Instagram moves it,
+  the query answers `{"errors":[…],"data":null}` and the thrown message says to set
+  `INSTAGRAM_DOC_ID` — a comma-separated list, tried in order, so a replacement can be
+  rolled out without a deploy.
+- **Anonymous traffic is rate-limited**, harder from datacenter IPs than from a laptop. A
+  401 or 429 is reported as "try that link again shortly" rather than as a broken link, and
+  the CSRF token is seeded once per 10 minutes and shared by concurrent resolves rather
+  than fetched per request.
+
+Both failure modes end the same way for the user: the clip is dropped, a bracketed note
+explains why, and the answer proceeds from the link and caption alone.
 
 ## Tests
 
@@ -524,19 +567,22 @@ looks like "search is broken" rather than "the key wasn't picked up". For the sa
 - **Video attachments are sent once each.** A YouTube link becomes a `file_data` part at
   its first mention only. Re-attaching it — which happens on every turn of a long thread
   about one clip — makes Gemini ingest the same video repeatedly in a single request and
-  bill for each. Assistant turns never carry one. For TikTok the bill is larger still,
-  because the bytes are in the request body rather than a URL Gemini fetches itself.
-- **At most two TikTok clips per request.** Ten pasted links would otherwise be ten
-  downloads, ten base64 copies and possibly ten uploads. Links past the cap get a note in
-  the prompt rather than silence, so the model can say why it isn't discussing them.
+  bill for each. Assistant turns never carry one. For a TikTok or Instagram clip the bill
+  is larger still, because the bytes are in the request body rather than a URL Gemini
+  fetches itself.
+- **At most two attached clips per request**, counted across platforms — the cost being
+  capped is bytes moved in one request, and Gemini does not care which app they came from.
+  Ten pasted links would otherwise be ten downloads, ten base64 copies and possibly ten
+  uploads. Links past the cap get a note in the prompt rather than silence, so the model
+  can say why it isn't discussing them.
 - **A 48 MB ceiling on a clip, checked as it downloads.** Refused from `content-length`
   where the CDN declares one, and abandoned mid-stream where it doesn't — a serverless
   function buffers the whole file and then base64-encodes a copy, so the real cost is
   about double.
-- **Media is fetched only from TikTok's own CDN.** The media URL comes out of a third
-  party's JSON blob; without the host allowlist in `lib/tiktok.js` the endpoint would
-  fetch whatever that blob named, which is a request proxy pointed at our own network and
-  reachable by anyone who can paste a link.
+- **Media is fetched only from the platform's own CDN.** The media URL comes out of a
+  third party's JSON blob; without the host allowlists in `lib/tiktok.js` and
+  `lib/instagram.js` the endpoint would fetch whatever that blob named, which is a request
+  proxy pointed at our own network and reachable by anyone who can paste a link.
 - **A 120s stall timeout**, reset by every chunk received, so a stream that goes quiet
   mid-answer is cut loose rather than holding the request — and the function instance
   behind it — indefinitely. There is deliberately no deadline on the *first* response:

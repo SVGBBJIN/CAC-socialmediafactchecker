@@ -19,7 +19,7 @@
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
 
-// How much faster than real time the TikTok pane plays back. There's no server-side
+// How much faster than real time the video pane plays back. There's no server-side
 // transcode in this pipeline (no ffmpeg step anywhere in the repo) — the cheap, correct
 // substitute for "a sped up version of the video" is the browser's own playbackRate on
 // the same MP4 the fact-check itself watches, not a second encoded file to keep in sync.
@@ -86,10 +86,10 @@ const el = {
 let library = loadLibrary();
 let selectedId = library[0]?.id ?? null;
 let inFlight = null;
-// Resolved video-pane media, keyed by entry id: { kind: "tiktok"|"youtube", mediaURL,
-// videoID }. In-memory only — a TikTok CDN URL is signed and short-lived (see
-// lib/tiktok.js), so caching it in localStorage would just persist a URL that 404s on
-// the next visit. Re-resolved each time an entry is (re)selected instead.
+// Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
+// videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
+// lib/tiktok.js and lib/instagram.js), so caching it in localStorage would just persist a
+// URL that 404s on the next visit. Re-resolved each time an entry is (re)selected instead.
 const mediaCache = new Map();
 // Bumped every time the video pane switches entries, so a slow /api/resolve-media
 // response for an entry the user has since navigated away from can't land in the pane
@@ -325,7 +325,7 @@ function startNewCheck() {
 
 /* ---------------------------------------------------------------- video pane */
 
-// Fallback while a video's real dimensions are still unknown (before the TikTok API
+// Fallback while a video's real dimensions are still unknown (before the resolver's
 // response lands, or before the <video> element has decoded enough to know its own
 // size). Most short-form content is vertical, so this is the least-wrong guess, but
 // `setVideoAspect` below always overrides it with the real ratio as soon as one is known.
@@ -352,7 +352,7 @@ function clearVideoMedia() {
 
 function showVideoElement(media) {
   el.videoPlaceholder.hidden = true;
-  // TikTok's own reported width/height, if the API returned one — corrected below by
+  // The platform's own reported width/height, if the API returned one — corrected below by
   // `loadedmetadata` against what the browser actually decoded, which is authoritative
   // even when the API's numbers are missing or wrong.
   if (media.width && media.height) setVideoAspect(`${media.width} / ${media.height}`);
@@ -381,9 +381,14 @@ function showYouTubeEmbed(videoID, aspect) {
   el.videoEmbed.hidden = false;
 }
 
-async function loadTikTokMedia(entry, token) {
+/**
+ * TikTok and Instagram both arrive as a plain MP4 on a signed CDN URL — neither has an
+ * embed that plays for a logged-out visitor — so one loader covers both. The server does
+ * the resolving; see api/resolve-media.js.
+ */
+async function loadDirectMedia(entry, token) {
   const cached = mediaCache.get(entry.id);
-  if (cached?.kind === "tiktok") {
+  if (cached?.kind === "direct") {
     if (token === videoPaneToken) showVideoElement(cached);
     return;
   }
@@ -396,7 +401,7 @@ async function loadTikTokMedia(entry, token) {
     if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
     const { mediaURL, width, height } = await response.json();
     if (!mediaURL) return;
-    const media = { kind: "tiktok", mediaURL, width, height };
+    const media = { kind: "direct", mediaURL, width, height };
     mediaCache.set(entry.id, media);
     if (token === videoPaneToken) showVideoElement(media);
   } catch {
@@ -413,8 +418,8 @@ function renderVideoPane(entry) {
   const token = ++videoPaneToken;
   clearVideoMedia();
 
-  if (entry.platform === "TikTok") {
-    loadTikTokMedia(entry, token);
+  if (entry.platform === "TikTok" || entry.platform === "Instagram") {
+    loadDirectMedia(entry, token);
     return;
   }
 

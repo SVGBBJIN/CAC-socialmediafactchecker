@@ -177,7 +177,7 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "right, you need a source.",
   "",
   "WHEN A VIDEO IS ATTACHED",
-  "A YouTube or TikTok link in the user's message is attached for you to watch — don't say",
+  "A YouTube, TikTok or Instagram link in the user's message is attached for you to watch — don't say",
   "you can't access it. Quote the specific claims made, and read any text shown on screen,",
   "which on short-form video is often where the claim actually lives. Then check each one.",
   "A bracketed note saying a video could not be attached is from the app, not the user: say",

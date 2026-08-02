@@ -30,6 +30,8 @@
 // returned HTTP 200 to an anonymous request, the blob parsed at the documented path, and
 // the extracted URL served a 3.2 MB `video/mp4` with no credential and no `Referer`.
 
+import { fetchWithTimeout, hostAllowed, readCapped } from "./media-fetch.js";
+
 /** Longest we'll wait for the embed page, and for the CDN to start sending the file. */
 export const EMBED_TIMEOUT_MS = 15_000;
 export const MEDIA_TIMEOUT_MS = 60_000;
@@ -311,22 +313,6 @@ export function parseEmbedPage(html, { videoID, sourceURL }) {
   };
 }
 
-/** One fetch with a deadline, cleaned up on every exit path. */
-async function fetchWithTimeout(url, { fetchImpl, timeoutMs, signal, ...init }) {
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  if (signal?.aborted) controller.abort();
-  else signal?.addEventListener("abort", onAbort, { once: true });
-
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetchImpl(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-
 /**
  * A short link carries no ID at all — only the redirect knows it. Fetch and read where we
  * landed; `fetch` follows redirects, so `response.url` is the canonical URL.
@@ -410,46 +396,12 @@ export async function resolveTikTokVideo(
 
 /* ---------------- CDN → bytes ---------------- */
 
-function mediaHostAllowed(hostname) {
-  const host = String(hostname ?? "").toLowerCase();
-  return ALLOWED_MEDIA_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
-}
-
 /**
- * Read a response body, refusing to buffer past `maxBytes`.
- *
- * The Swift downloader checks the size *after* the transport has buffered the whole
- * response, because its transport protocol has no streaming seam. `fetch` does, so the
- * check happens here as the bytes arrive: an absurd file is abandoned mid-transfer rather
- * than downloaded in full and then rejected. That matters more in a serverless function,
- * where the buffer is charged against a fixed memory ceiling.
+ * The size ceiling is enforced as the bytes arrive rather than after the fact — see
+ * `readCapped` in media-fetch.js. The Swift downloader checks it *after* its transport has
+ * buffered the whole response, because that protocol has no streaming seam; `fetch` does.
  */
-async function readCapped(response, maxBytes) {
-  const declared = Number(response.headers?.get?.("content-length") ?? NaN);
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new TikTokError(
-      `That clip is ${Math.round(declared / 1_048_576)} MB, over the ` +
-        `${Math.round(maxBytes / 1_048_576)} MB limit.`,
-      { kind: "tooLarge" },
-    );
-  }
-
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of response.body) {
-    total += chunk.byteLength ?? chunk.length ?? 0;
-    if (total > maxBytes) {
-      // Throwing out of `for await` cancels the underlying stream, so the rest of the
-      // file is never pulled down.
-      throw new TikTokError(
-        `That clip is over the ${Math.round(maxBytes / 1_048_576)} MB limit.`,
-        { kind: "tooLarge" },
-      );
-    }
-    chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
+const tooLarge = (message) => new TikTokError(message, { kind: "tooLarge" });
 
 /** Fetch the file a `resolveTikTokVideo` result pointed at. */
 export async function downloadTikTokMedia(
@@ -467,7 +419,7 @@ export async function downloadTikTokMedia(
       kind: "malformed",
     });
   }
-  if (!mediaHostAllowed(mediaURL.hostname)) {
+  if (!hostAllowed(mediaURL.hostname, ALLOWED_MEDIA_HOSTS)) {
     throw new TikTokError(
       `Refusing to fetch TikTok media from an unexpected host (${mediaURL.hostname}). ` +
         "If TikTok has moved its CDN, add the domain to ALLOWED_MEDIA_HOSTS in web/lib/tiktok.js.",
@@ -504,7 +456,7 @@ export async function downloadTikTokMedia(
     throw new TikTokError("TikTok's CDN returned an empty response.", { retryable: true });
   }
 
-  const bytes = await readCapped(response, maxBytes);
+  const bytes = await readCapped(response, maxBytes, tooLarge);
   if (bytes.length === 0) {
     throw new TikTokError("TikTok's CDN returned an empty file.", { retryable: true });
   }

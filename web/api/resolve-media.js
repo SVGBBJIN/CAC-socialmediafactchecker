@@ -1,13 +1,15 @@
-// POST /api/resolve-media — the Library UI's video pane needs an actual MP4 for TikTok,
-// since there's no iframe embed for TikTok the way there is for YouTube. This exposes the
-// same resolution step /api/chat already does internally (see lib/tiktok.js) so the
-// frontend can point a <video> element at it directly, instead of duplicating the embed-
-// page scrape client-side (which would also hit TikTok's CORS wall from the browser).
+// POST /api/resolve-media — the Library UI's video pane needs an actual MP4 for TikTok and
+// Instagram, since neither has an iframe embed that plays for a logged-out visitor the way
+// YouTube's does. This exposes the same resolution step /api/chat already does internally
+// (see lib/tiktok.js and lib/instagram.js) so the frontend can point a <video> element at
+// it directly, instead of duplicating the scrape client-side (which would also hit both
+// platforms' CORS wall from the browser).
 //
 // YouTube needs no round trip: a video ID is enough to build an embed URL, so the client
 // resolves that itself and never calls this route for it.
 
 import { resolveTikTokVideo, isTikTokHost, TikTokError } from "../lib/tiktok.js";
+import { resolveInstagramVideo, isInstagramHost, InstagramError } from "../lib/instagram.js";
 import { authorize, config, GuardError } from "../lib/guard.js";
 
 function sendJSON(res, status, payload, headers = {}) {
@@ -69,12 +71,19 @@ export default async function handler(req, res) {
     return sendJSON(res, 400, { error: "Not a valid URL." });
   }
 
-  if (!isTikTokHost(hostname)) {
-    return sendJSON(res, 400, { error: "Only TikTok links resolve to a direct media URL." });
+  const resolve = isTikTokHost(hostname)
+    ? resolveTikTokVideo
+    : isInstagramHost(hostname)
+      ? resolveInstagramVideo
+      : null;
+  if (!resolve) {
+    return sendJSON(res, 400, {
+      error: "Only TikTok and Instagram links resolve to a direct media URL.",
+    });
   }
 
   try {
-    const resolved = await resolveTikTokVideo(url);
+    const resolved = await resolve(url);
     return sendJSON(res, 200, {
       mediaURL: resolved.mediaURL,
       mimeType: resolved.mimeType,
@@ -82,7 +91,8 @@ export default async function handler(req, res) {
       height: resolved.height,
     });
   } catch (error) {
-    if (error instanceof TikTokError) {
+    if (error instanceof TikTokError || error instanceof InstagramError) {
+      // A link that will never work is the caller's problem; anything else is upstream's.
       return sendJSON(res, error.kind === "notAVideo" ? 400 : 502, { error: error.message });
     }
     console.error("[resolve-media]", error);
