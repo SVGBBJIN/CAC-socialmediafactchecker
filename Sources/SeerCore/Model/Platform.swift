@@ -34,6 +34,56 @@ public enum Platform: String, Sendable, Equatable, Codable, CaseIterable {
         }
     }
 
+    /// Hosts this platform's media bytes may be fetched from, matched as domain suffixes.
+    ///
+    /// The media URL on the ``IngestionStrategy/directMediaFetch`` arm is read out of a
+    /// third party's undocumented JSON blob, which makes it the one attacker-influenced
+    /// URL in the pipeline: the page it comes from is fixed, but its *contents* are not.
+    /// Without this list, `MediaDownloader` fetches whatever that blob names, on a path
+    /// anyone can reach by sharing a link.
+    ///
+    /// **Empty means fetch nothing.** A platform that has not declared its CDN families
+    /// cannot be downloaded from at all, which is the safe direction for the failure: a
+    /// missing entry is a one-line fix with an error message that names the host it
+    /// rejected, where a permissive default is a hole nobody sees. That is why this is on
+    /// `Platform` and not a parameter with a default — there is no "unrestricted" value
+    /// to accidentally leave in place.
+    public var allowedMediaHosts: [String] {
+        switch self {
+        case .tikTok:
+            return [
+                "tiktokcdn.com",
+                "tiktokcdn-us.com",
+                "tiktokcdn-eu.com",
+                "tiktokcdn-in.com",
+                "tiktokv.com",
+                "tiktokv.us",
+                "ttwstatic.com",
+                "muscdn.com",
+                "byteoversea.com",
+            ]
+        case .youTube:
+            // Native ingestion: Gemini fetches the video, we never hold the bytes.
+            return []
+        case .instagram:
+            // Still on the capture arm in Swift. The web app's resolver names
+            // `cdninstagram.com` and `fbcdn.net`; this gets filled in with the port,
+            // not before it, so an unported platform can't download by accident.
+            return []
+        case .unknown:
+            return []
+        }
+    }
+
+    /// Whether `host` is one of ``allowedMediaHosts``.
+    ///
+    /// Suffix-matched against a dot boundary, never a substring, so
+    /// `tiktokcdn.com.evil.test` does not pass for `tiktokcdn.com`.
+    public func allowsMediaHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased(), !host.isEmpty else { return false }
+        return allowedMediaHosts.contains { host == $0 || host.hasSuffix(".\($0)") }
+    }
+
     /// Best-effort identification from a shared URL.
     public static func detect(from url: URL) -> Platform {
         guard let host = url.host?.lowercased() else { return .unknown }

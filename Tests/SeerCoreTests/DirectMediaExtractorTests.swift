@@ -236,7 +236,21 @@ final class GeminiFilesClientTests: XCTestCase {
             secrets: InMemorySecretStore([.geminiAPIKey: "k"]),
             sleeper: ImmediateSleeper(),
             pollInterval: 0.01,
-            maxPolls: 5
+            maxPollWait: 120
+        )
+    }
+
+    /// The one case that needs time to actually pass. `maxPollWait` is a wall-clock bound,
+    /// so `ImmediateSleeper` — which returns without the clock moving — would poll until
+    /// the scripted responses ran out rather than until the deadline. A real sleeper and a
+    /// deadline in the tens of milliseconds keeps the test honest and still quick.
+    static func timingOutClient(_ transport: StubTransport) -> GeminiFilesClient {
+        GeminiFilesClient(
+            transport: transport,
+            secrets: InMemorySecretStore([.geminiAPIKey: "k"]),
+            sleeper: TaskSleeper(),
+            pollInterval: 0.01,
+            maxPollWait: 0.05
         )
     }
 
@@ -309,10 +323,12 @@ final class GeminiFilesClientTests: XCTestCase {
     func testStuckProcessingTimesOut() async {
         let transport = StubTransport(
             [.init(status: 200, body: Data(), headers: ["X-Goog-Upload-URL": Self.uploadSessionURL])]
-            + Array(repeating: StubTransport.Response.ok(#"{"name":"files/abc","uri":"u","state":"PROCESSING"}"#), count: 10)
+            // Comfortably more than the deadline allows, so the timeout is what ends this
+            // rather than the queue running dry.
+            + Array(repeating: StubTransport.Response.ok(#"{"name":"files/abc","uri":"u","state":"PROCESSING"}"#), count: 64)
         )
         do {
-            _ = try await Self.client(transport).upload(Data([1]), mimeType: "video/mp4")
+            _ = try await Self.timingOutClient(transport).upload(Data([1]), mimeType: "video/mp4")
             XCTFail("expected timedOut")
         } catch let error as ExtractionError {
             guard case .timedOut = error else {

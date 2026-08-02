@@ -71,10 +71,22 @@ via `GET /v1beta/models`. Two naming details that are easy to get wrong: the 3-s
 model only ships under a `-preview` suffix, and the 2-series ID is `gemini-2.0-flash`,
 not `gemini-2-flash`.
 
-The chain walks on *availability* failures only — 404, 403, and 400s that name the model.
-Rate limits and 5xx are the retry layer's job; falling through on a transient blip would
-burn the chain and land on the weakest model. A malformed request fails immediately rather
-than being retried against four more models at four more models' cost.
+The chain walks when another model would plausibly answer, which is a wider set than
+"availability":
+
+- **404, 403, 400s naming the model** — the model isn't there or isn't ours. Fall through.
+- **429 and other quota exhaustion** — quota is metered per model. This only reaches the
+  chain after the retry layer has already backed off and honoured `Retry-After`, so it is
+  a spent allowance rather than a blip.
+- **503, and 500s whose body says overloaded** — capacity is metered per model too, and the
+  newest model in the chain is the likeliest to be full, which makes this the most common
+  transient upstream failure rather than a rare one.
+
+Everything else is terminal. A bare 500 is an outage and walking the chain through it adds
+four failed requests to a service already struggling; a malformed request fails immediately
+rather than being retried against four more models at four more models' cost; and a bad key
+is checked for first, because it arrives as a 400 or 403 that the rules above would
+otherwise wave through into four more attempts with the same dead credential.
 
 **Operational caveats.** YouTube URL ingestion is a preview feature: pricing and limits can
 move. The free tier caps daily YouTube intake (8 hours/day at time of writing). Videos must
@@ -162,6 +174,16 @@ message. A private, deleted or region-blocked post renders a valid page with no
   clips over ~14 MB route through the Files API instead of going inline. See below.
 - **A hard byte ceiling on the download** (96 MB), because a share extension has a memory
   budget it cannot negotiate and being killed mid-download looks like the app doing nothing.
+  Enforced by `HTTPTransport.send(_:maxBytes:)`, which streams to a temporary file and
+  sizes it on disk before reading it in — the ceiling used to be a `data.count` check
+  *after* the transport had built the whole body in memory, which cannot prevent the
+  allocation it exists to prevent.
+- **A host allowlist on the media URL.** That URL comes out of TikTok's state blob, so it
+  is the one URL in the pipeline a third party chooses, on a path anyone can reach by
+  sharing a link. `Platform.allowedMediaHosts` names the CDN families and
+  `allowsMediaHost(_:)` suffix-matches on a dot boundary, so `tiktokcdn.com.evil.test`
+  fails. An empty list denies everything, so a platform that hasn't declared its CDNs
+  cannot be downloaded from by accident.
 
 ### The Gemini leg
 
@@ -269,10 +291,20 @@ it. Do that before spending anything further on capture.
 
 ## Cross-cutting
 
+**Two implementations, drifting** — `web/lib/tiktok.js`, `web/lib/gemini-files.js`,
+`web/lib/gemini.js` and `web/lib/media-fetch.js` are ports of the Swift files named in
+their headers, kept in step by hand and not actually in step. The web side is where fixes
+land (42 commits to `web/` against 12 to `Sources/` over three months), and all three
+hardening measures described above existed there before they existed here. Read the web
+counterpart before changing either half; see the top of the root README for the decision
+this needs.
+
 **Retries** — exponential backoff with full jitter (`RetryPolicy`). Jitter matters because
 share-extension launches cluster. `Retry-After` wins over the local curve when the server
 sends one, clamped so a hostile value can't park the extension. 429/408/5xx retry; 4xx
-doesn't; cancellation never does.
+doesn't; cancellation never does. An oversized body is *not* retried — it throws an
+`ExtractionError` straight out of the retry loop, since a file does not get smaller on a
+second attempt.
 
 **Timeouts** — per-request and overall. Video calls get a 120s request / 300s overall
 budget; metadata calls get 20s.
