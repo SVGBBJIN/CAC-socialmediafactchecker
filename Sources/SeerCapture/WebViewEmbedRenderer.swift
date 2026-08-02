@@ -25,17 +25,13 @@ public final class WebViewEmbedRenderer: NSObject {
     /// has to be running before the first frame of audio, so the caller decides when
     /// playback begins.
     ///
-    /// - Parameter settleTime: upper bound on the grace period after `didFinish` for
-    ///   the platform's own script to hydrate the blockquote into a player. The load
-    ///   callback fires when the *document* is done, which is well before the player
-    ///   exists. Most embeds hydrate a `<video>` element well under this, so it is
-    ///   polled for and this method returns as soon as one appears rather than always
-    ///   waiting out the full grace period.
+    /// - Parameter settleTime: grace period after `didFinish` for the platform's own
+    ///   script to hydrate the blockquote into a player. The load callback fires when
+    ///   the *document* is done, which is well before the player exists.
     public func present(
         _ embed: EmbeddedMedia,
         in container: UIView,
-        settleTime: TimeInterval = 3.0,
-        pollInterval: TimeInterval = 0.15
+        settleTime: TimeInterval = 3.0
     ) async throws {
         let configuration = WKWebViewConfiguration()
         // Playback must be able to start without a tap: there is no user to tap.
@@ -60,29 +56,7 @@ public final class WebViewEmbedRenderer: NSObject {
             )
         }
 
-        await waitForPlayerElement(timeout: settleTime, pollInterval: pollInterval)
-    }
-
-    /// Polls for a `<video>` element to appear, latching as soon as one does.
-    ///
-    /// Falls back to waiting out the full `timeout` if none ever appears — absence
-    /// isn't proof the player will never hydrate, just that it hasn't yet, so this
-    /// never returns *later* than the old fixed sleep did, only ever the same or
-    /// sooner.
-    private func waitForPlayerElement(timeout: TimeInterval, pollInterval: TimeInterval) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while true {
-            if await hasVideoElement() { return }
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { return }
-            try? await Task.sleep(nanoseconds: UInt64(min(pollInterval, remaining) * 1_000_000_000))
-        }
-    }
-
-    private func hasVideoElement() async -> Bool {
-        let script = "document.querySelectorAll('video').length > 0;"
-        let result = try? await webView?.evaluateJavaScript(script)
-        return (result as? Bool) ?? (result as? NSNumber)?.boolValue ?? false
+        try await Task.sleep(nanoseconds: UInt64(settleTime * 1_000_000_000))
     }
 
     /// Nudges any `<video>` on the page into playing.
