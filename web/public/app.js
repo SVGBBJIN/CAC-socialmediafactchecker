@@ -81,6 +81,11 @@ const el = {
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
+  linkConfirmDialog: document.getElementById("link-confirm-dialog"),
+  linkConfirmForm: document.getElementById("link-confirm-form"),
+  linkConfirmTitle: document.getElementById("link-confirm-title"),
+  linkConfirmBody: document.getElementById("link-confirm-body"),
+  linkConfirmCancel: document.getElementById("link-confirm-cancel"),
 };
 
 let library = loadLibrary();
@@ -99,6 +104,7 @@ let videoPaneToken = 0;
 // Not persisted: a reload finds the thread as it was after the last *finished* turn,
 // same as the chat UI drops an in-progress bubble on refresh.
 let pendingFollowup = null; // { entryId, question, error? }
+let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check anyway"
 
 /* ---------------------------------------------------------------- storage */
 
@@ -156,6 +162,8 @@ function selectedDoneEntry() {
 
 /* ---------------------------------------------------------- link + text helpers */
 
+const SUPPORTED_PLATFORMS = new Set(["TikTok", "YouTube", "Instagram"]);
+
 function platformFor(url) {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");
@@ -168,20 +176,104 @@ function platformFor(url) {
   }
 }
 
-function normalizeLink(raw) {
+// Requires an actual domain shape (a label, a dot, a letters-only TLD), not just "no
+// whitespace" — otherwise a plain word like "hi" reads as a bare hostname and gets a
+// scheme bolted on in normalizeLink, turning a greeting into a fake fact-check target.
+const BARE_DOMAIN_PATTERN = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(:\d+)?(\/\S*)?$/i;
+
+function looksLikeLink(raw) {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  return /^https?:\/\//i.test(trimmed) || BARE_DOMAIN_PATTERN.test(trimmed);
+}
+
+function normalizeLink(raw) {
+  if (!looksLikeLink(raw)) return null;
+  const trimmed = raw.trim();
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 /**
- * A bare link never has whitespace in it; a follow-up question almost always does
- * ("what about the second claim?"). Cheap, and it means pasting a new URL always starts
- * a new check even while a result is on screen — the one case that must never be
- * ambiguous.
+ * Anything that isn't a recognizable link is a follow-up question — "hi", "what about the
+ * second claim?", etc. Pasting an actual URL always starts a new check even while a result
+ * is on screen — the one case that must never be ambiguous.
  */
 function looksLikeFollowup(raw) {
-  return /\s/.test(raw.trim());
+  return raw.trim().length > 0 && !looksLikeLink(raw);
+}
+
+/**
+ * Best-effort check that a link is something this app can actually pull video from,
+ * before spending a full (expensive) fact-check run on it.
+ *
+ * Verification only ever calls infrastructure that's already safe to hit: YouTube's URL
+ * shape needs no network call, and /api/resolve-media is host-allowlisted to TikTok/
+ * Instagram's CDNs (see api/resolve-media.js) — there is no generic "fetch whatever host
+ * the user pasted" path here, since that would hand the server an open SSRF-shaped proxy.
+ * An unsupported platform, or a supported one that fails to confirm, falls back to asking
+ * the user rather than either silently blocking them or guessing it'll work.
+ */
+async function verifyLinkViewable(url) {
+  const platform = platformFor(url);
+
+  if (platform === "YouTube") {
+    return youTubeVideoID(url)
+      ? { ok: true, platform }
+      : { ok: false, platform, reason: "That doesn't look like a valid YouTube video link." };
+  }
+
+  if (platform === "TikTok" || platform === "Instagram") {
+    try {
+      const response = await fetch("/api/resolve-media", {
+        method: "POST",
+        headers: requestHeaders(),
+        body: JSON.stringify({ url }),
+      });
+      if (!response.ok) {
+        return {
+          ok: false,
+          platform,
+          reason: `Couldn't confirm this is a playable ${platform} video (it may still work).`,
+        };
+      }
+      const { mediaURL } = await response.json();
+      return mediaURL
+        ? { ok: true, platform }
+        : {
+            ok: false,
+            platform,
+            reason: `Couldn't confirm this is a playable ${platform} video (it may still work).`,
+          };
+    } catch {
+      return { ok: false, platform, reason: "Couldn't reach the server to confirm this link." };
+    }
+  }
+
+  return {
+    ok: false,
+    platform,
+    reason: "This isn't a TikTok, YouTube, or Instagram link, so the video may not come through.",
+  };
+}
+
+function showLinkConfirm(url, result) {
+  pendingConfirmUrl = url;
+  el.linkConfirmTitle.textContent = SUPPORTED_PLATFORMS.has(result.platform)
+    ? `Couldn't confirm this ${result.platform} link`
+    : "Not a supported link";
+  el.linkConfirmBody.textContent = result.reason;
+  el.linkConfirmDialog.showModal();
+}
+
+/** Verifies the link is actually viewable before committing to a run; if it isn't
+ * (or can't be confirmed), asks first instead of burning a check on a dead link. */
+async function confirmAndRunCheck(url) {
+  const result = await verifyLinkViewable(url);
+  if (result.ok) {
+    runCheck(url);
+    return;
+  }
+  showLinkConfirm(url, result);
 }
 
 function truncate(text, max) {
@@ -940,7 +1032,17 @@ el.checkBtn.addEventListener("click", () => {
     return;
   }
   const url = normalizeLink(raw);
-  if (url) runCheck(url);
+  if (url) confirmAndRunCheck(url);
+});
+
+el.linkConfirmForm.addEventListener("submit", () => {
+  if (pendingConfirmUrl) runCheck(pendingConfirmUrl);
+  pendingConfirmUrl = null;
+});
+
+el.linkConfirmCancel.addEventListener("click", () => {
+  pendingConfirmUrl = null;
+  el.linkConfirmDialog.close();
 });
 
 el.newCheckBtn.addEventListener("click", startNewCheck);

@@ -384,6 +384,12 @@
     background: rgba(79,209,197,0.12); color: var(--accent); font-weight: 600; cursor: pointer;
   }
 
+  /* ---------- Link-confirm dialog ---------- */
+  .passphrase .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .passphrase button.secondary {
+    border-color: var(--border); background: transparent; color: var(--ink-dim);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .blade, .claim-text, .badge, .notice, .sources, .seal-check, .thread-spinner { animation: none !important; transition: none !important; }
   }
@@ -439,6 +445,17 @@
       <p>This instance is gated so it doesn't burn quota for strangers.</p>
       <input type="password" id="passphrase-input" placeholder="Passphrase" autocomplete="current-password" />
       <button type="submit">Unlock</button>
+    </form>
+  </dialog>
+
+  <dialog class="passphrase" id="link-confirm-dialog">
+    <form method="dialog" id="link-confirm-form">
+      <h2 id="link-confirm-title">Can't confirm this link</h2>
+      <p id="link-confirm-body"></p>
+      <div class="actions">
+        <button type="button" class="secondary" id="link-confirm-cancel">Cancel</button>
+        <button type="submit" id="link-confirm-proceed">Check anyway</button>
+      </div>
     </form>
   </dialog>
 
