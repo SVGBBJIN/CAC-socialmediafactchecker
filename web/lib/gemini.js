@@ -11,6 +11,7 @@ import {
   isTikTokLink,
   resolveTikTokVideo,
   downloadTikTokMedia,
+  fetchTikTokOEmbed,
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
 import {
@@ -536,6 +537,10 @@ export const CLIP_PROVIDERS = [
     matches: isTikTokLink,
     resolve: resolveTikTokVideo,
     download: downloadTikTokMedia,
+    // TikTok's oEmbed carries no video (see lib/tiktok.js), only a title, author and
+    // thumbnail — but that's still worth handing the model when the real download fails.
+    // Instagram has no equivalent: its oEmbed needs a Meta App Review token we don't have.
+    oEmbed: fetchTikTokOEmbed,
   },
   {
     platform: "Instagram",
@@ -634,6 +639,10 @@ export async function resolveClipParts(
     downloadImpl = null,
     uploadImpl = uploadFile,
     deleteImpl = deleteFile,
+    // Off by default so the test suite stays instant; the API routes opt in. See
+    // `jitterDelay` in lib/tiktok.js for why this exists at all.
+    jitter = false,
+    sleepImpl,
   } = {},
 ) {
   const attachments = new Map();
@@ -668,7 +677,7 @@ export async function resolveClipParts(
     links.map(async ({ link, provider }) => {
       try {
         const resolve = resolveImpl ?? provider.resolve;
-        return { link, provider, resolved: await resolve(link, { fetchImpl, signal }) };
+        return { link, provider, resolved: await resolve(link, { fetchImpl, signal, jitter, sleepImpl }) };
       } catch (error) {
         return { link, provider, error: error?.message || "the video could not be fetched" };
       }
@@ -719,7 +728,7 @@ export async function resolveClipParts(
     toDownload.map(async (entry) => {
       try {
         const download = downloadImpl ?? entry.provider.download;
-        const { bytes, mimeType } = await download(entry.resolved, { fetchImpl, signal });
+        const { bytes, mimeType } = await download(entry.resolved, { fetchImpl, signal, jitter, sleepImpl });
         if (bytes.length <= inlineByteLimit) {
           entry.part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
         } else {
@@ -727,8 +736,28 @@ export async function resolveClipParts(
           uploads.push(file);
           entry.part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
         }
+        // Bytes live only in `bytes`/the upload above; nothing here writes them anywhere
+        // durable, so once this closure returns there's nothing left to clean up but the
+        // Files API upload `cleanup()` already tracks.
       } catch (error) {
-        if (!signal?.aborted) entry.error = error?.message || "the video could not be fetched";
+        if (signal?.aborted) return;
+        entry.error = error?.message || "the video could not be fetched";
+
+        // The signed CDN URL from the embed page is short-lived and sometimes already
+        // dead by the time we get here, or the CDN host has moved. Rather than lose the
+        // clip entirely, fall back to whatever public metadata the platform's oEmbed
+        // still hands an anonymous request.
+        const oEmbed = entry.provider.oEmbed;
+        if (!oEmbed) return;
+        try {
+          const meta = await oEmbed(entry.resolved.sourceURL, { fetchImpl, signal, jitter, sleepImpl });
+          if (meta) {
+            entry.metadataOnly = meta;
+            delete entry.error;
+          }
+        } catch {
+          // Best-effort: the download error already recorded above stands.
+        }
       }
     }),
   );
@@ -757,6 +786,20 @@ function describeClip(resolved, platform) {
 
   const caption = resolved.caption.slice(0, MAX_CAPTION_CHARS);
   return `${header}\n[Its caption reads: ${caption}]`;
+}
+
+/**
+ * The note for a clip that couldn't be downloaded but has an oEmbed fallback — see the
+ * `oEmbed` catch in `resolveClipParts`. No video part goes with this: it's text standing
+ * in for a clip the model can't watch, not a description of one it can.
+ */
+function describeOEmbedFallback(meta, platform, link) {
+  const facts = [];
+  if (meta.authorName) facts.push(`posted by ${meta.authorName}`);
+  const header = `[The ${platform} video at ${link} could not be downloaded, but its public ` +
+    `listing says${facts.length ? ` (${facts.join(", ")})` : ""}:]`;
+  const title = meta.title ? `[Title/caption: ${meta.title.slice(0, MAX_CAPTION_CHARS)}]` : null;
+  return title ? `${header}\n${title}` : header;
 }
 
 /**
@@ -828,6 +871,12 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
         }
         if (attachedClips.has(entry.videoID)) continue;
         attachedClips.add(entry.videoID);
+        if (entry.metadataOnly) {
+          // The download failed and there's no oEmbed part to attach — the model gets a
+          // caption and creator instead of a video it can watch.
+          notes.push(describeOEmbedFallback(entry.metadataOnly, platform, link));
+          continue;
+        }
         parts.push(entry.part);
         const context = describeClip(entry.resolved, platform);
         if (context) notes.push(context);
