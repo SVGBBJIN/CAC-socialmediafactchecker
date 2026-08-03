@@ -12,15 +12,17 @@ public enum SeerPipelineBuilder {
         public var secrets: any SecretStore
         /// Where recordings come from.
         ///
-        /// Default is `nil`, meaning **the capture path is not registered at all**.
-        /// That is deliberate: the ReplayKit audio issue is still unresolved, so
-        /// registering a platform that depends on capture would mean users sharing a
-        /// link and getting silence back. A URL for an unregistered platform fails with
-        /// a clear ``ExtractionError/unsupportedPlatform``, which the UI can turn into
-        /// "not supported yet" — an honest answer rather than a broken feature.
+        /// Default is `nil`, meaning **no platform gets a capture attempt**. Instagram
+        /// still has no other option, so without this it isn't registered at all — a
+        /// URL for it fails with a clear ``ExtractionError/unsupportedPlatform``, which
+        /// the UI can turn into "not supported yet" rather than a broken feature.
         ///
-        /// Only Instagram rides on this now. TikTok moved to
-        /// ``IngestionStrategy/directMediaFetch`` and no longer needs a recorder.
+        /// TikTok is different: it is registered either way. With a capture source, it
+        /// runs through ``TikTokCaptureFirstExtractor`` — capture first, direct CDN
+        /// fetch as the automatic fallback when capture fails (notably the known
+        /// ReplayKit/WKWebView silent-audio defect, see
+        /// docs/EXTRACTION_PIPELINE.md). Without one, it registers the direct-fetch
+        /// extractor alone, since there's nothing to record with.
         public var captureSource: (any MediaCaptureSource)?
         /// Meta app token. Without one, Instagram cannot be registered — its oEmbed
         /// endpoint requires it. See docs/SPIKE-instagram.md.
@@ -62,19 +64,29 @@ public enum SeerPipelineBuilder {
             YouTubeExtractor(client: gemini, maxDuration: configuration.maxAnalysedDuration)
         )
 
-        // Direct-fetch side. Also needs nothing but the Gemini key: TikTok's embed page
-        // yields a CDN URL for the MP4, so there is no capture source to wait on.
-        extractors.append(
-            DirectMediaExtractor.tikTok(
-                client: gemini,
-                filesClient: GeminiFilesClient(secrets: configuration.secrets)
-            )
+        // TikTok. Exactly one extractor gets registered for it — never both, since the
+        // pipeline dispatches on the first match and a second registration would just
+        // be dead code.
+        let tikTokFallback = DirectMediaExtractor.tikTok(
+            client: gemini,
+            filesClient: GeminiFilesClient(secrets: configuration.secrets)
         )
 
-        // Capture side of the fork. Registered only when there is something to record
-        // with — which today means Instagram alone, since TikTok no longer needs it.
         if let captureSource = configuration.captureSource {
             let transcriber = GroqWhisperTranscriber(secrets: configuration.secrets)
+
+            // Capture-first, with the direct CDN fetch above wired in as the automatic
+            // fallback. See TikTokCaptureFirstExtractor.
+            extractors.append(
+                TikTokCaptureFirstExtractor(
+                    captureExtractor: .tikTok(
+                        captureSource: captureSource,
+                        transcriber: transcriber,
+                        captureDuration: configuration.captureDuration
+                    ),
+                    fallbackExtractor: tikTokFallback
+                )
+            )
 
             if let token = configuration.instagramAccessToken, !token.isEmpty {
                 extractors.append(
@@ -86,6 +98,9 @@ public enum SeerPipelineBuilder {
                     )
                 )
             }
+        } else {
+            // No capture source: nothing to record with, so direct-fetch runs alone.
+            extractors.append(tikTokFallback)
         }
 
         return ExtractionPipeline(extractors: extractors)
@@ -98,8 +113,9 @@ public enum SeerPipelineBuilder {
     public static func supportStatus(_ configuration: Configuration) -> [Platform: SupportStatus] {
         var status: [Platform: SupportStatus] = [:]
         status[.youTube] = .supported
-        // No longer conditional on a capture source: the direct-fetch path needs only
-        // the Gemini key, which `Configuration` requires anyway.
+        // Not conditional on a capture source: with one, TikTok runs capture-first with
+        // direct-fetch as fallback; without one, direct-fetch alone. Either way the
+        // Gemini key `Configuration` already requires is enough to serve it.
         status[.tikTok] = .supported
         status[.instagram] = {
             if configuration.captureSource == nil {

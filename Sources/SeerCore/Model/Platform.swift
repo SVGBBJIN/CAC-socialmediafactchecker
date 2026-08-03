@@ -21,10 +21,13 @@ public enum Platform: String, Sendable, Equatable, Codable, CaseIterable {
             // frame extraction, no capture pipeline.
             return .nativeVideoIngestion
         case .tikTok:
-            // TikTok's embed page hands out a direct CDN URL for the MP4, so we can
-            // fetch the media ourselves and give the bytes to the model. No player, no
-            // recording, no screen-capture permission.
-            return .directMediaFetch
+            // Screen capture (WKWebView + RPScreenRecorder + Whisper) is the primary
+            // path: see TikTokCaptureFirstExtractor. TikTok's embed page also hands out
+            // a direct CDN URL for the MP4, and that direct-fetch path is wired in as
+            // the automatic fallback when capture fails — most notably the known
+            // ReplayKit/WKWebView silent-audio defect. A configuration with no capture
+            // source falls back to direct-fetch alone; see SeerPipelineBuilder.
+            return .screenCapture
         case .instagram:
             // Login-walled: no route to the media without a Meta token, so the embed
             // still has to be rendered and recorded. See docs/SPIKE-instagram.md.

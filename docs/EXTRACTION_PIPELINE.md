@@ -46,7 +46,7 @@ its platform's, so the two can't drift apart.
 | Platform | Path | Status |
 |---|---|---|
 | YouTube | native ingestion | **Working.** Verified against the live API. |
-| TikTok | direct media fetch | **Working.** Resolve + download verified live 2026-07-28; the Gemini leg needs a key to confirm. |
+| TikTok | screen capture, direct media fetch as automatic fallback | **Working, mixed confidence.** Direct-fetch (the fallback arm): resolve + download verified live 2026-07-28, Gemini leg needs a key to confirm. Capture (the primary arm, `TikTokCaptureFirstExtractor`): implemented and unit-tested against mocks, **not yet run on a device** — the ReplayKit/WKWebView silent-audio question this whole path used to be blocked on is still open in practice, just no longer fatal, since a silent capture now falls through to direct-fetch instead of failing the request. See §2 below. |
 | Instagram | screen capture (Swift) / direct media fetch (web) | **Working in web; frozen, unported in Swift.** The web app resolves reels anonymously and ships it. The Swift extractor is still the capture one and still unregistered — and, with `Sources/` now frozen (see [Cross-cutting](#sources-is-frozen)), stays that way rather than being ported. See [SPIKE-instagram.md](SPIKE-instagram.md). |
 
 Only platforms that can actually be served get registered. TikTok and YouTube need nothing
@@ -93,12 +93,43 @@ move. The free tier caps daily YouTube intake (8 hours/day at time of writing). 
 be public or unlisted. `maxAnalysedDuration` (default 30 min) caps how much of a long video
 is billed.
 
-## 2. TikTok — working, without capture
+## 2. TikTok — capture-first, direct fetch as automatic fallback
 
-`URL → embed page → CDN MP4 → Gemini Flash`. `TikTokMediaResolver` + `MediaDownloader` +
-`DirectMediaExtractor`.
+**This reverses the arrangement the rest of this section describes**, at explicit product
+direction rather than as a correction: `TikTokCaptureFirstExtractor` tries the capture
+path first (`CaptureBasedExtractor.tikTok`, unchanged), and only falls back to the
+direct-fetch path below — `TikTokMediaResolver` + `MediaDownloader` +
+`DirectMediaExtractor` — if capture fails. Both arms are real and independently tested;
+`Platform.tikTok.ingestionStrategy` is now `.screenCapture` to name capture as the
+primary arm, and `SeerPipelineBuilder` registers the composite extractor whenever a
+`captureSource` is configured, falling back to direct-fetch alone otherwise (nothing to
+record with, same as before).
 
-### How the blocker got removed
+**Why this doesn't contradict "`Sources/` is frozen"** (see
+[Cross-cutting](#sources-is-frozen)): the freeze stops *parity ports from `web/`*, which
+has no capture path for TikTok to port — the web app never had this arrangement and
+still doesn't. This is new Swift-side product behavior, added by explicit instruction,
+not a rediscovered `web/` fix. It also doesn't reopen the ReplayKit audio question as a
+blocker: **that question is still open**, but it no longer has to be answered before this
+ships, because `TikTokCaptureFirstExtractor` treats a silent capture as a normal,
+observable failure of the primary arm and serves the request from direct-fetch instead —
+never a silent empty transcript. Which arm actually served a request is always
+recoverable from the result: `ClaimContext.provenance.strategy` names it,
+`provenance.extra["servedBy"]` repeats it as a fixed string for logging, and
+`provenance.extra["capturePathFailure"]` carries the reason whenever the fallback fired.
+
+**What is and isn't verified.** The fallback arm carries the same verification this
+section originally described below — resolve and download checked live, the Gemini leg
+unconfirmed for lack of a key. The capture arm (`CaptureBasedExtractor`,
+`ScreenRecorderCaptureSource`, `WebViewEmbedRenderer`, `AudioProbe`) is implemented and
+covered by `CapturePipelineTests` against `MockCaptureSource`, but — per the note at the
+top of [Status](#status) — nothing in `SeerCapture` has ever run on a device or
+simulator from this environment, which has no Swift toolchain at all, let alone iOS
+build tooling. `AudioCaptureDiagnostic` (below) is the tool for that run; it has not been
+executed. Treat "capture-first" as correct by construction and unverified in practice
+until someone runs it on hardware and reports a `Report.summary`.
+
+### How the blocker got removed, on the fallback arm
 
 The previous design was `oEmbed → WKWebView → RPScreenRecorder → Whisper`, and it was stuck:
 `RPScreenRecorder`'s `.audioApp` stream frequently arrives **silent** when the sound comes
@@ -206,22 +237,34 @@ into a prompt. It is fenced in a `<caption>` delimiter, explicitly labelled as d
 the task is re-stated after it. That is mitigation, not a guarantee — the real protection
 is structural: nothing downstream acts on model output except to fact-check it.
 
-## 2a. The capture path — still there, now avoidable
+## 2a. The capture path — now primary for TikTok, still the only option for Instagram
+
+> **This section predates §2's reversal and is stale where it says the capture path is
+> being left alone.** It no longer is: `TikTokCaptureFirstExtractor` (§2) put it back in
+> the primary position for TikTok. Everything below about the mechanics of capture, the
+> ReplayKit risk, and `AudioCaptureDiagnostic` is still accurate and load-bearing — only
+> the "don't touch this" framing is superseded. For Instagram specifically the framing
+> still holds: no capture source exists for it beyond this arm, `Sources/` is frozen
+> against new *ports from `web/`*, and the Instagram resolver port described below
+> remains not-happening for that reason.
 
 `CaptureBasedExtractor`, `MediaCaptureSource`, `ScreenRecorderCaptureSource` and
-`AudioCaptureDiagnostic` are unchanged and still wired up. Instagram is the only thing that
-needs them, and the ReplayKit audio question is unresolved.
+`AudioCaptureDiagnostic` are unchanged in themselves — TikTok's reversal wires a new
+caller (`TikTokCaptureFirstExtractor`) in front of the same `CaptureBasedExtractor.tikTok`
+that already existed. Instagram still has no other option, and the ReplayKit audio
+question is unresolved for both platforms alike; TikTok is simply no longer blocked on
+answering it first, since a silent capture now falls through to §2's direct-fetch arm
+instead of failing the whole request.
 
-It no longer has to be. Instagram turned out to be resolvable to a direct MP4 with no
-credential (see §3), which is the outcome this section was told to check for — and porting
-the resolver would take the whole arm away with the ReplayKit problem inside it. That port
-is not happening: `Sources/` is frozen (see [Cross-cutting](#sources-is-frozen)), and a
-web → Swift port of the Instagram resolver is exactly the work the freeze stops. So the arm
-survives, unregistered and unmaintained rather than retired. **Do not spend anything
-further on the capture path** regardless — that was true when the plan was to delete it,
-and is equally true now that the plan is to leave it alone.
+Instagram turned out to be resolvable to a direct MP4 with no credential (see §3), which
+is the outcome this section was told to check for — and porting the resolver would take
+the whole arm away with the ReplayKit problem inside it, for Instagram. That port is not
+happening: `Sources/` is frozen (see [Cross-cutting](#sources-is-frozen)), and a
+web → Swift port of the Instagram resolver is exactly the work the freeze stops. So the
+Instagram arm survives, unregistered and unmaintained rather than retired.
 
-Two properties of that path worth preserving if it is revisited:
+Two properties of that path worth knowing if you're the one running it for the first
+time — which, per §2, still hasn't happened:
 
 - **Silence is detected rather than assumed.** `ScreenRecorderCaptureSource` measures peak
   amplitude and reports `CapturedMedia.containsAudio` honestly; `CaptureBasedExtractor`
@@ -233,13 +276,21 @@ Two properties of that path worth preserving if it is revisited:
 
 ```swift
 let report = try await AudioCaptureDiagnostic(hostContainer: { self.view })
-    .run(on: URL(string: "https://www.instagram.com/reel/ABC/")!)
+    .run(on: URL(string: "https://www.tiktok.com/@user/video/123")!)  // or an Instagram reel
 print(report.summary)
 ```
 
 It distinguishes the two failure modes that look identical from the outside: *the video
 never played* (a WKWebView autoplay problem, fixable) versus *the video played and
 ReplayKit heard nothing* (the audio-session issue, possibly fatal to this approach).
+
+**Run this against a real TikTok URL before trusting `TikTokCaptureFirstExtractor` in
+production.** It's the blocking gate §2 says hasn't been run — a device or simulator this
+environment doesn't have. A PASS or BLOCKED verdict either way is safe to ship *behind
+the fallback*: BLOCKED means every TikTok request quietly rides the direct-fetch arm,
+which is already the fully-verified path. What isn't safe is assuming a PASS without
+having actually run it — the fallback's silence hides a capture arm that never worked
+from anyone who isn't watching `provenance.extra["servedBy"]`.
 
 If it reports BLOCKED, the capture path is not viable as designed and the alternatives are
 worth pricing before spending more on it: `AVAudioEngine` tapping the session directly, an

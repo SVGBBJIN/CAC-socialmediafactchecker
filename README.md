@@ -63,7 +63,7 @@ frozen means:
 | Platform | Path | web | Swift |
 |---|---|---|---|
 | **YouTube** | Gemini native URL ingestion | Working | Working |
-| **TikTok** | embed page → CDN MP4 → Gemini Flash | Working | Working — Gemini leg needs a key to confirm |
+| **TikTok** | web: embed page → CDN MP4 → Gemini Flash. Swift: capture-first (WKWebView + RPScreenRecorder + Whisper), direct-fetch as automatic fallback | Working | Working — capture-first path untested on device, see below; direct-fetch fallback needs a key to confirm |
 | **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
 
 Only platforms that can actually be served get registered, so an Instagram link shared
@@ -103,6 +103,18 @@ silent B-roll now yields on-screen text where the capture path yielded nothing.
 
 Verified live on 2026-07-28 through the compiled resolver: anonymous request, no
 credential, 3.2 MB `video/mp4` with a valid `ftyp` box.
+
+**That's still the whole story on `web/`, which has no capture path for TikTok at
+all.** On the Swift side, this has since been *reversed*, deliberately, at explicit
+product direction: `TikTokCaptureFirstExtractor` tries the capture path
+first — `CaptureBasedExtractor`, unchanged — and falls back to the direct-fetch
+extractor above only if capture fails, most notably the ReplayKit/WKWebView silent-audio
+defect this section describes. Both arms are real, tested code; which one served a given
+request is always recoverable from `ClaimContext.provenance` (`strategy` plus
+`extra["servedBy"]`, and `extra["capturePathFailure"]` when the fallback fired). See
+[docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md#2-tiktok) for what this means
+for the frozen-`Sources/` decision below, and why the capture arm still has not been run
+against a real device.
 
 ### Instagram doesn't either
 

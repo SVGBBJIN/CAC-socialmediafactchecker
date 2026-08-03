@@ -25,8 +25,9 @@ final class PlatformDetectionTests: XCTestCase {
     /// deliberate architectural decision rather than a drive-by edit.
     func testIngestionStrategyFork() {
         XCTAssertEqual(Platform.youTube.ingestionStrategy, .nativeVideoIngestion)
-        // TikTok's embed page yields a direct CDN URL, so it fetches rather than records.
-        XCTAssertEqual(Platform.tikTok.ingestionStrategy, .directMediaFetch)
+        // Capture-first via TikTokCaptureFirstExtractor; the embed page's direct CDN URL
+        // is wired in as the automatic fallback when capture fails.
+        XCTAssertEqual(Platform.tikTok.ingestionStrategy, .screenCapture)
         // Instagram is login-walled, so it is the only platform left on capture.
         XCTAssertEqual(Platform.instagram.ingestionStrategy, .screenCapture)
     }

@@ -363,6 +363,141 @@ final class WhisperRequestTests: XCTestCase {
     }
 }
 
+final class TikTokCaptureFirstExtractorTests: XCTestCase {
+    private struct StubResolver: EmbedResolver {
+        var platform: Platform = .tikTok
+        func resolve(_ url: URL) async throws -> EmbeddedMedia {
+            EmbeddedMedia(
+                sourceURL: url,
+                platform: platform,
+                html: "<blockquote class=\"tiktok-embed\"></blockquote>",
+                authorName: "Some Creator",
+                title: "A clip"
+            )
+        }
+    }
+
+    static let sourceURL = URL(string: "https://www.tiktok.com/@u/video/123")!
+
+    static let geminiJSON = #"""
+    {"candidates":[{"content":{"parts":[{"text":"{\"transcript\":\"fallback transcript\",\"claims\":[]}"}]},"finishReason":"STOP"}]}
+    """#
+
+    static func directFetchFallback(resolverFails: Bool = false) -> DirectMediaExtractor {
+        DirectMediaExtractor(
+            platform: .tikTok,
+            resolver: resolverFails
+                ? MockMediaURLResolver(failingWith: .upstreamFailure(service: "embed", status: 500, message: "down"))
+                : MockMediaURLResolver(returning: ResolvedMedia(
+                    sourceURL: sourceURL,
+                    platform: .tikTok,
+                    mediaURL: URL(string: "https://cdn.example/v.mp4")!,
+                    mimeType: "video/mp4",
+                    duration: 12,
+                    authorName: "A Poster"
+                )),
+            downloader: MockMediaDownloader.bytes(),
+            client: GeminiVideoClient(
+                transport: StubTransport([.ok(geminiJSON)]),
+                secrets: InMemorySecretStore([.geminiAPIKey: "k"]),
+                chain: GeminiModelChain([.flash3_6]),
+                sleeper: ImmediateSleeper()
+            )
+        )
+    }
+
+    /// When capture works, it serves the request on its own — the fallback is never touched.
+    func testCaptureSuccessServesDirectlyWithoutFallback() async throws {
+        let extractor = TikTokCaptureFirstExtractor(
+            captureExtractor: .tikTok(
+                captureSource: MockCaptureSource.speaking(),
+                transcriber: MockTranscriber(returning: Transcription(text: "captured audio")),
+                resolver: StubResolver()
+            ),
+            fallbackExtractor: Self.directFetchFallback(resolverFails: true)
+        )
+
+        let context = try await extractor.extract(from: Self.sourceURL)
+
+        XCTAssertEqual(context.transcript, "captured audio")
+        XCTAssertEqual(context.provenance.strategy, .screenCapture)
+        XCTAssertEqual(context.provenance.extra["servedBy"], "screenCapture")
+        XCTAssertNil(context.provenance.extra["capturePathFailure"])
+    }
+
+    /// The documented risk, reproduced: capture returns silence, and the request is
+    /// still served — by the direct-fetch fallback — rather than failing outright.
+    func testSilentCaptureFallsBackToDirectFetch() async throws {
+        let extractor = TikTokCaptureFirstExtractor(
+            captureExtractor: .tikTok(
+                captureSource: MockCaptureSource.silent(),
+                transcriber: MockTranscriber(returning: Transcription(text: "should never be reached")),
+                resolver: StubResolver()
+            ),
+            fallbackExtractor: Self.directFetchFallback()
+        )
+
+        let context = try await extractor.extract(from: Self.sourceURL)
+
+        XCTAssertEqual(context.transcript, "fallback transcript")
+        XCTAssertEqual(context.provenance.strategy, .directMediaFetch)
+        XCTAssertEqual(context.provenance.extra["servedBy"], "directMediaFetch")
+        XCTAssertTrue(
+            context.provenance.extra["capturePathFailure"]?.lowercased().contains("audio") ?? false,
+            "the recorded failure reason should name the audio problem, got \(context.provenance.extra["capturePathFailure"] ?? "nil")"
+        )
+    }
+
+    /// Neither arm working produces one clear, distinguishable error — never a silent
+    /// empty transcript.
+    func testBothArmsFailingProducesAllCandidatesFailed() async {
+        let extractor = TikTokCaptureFirstExtractor(
+            captureExtractor: .tikTok(
+                captureSource: MockCaptureSource.silent(),
+                transcriber: MockTranscriber(returning: Transcription(text: "unreachable")),
+                resolver: StubResolver()
+            ),
+            fallbackExtractor: Self.directFetchFallback(resolverFails: true)
+        )
+
+        do {
+            _ = try await extractor.extract(from: Self.sourceURL)
+            XCTFail("expected both arms failing to surface an error")
+        } catch let error as ExtractionError {
+            guard case .allCandidatesFailed(let attempts) = error else {
+                return XCTFail("expected allCandidatesFailed, got \(error)")
+            }
+            XCTAssertEqual(attempts.count, 2)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    /// A profile URL is declined up front, on either arm, rather than spending a
+    /// capture attempt and a resolve on something with no video in it.
+    func testDeclinesURLsWithNoPostBeforeAttemptingEitherArm() async {
+        let extractor = TikTokCaptureFirstExtractor(
+            captureExtractor: .tikTok(
+                captureSource: MockCaptureSource.speaking(),
+                transcriber: MockTranscriber(returning: Transcription(text: "unreachable")),
+                resolver: StubResolver()
+            ),
+            fallbackExtractor: Self.directFetchFallback(resolverFails: true)
+        )
+        let profileURL = URL(string: "https://www.tiktok.com/@user")!
+        XCTAssertTrue(extractor.canHandle(profileURL), "host-level dispatch should still accept it")
+
+        do {
+            _ = try await extractor.extract(from: profileURL)
+            XCTFail("expected notAMediaURL")
+        } catch let error as ExtractionError {
+            guard case .notAMediaURL = error else { return XCTFail("got \(error)") }
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+}
+
 final class PipelineBuilderTests: XCTestCase {
     /// TikTok needs no recorder — it fetches the media directly — but Instagram still
     /// does, and must stay unregistered until there is one. A user sharing an Instagram
@@ -376,18 +511,19 @@ final class PipelineBuilderTests: XCTestCase {
         XCTAssertNil(pipeline.extractor(for: URL(string: "https://www.instagram.com/reel/ABC/")!))
     }
 
-    /// The registered TikTok extractor is the direct-fetch one, not a capture extractor
-    /// that happens to answer for the same platform.
-    func testTikTokRegistersOnTheDirectFetchPath() {
+    /// With no capture source, TikTok has nothing to record with and registers the
+    /// direct-fetch extractor alone.
+    func testTikTokFallsBackToDirectFetchAloneWithoutACaptureSource() {
         let pipeline = SeerPipelineBuilder.makePipeline(
             .init(secrets: InMemorySecretStore([.geminiAPIKey: "k"]))
         )
         let extractor = pipeline.extractor(for: URL(string: "https://www.tiktok.com/@u/video/1")!)
-        XCTAssertEqual(extractor?.strategy, .directMediaFetch)
         XCTAssertTrue(extractor is DirectMediaExtractor)
     }
 
-    func testCapturePlatformsRegisterOnceASourceExists() {
+    /// Given a capture source, TikTok registers the capture-first extractor, not the
+    /// bare direct-fetch one.
+    func testTikTokRegistersCaptureFirstOnceASourceExists() {
         let pipeline = SeerPipelineBuilder.makePipeline(
             .init(
                 secrets: InMemorySecretStore([.geminiAPIKey: "k", .groqAPIKey: "g"]),
@@ -395,7 +531,8 @@ final class PipelineBuilderTests: XCTestCase {
                 instagramAccessToken: "meta-token"
             )
         )
-        XCTAssertNotNil(pipeline.extractor(for: URL(string: "https://www.tiktok.com/@u/video/1")!))
+        let extractor = pipeline.extractor(for: URL(string: "https://www.tiktok.com/@u/video/1")!)
+        XCTAssertTrue(extractor is TikTokCaptureFirstExtractor)
         XCTAssertNotNil(pipeline.extractor(for: URL(string: "https://www.instagram.com/reel/ABC/")!))
     }
 
