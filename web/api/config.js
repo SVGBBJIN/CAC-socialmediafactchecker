@@ -21,6 +21,10 @@ export default async function handler(req, res) {
       requiresPassword: Boolean(limits.password),
       apiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
       maxInputChars: limits.maxInputChars,
+      // The plus button's ceiling, so the client can reject an oversized file at the
+      // picker instead of letting the user wait through a base64 read and an upload
+      // just to be told no by the server.
+      maxUploadBytes: limits.maxUploadBytes,
       // The server drops everything older than this anyway (see `validateMessages`), so
       // telling the client lets it stop uploading history that would just be thrown away
       // on arrival — the cost of a long, video-heavy thread otherwise paid on every turn.

@@ -47,6 +47,12 @@ export function config(env = process.env) {
     // on screen. 0, the default, means no delay and no change from today's behaviour — see
     // `DEFAULT_ANSWER_HOLD_MS` in lib/gemini.js for what turning it on costs and buys.
     answerHoldMs: nonNegativeInt(env.ANSWER_HOLD_MS, 0),
+    // Raw bytes, before base64 — the plus button's ceiling. Kept small on purpose: the
+    // upload rides in the same JSON body as the rest of the chat request, base64 costs a
+    // third on top, and this server (unlike the clip-link path) buffers the whole body in
+    // memory before it can even look at it. See readBody's own cap in api/chat.js, sized
+    // to fit this value inflated plus slack, not the other way around.
+    maxUploadBytes: positiveInt(env.MAX_UPLOAD_BYTES, 4 * 1024 * 1024),
   };
 }
 
@@ -146,6 +152,52 @@ export function resetRateLimits() {
   windows.clear();
 }
 
+// What Gemini's `generateContent` accepts as inline video. Deliberately not "video/*":
+// an allowlist means a browser handing us something exotic fails here, with a message
+// naming the type it sent, instead of failing opaquely once the request reaches Gemini.
+const ALLOWED_UPLOAD_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-msvideo",
+  "video/mpeg",
+  "video/3gpp",
+]);
+
+/**
+ * The plus button's payload: `{mimeType, data}`, `data` already base64-encoded
+ * client-side. Returns `null` for "no attachment" — the common case, and distinct from
+ * "an attachment was sent but it's bad", which throws instead so the two are never
+ * confused.
+ */
+function validateAttachment(raw, limits) {
+  if (raw == null) return null;
+  if (typeof raw !== "object" || typeof raw.mimeType !== "string" || typeof raw.data !== "string") {
+    throw new GuardError("Malformed video attachment.", 400);
+  }
+  if (!ALLOWED_UPLOAD_MIME_TYPES.has(raw.mimeType)) {
+    throw new GuardError(`Unsupported video type: ${raw.mimeType}.`, 415);
+  }
+  // Decoding is the only reliable way to know the real byte count: base64 padding and
+  // stray whitespace make a length-based estimate wrong in exactly the cases worth
+  // catching. `Buffer.from` doesn't throw on malformed base64 — it just decodes short —
+  // so a garbled payload is caught by the size/emptiness checks below, not by a catch.
+  const bytes = Buffer.from(raw.data, "base64");
+  if (bytes.length === 0) {
+    throw new GuardError("Empty or unreadable video attachment.", 400);
+  }
+  if (bytes.length > limits.maxUploadBytes) {
+    throw new GuardError(
+      `Video is too large (${(bytes.length / (1024 * 1024)).toFixed(1)} MB, limit ${(
+        limits.maxUploadBytes /
+        (1024 * 1024)
+      ).toFixed(1)} MB).`,
+      413,
+    );
+  }
+  return { mimeType: raw.mimeType, data: raw.data };
+}
+
 /**
  * Validate the request body and trim it to what we're willing to send upstream.
  * Every cap here is a spend cap: unbounded history is unbounded tokens.
@@ -157,17 +209,29 @@ export function validateMessages(body, limits) {
   }
 
   const cleaned = [];
+  let attachmentSeen = false;
   for (const message of messages) {
     const role = message?.role === "assistant" ? "assistant" : "user";
     const content = typeof message?.content === "string" ? message.content : "";
-    if (content.trim().length === 0) continue;
+    // Only a user turn may carry an upload — same rule as every other media path, and
+    // for the same reason: a `model` turn is a record of what Gemini said, not a request.
+    const attachment = role === "user" ? validateAttachment(message?.attachment, limits) : null;
+    if (content.trim().length === 0 && !attachment) continue;
     if (content.length > limits.maxInputChars) {
       throw new GuardError(
         `Message is too long (${content.length} characters, limit ${limits.maxInputChars}).`,
         413,
       );
     }
-    cleaned.push({ role, content });
+    if (attachment) {
+      // One upload per request keeps the cost of a crafted request bounded; the plus
+      // button itself never produces more than one.
+      if (attachmentSeen) {
+        throw new GuardError("Only one uploaded video is allowed per message.", 413);
+      }
+      attachmentSeen = true;
+    }
+    cleaned.push(attachment ? { role, content, attachment } : { role, content });
   }
 
   if (cleaned.length === 0) {

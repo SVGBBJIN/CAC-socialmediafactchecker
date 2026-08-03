@@ -881,6 +881,24 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
         const context = describeClip(entry.resolved, platform);
         if (context) notes.push(context);
       }
+
+      // A video the user uploaded directly rather than linked. Bytes arrive already
+      // validated (see `validateMessages` in lib/guard.js) — there is no download or
+      // resolve step, so this needs none of the machinery above, just the same
+      // attach-once-and-note-it-afterwards shape the other two paths use.
+      if (message.attachment) {
+        if (!attachVideos) {
+          notes.push(
+            "[The video uploaded with this message was watched earlier in this turn. " +
+              "Work from what you already wrote about it.]",
+          );
+        } else {
+          parts.push({
+            inline_data: { mime_type: message.attachment.mimeType, data: message.attachment.data },
+          });
+          notes.push("[Attached: a video the user uploaded directly, not linked from a platform.]");
+        }
+      }
     }
 
     // Notes ride in the same text part rather than a separate one: Gemini concatenates

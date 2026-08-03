@@ -44,6 +44,7 @@ That is the "15 million people on my quota" problem, and it's a separate control
 | Per-minute limit | `RATE_LIMIT_PER_MINUTE` | 15 | A script, or a stuck retry loop |
 | Per-day limit | `RATE_LIMIT_PER_DAY` | 300 | Slow bleed over a day |
 | Message size cap | `MAX_INPUT_CHARS` | 8000 | One giant paste costing real money |
+| Upload size cap | `MAX_UPLOAD_BYTES` | 4194304 (4 MB) | The plus button's request body ballooning past the server's own buffering limit |
 | History cap | `MAX_TURNS` | 20 | Long threads resending everything, forever |
 
 Locally the server binds `127.0.0.1`, so nothing off your machine can reach it and the
@@ -178,6 +179,29 @@ Two things that will eventually break, and what they look like when they do:
 
 Both failure modes end the same way for the user: the clip is dropped, a bracketed note
 explains why, and the answer proceeds from the link and caption alone.
+
+### A fourth path: the user's own upload
+
+The library UI's plus button (`public/app.js`, `handleUploadFile`/`runUploadCheck`) skips
+all of the above — there's no link to resolve, no CDN to fetch from. The browser reads the
+file, base64-encodes it client-side, and sends it in the same request shape as everything
+else: a chat message carrying an `attachment: {mimeType, data}` field. `validateMessages`
+(`lib/guard.js`) is the only place that ever inspects it — MIME type against an allowlist,
+decoded byte count against `MAX_UPLOAD_BYTES` (4 MB raw by default) — and `toGeminiContents`
+(`lib/gemini.js`) attaches it as `inline_data`, the same part shape TikTok and Instagram
+clips already use once downloaded. No resolver, no download, no Files API tier: the MVP
+scope is deliberately small clips only, one request, inline.
+
+What this buys: a claim in a video that was never posted anywhere reachable by URL — a
+recording off a TV, a clip forwarded without its original link, screen-captured audio —
+can still be checked. What it costs: the video's bytes live only in the browser tab's
+memory (`uploadCache` in `app.js`), never in `localStorage` and never on the server past
+the single request that used them. Reload the page and a video attached to a past check is
+gone — the video pane falls back to a placeholder icon, a follow-up runs without it (with a
+note saying so), and a failed check's retry button is replaced with a plain explanation
+instead of a button that can't actually work. This is the same "say why, don't fake it"
+posture as the rest of the app's degradation paths, just for a resource that has nowhere
+durable to live.
 
 ## Tests
 

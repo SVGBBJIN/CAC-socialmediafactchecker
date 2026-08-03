@@ -19,7 +19,7 @@ const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || FACT_CHECK_SYSTEM_PROMPT;
 // and the gap before Gemini's first token on a video it has to watch is easily a minute.
 const HEARTBEAT_MS = 15_000;
 
-async function readBody(req) {
+async function readBody(req, maxBytes) {
   // Vercel parses JSON bodies for you; a bare Node server does not.
   if (req.body !== undefined && req.body !== null) {
     if (typeof req.body !== "string") return req.body;
@@ -35,7 +35,7 @@ async function readBody(req) {
   for await (const chunk of req) {
     size += chunk.length;
     // Refuse an oversized body before buffering it all.
-    if (size > 1_000_000) throw new GuardError("Request body too large.", 413);
+    if (size > maxBytes) throw new GuardError("Request body too large.", 413);
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
@@ -72,7 +72,12 @@ export default async function handler(req, res) {
   let usage = { pressure: 0 };
   try {
     usage = authorize(req, limits) ?? usage;
-    messages = validateMessages(await readBody(req), limits);
+    // Sized to fit one uploaded video: base64 inflates raw bytes by a third, plus slack
+    // for the JSON structure and message text around it. `validateMessages` enforces the
+    // real limit (`limits.maxUploadBytes`, on decoded bytes); this only has to be loose
+    // enough not to reject a legitimate upload before it gets that far.
+    const maxBodyBytes = Math.ceil((limits.maxUploadBytes * 4) / 3) + 200_000;
+    messages = validateMessages(await readBody(req, maxBodyBytes), limits);
   } catch (error) {
     if (error instanceof GuardError) {
       const headers = error.retryAfter ? { "retry-after": String(error.retryAfter) } : {};

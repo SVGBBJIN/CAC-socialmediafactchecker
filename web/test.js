@@ -69,7 +69,14 @@ import {
   config as guardConfig,
 } from "./lib/guard.js";
 
-const limits = { perMinute: 3, perDay: 5, maxInputChars: 100, maxTurns: 4, password: "" };
+const limits = {
+  perMinute: 3,
+  perDay: 5,
+  maxInputChars: 100,
+  maxTurns: 4,
+  password: "",
+  maxUploadBytes: 1000,
+};
 
 /** A fetch that returns one SSE response built from the given text chunks. */
 function sseResponse(chunks) {
@@ -1440,6 +1447,143 @@ test("an unknown role is coerced to user rather than passed upstream", () => {
     limits,
   );
   assert.equal(cleaned[0].role, "user");
+});
+
+/* ---------------- Video upload validation ---------------- */
+
+function tinyVideoBase64(byteCount = 10) {
+  return Buffer.alloc(byteCount, 7).toString("base64");
+}
+
+test("a valid attachment on a user message survives validation", () => {
+  const cleaned = validateMessages(
+    {
+      messages: [
+        { role: "user", content: "", attachment: { mimeType: "video/mp4", data: tinyVideoBase64() } },
+      ],
+    },
+    limits,
+  );
+  assert.equal(cleaned.length, 1, "an empty-text message with an attachment must not be dropped");
+  assert.deepEqual(cleaned[0].attachment, { mimeType: "video/mp4", data: tinyVideoBase64() });
+});
+
+test("an attachment on an assistant turn is dropped, not passed upstream", () => {
+  const cleaned = validateMessages(
+    {
+      messages: [
+        { role: "user", content: "check this" },
+        {
+          role: "assistant",
+          content: "here's your video back",
+          attachment: { mimeType: "video/mp4", data: tinyVideoBase64() },
+        },
+        { role: "user", content: "and this?" },
+      ],
+    },
+    limits,
+  );
+  const assistantMessage = cleaned.find((m) => m.role === "assistant");
+  assert.equal(assistantMessage.attachment, undefined);
+});
+
+test("an oversized attachment is refused with the decoded size, not the base64 size", () => {
+  // limits.maxUploadBytes is 1000 in this suite's shared `limits`.
+  assert.throws(
+    () =>
+      validateMessages(
+        {
+          messages: [
+            { role: "user", content: "", attachment: { mimeType: "video/mp4", data: tinyVideoBase64(1001) } },
+          ],
+        },
+        limits,
+      ),
+    (error) => error.status === 413,
+  );
+  // Just under the line must pass.
+  assert.doesNotThrow(() =>
+    validateMessages(
+      {
+        messages: [
+          { role: "user", content: "", attachment: { mimeType: "video/mp4", data: tinyVideoBase64(999) } },
+        ],
+      },
+      limits,
+    ),
+  );
+});
+
+test("an attachment outside the MIME allowlist is refused by name", () => {
+  assert.throws(
+    () =>
+      validateMessages(
+        {
+          messages: [
+            { role: "user", content: "", attachment: { mimeType: "application/pdf", data: tinyVideoBase64() } },
+          ],
+        },
+        limits,
+      ),
+    (error) => error.status === 415 && error.message.includes("application/pdf"),
+  );
+});
+
+test("a second attachment in one request is refused rather than silently dropped", () => {
+  assert.throws(
+    () =>
+      validateMessages(
+        {
+          messages: [
+            { role: "user", content: "first", attachment: { mimeType: "video/mp4", data: tinyVideoBase64() } },
+            { role: "assistant", content: "ok" },
+            { role: "user", content: "second", attachment: { mimeType: "video/mp4", data: tinyVideoBase64() } },
+          ],
+        },
+        limits,
+      ),
+    (error) => error.status === 413,
+  );
+});
+
+test("a malformed attachment shape is refused rather than silently ignored", () => {
+  assert.throws(
+    () =>
+      validateMessages(
+        { messages: [{ role: "user", content: "x", attachment: { mimeType: "video/mp4" } }] },
+        limits,
+      ),
+    (error) => error.status === 400,
+  );
+  assert.throws(
+    () => validateMessages({ messages: [{ role: "user", content: "x", attachment: "video.mp4" }] }, limits),
+    (error) => error.status === 400,
+  );
+});
+
+test("toGeminiContents attaches an uploaded video as inline_data with an explanatory note", () => {
+  const data = tinyVideoBase64();
+  const messages = [{ role: "user", content: "check this", attachment: { mimeType: "video/mp4", data } }];
+  const parts = toGeminiContents(messages)[0].parts;
+
+  assert.deepEqual(
+    parts.find((p) => p.inline_data),
+    { inline_data: { mime_type: "video/mp4", data } },
+  );
+  const text = parts.find((p) => p.text)?.text ?? "";
+  assert.match(text, /uploaded directly/);
+});
+
+test("toGeminiContents does not re-attach an uploaded video on the repair round", () => {
+  const data = tinyVideoBase64();
+  const messages = [{ role: "user", content: "check this", attachment: { mimeType: "video/mp4", data } }];
+
+  const reread = toGeminiContents(messages, { attachVideos: false });
+  assert.equal(
+    reread[0].parts.some((p) => p.inline_data),
+    false,
+  );
+  assert.match(reread[0].parts.find((p) => p.text)?.text ?? "", /watched earlier in this turn/);
 });
 
 /* ---------------- Static path handling ---------------- */

@@ -86,15 +86,24 @@ const el = {
   linkConfirmTitle: document.getElementById("link-confirm-title"),
   linkConfirmBody: document.getElementById("link-confirm-body"),
   linkConfirmCancel: document.getElementById("link-confirm-cancel"),
+  uploadBtn: document.getElementById("uploadBtn"),
+  uploadInput: document.getElementById("uploadInput"),
+  uploadChip: document.getElementById("uploadChip"),
+  uploadChipName: document.getElementById("uploadChipName"),
+  uploadChipSize: document.getElementById("uploadChipSize"),
+  uploadChipRemove: document.getElementById("uploadChipRemove"),
+  uploadError: document.getElementById("uploadError"),
 };
 
 let library = loadLibrary();
 let selectedId = library[0]?.id ?? null;
 let inFlight = null;
-// Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
-// videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
-// lib/tiktok.js and lib/instagram.js), so caching it in localStorage would just persist a
-// URL that 404s on the next visit. Re-resolved each time an entry is (re)selected instead.
+// Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube"|"upload",
+// mediaURL, videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and
+// short-lived (see lib/tiktok.js and lib/instagram.js), so caching it in localStorage
+// would just persist a URL that 404s on the next visit. An uploaded video's object URL is
+// equally unpersistable — it points at bytes that live only in this tab's memory. Both are
+// re-resolved (or, for an upload, simply gone) each time an entry is (re)selected.
 const mediaCache = new Map();
 // Bumped every time the video pane switches entries, so a slow /api/resolve-media
 // response for an entry the user has since navigated away from can't land in the pane
@@ -105,6 +114,29 @@ let videoPaneToken = 0;
 // same as the chat UI drops an in-progress bubble on refresh.
 let pendingFollowup = null; // { entryId, question, error? }
 let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check anyway"
+
+// A video picked via the plus button, waiting for "Check" — cleared once the run starts
+// (or the user removes it). Never persisted: see `uploadCache` below for why.
+let pendingUpload = null; // { name, mimeType, size, data(base64) }
+// The actual bytes behind an "Upload" entry, keyed by entry id, kept only for as long as
+// this tab is open. A TikTok link can be re-resolved after a reload because the URL
+// itself survives in localStorage; an uploaded file has no such URL; once this map is
+// gone (a reload, a closed tab) the video is gone with it — the video pane falls back to
+// the placeholder icon and a follow-up runs without it. See `historyFor` and
+// `showUploadPreview`.
+const uploadCache = new Map();
+const UPLOAD_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
+  "video/x-msvideo",
+  "video/mpeg",
+  "video/3gpp",
+]);
+const DEFAULT_MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+// Replaced with the server's real limit once /api/config answers — see loadServerConfig.
+// Kept small before then so a huge pick can't slip through in the gap.
+let maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES;
 
 /* ---------------------------------------------------------------- storage */
 
@@ -280,6 +312,91 @@ function truncate(text, max) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/* ---------------------------------------------------------------- upload */
+
+/** `File` → base64, without the `data:<mime>;base64,` prefix `readAsDataURL` includes. */
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const comma = result.indexOf(",");
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** The inverse of the server's `Buffer.from(data, "base64")` — needed to hand the bytes
+ * back to the browser as a playable `Blob` for the video pane preview. */
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function showUploadError(message) {
+  el.uploadError.textContent = message;
+  el.uploadError.hidden = false;
+}
+
+function hideUploadError() {
+  el.uploadError.hidden = true;
+}
+
+function showUploadChip(upload) {
+  el.uploadChipName.textContent = upload.name;
+  el.uploadChipSize.textContent = formatBytes(upload.size);
+  el.uploadChip.hidden = false;
+  el.linkInput.hidden = true;
+  hideUploadError();
+  updateComposerMode();
+}
+
+/** Clears the picked-but-not-yet-checked file. Does not touch `uploadCache` — that's the
+ * bytes behind an entry that's already running or done, a different lifetime entirely. */
+function clearPendingUpload() {
+  pendingUpload = null;
+  el.uploadInput.value = "";
+  el.uploadChip.hidden = true;
+  el.linkInput.hidden = false;
+}
+
+async function handleUploadFile(file) {
+  if (!file) return;
+  if (!UPLOAD_MIME_TYPES.has(file.type)) {
+    showUploadError(`"${file.type || "unknown file type"}" isn't a supported video format — try MP4, MOV, or WebM.`);
+    el.uploadInput.value = "";
+    return;
+  }
+  if (file.size > maxUploadBytes) {
+    showUploadError(
+      `That video is ${formatBytes(file.size)} — the limit is ${formatBytes(maxUploadBytes)}. Try a shorter or lower-resolution clip.`,
+    );
+    el.uploadInput.value = "";
+    return;
+  }
+
+  let data;
+  try {
+    data = await readFileAsBase64(file);
+  } catch {
+    showUploadError("Could not read that file.");
+    el.uploadInput.value = "";
+    return;
+  }
+
+  pendingUpload = { name: file.name, mimeType: file.type, size: file.size, data };
+  showUploadChip(pendingUpload);
+}
+
 /* ---------------------------------------- markdown + citations */
 
 function escapeHTML(text) {
@@ -410,6 +527,7 @@ function selectEntry(id) {
   if (inFlight) return; // Don't let a click yank the pane out from under a running turn.
   selectedId = id;
   pendingFollowup = null;
+  clearPendingUpload();
   renderLibrary(el.searchInput.value);
   const entry = findEntry(id);
   if (entry) renderVideoPane(entry);
@@ -421,10 +539,11 @@ function selectEntry(id) {
 /** The un-started state: nothing selected, video pane and claims pane both blank. */
 function renderEmptyState() {
   el.videoChip.textContent = "No link yet";
-  el.videoTitle.textContent = "Paste a link below to start a check.";
+  el.videoTitle.textContent = "Paste a link below, or upload a video, to start a check.";
   el.videoLink.href = "#";
+  el.videoLink.style.display = "none";
   clearVideoMedia();
-  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check.</p></div>`;
+  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check — or use the + button to upload a video of your own.</p></div>`;
 }
 
 /**
@@ -437,6 +556,7 @@ function startNewCheck() {
   if (inFlight) return; // Same guard as switching library items mid-run.
   selectedId = null;
   pendingFollowup = null;
+  clearPendingUpload();
   el.linkInput.value = "";
   renderLibrary(el.searchInput.value);
   renderEmptyState();
@@ -531,13 +651,42 @@ async function loadDirectMedia(entry, token) {
   }
 }
 
+/**
+ * An uploaded video has no CDN URL to fetch — the bytes already sit in `uploadCache`, so
+ * this is a decode-and-display, not a network call. Cached into `mediaCache` the same as
+ * the other two kinds so re-selecting the entry doesn't re-decode the base64 each time.
+ */
+function showUploadPreview(entry, token) {
+  const cached = mediaCache.get(entry.id);
+  if (cached?.kind === "upload") {
+    if (token === videoPaneToken) showVideoElement(cached);
+    return;
+  }
+  const upload = uploadCache.get(entry.id);
+  // Bytes are gone — a reload, most likely. Same graceful fallback as a dead CDN link:
+  // the placeholder icon stands in, and the rest of the pane (title, the check itself)
+  // doesn't depend on this.
+  if (!upload) return;
+  const mediaURL = URL.createObjectURL(new Blob([base64ToBytes(upload.data)], { type: upload.mimeType }));
+  const media = { kind: "upload", mediaURL };
+  mediaCache.set(entry.id, media);
+  if (token === videoPaneToken) showVideoElement(media);
+}
+
 function renderVideoPane(entry) {
   el.videoChip.textContent = entry.platform;
   el.videoTitle.textContent = entry.title;
-  el.videoLink.href = entry.url;
+  // Nothing to open for an upload — there's no page it came from.
+  el.videoLink.href = entry.url ?? "#";
+  el.videoLink.style.display = entry.url ? "" : "none";
 
   const token = ++videoPaneToken;
   clearVideoMedia();
+
+  if (entry.platform === "Upload") {
+    showUploadPreview(entry, token);
+    return;
+  }
 
   if (entry.platform === "TikTok" || entry.platform === "Instagram") {
     loadDirectMedia(entry, token);
@@ -583,13 +732,28 @@ function renderRunningCard() {
 }
 
 function renderErrorCard(entry) {
+  const isUpload = entry.platform === "Upload";
+  // An uploaded video's bytes only ever live in this tab's memory (see `uploadCache`), so
+  // a retry is only possible while they're still there — a reload takes the option away
+  // the same way it would take away the ability to re-fetch a CDN link that had gone dead.
+  const canRetry = !isUpload || uploadCache.has(entry.id);
+
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="eyebrow">Check failed</div>
       <p class="claim-text in">${escapeHTML(entry.error || "Something went wrong.")}</p>
-      <button type="button" class="retry-button" id="retryBtn">Try again</button>
+      ${
+        canRetry
+          ? `<button type="button" class="retry-button" id="retryBtn">Try again</button>`
+          : `<p class="claim-text in" style="font-size:12.5px;color:var(--muted)">The uploaded video is no longer in this tab's memory — reload lost it. Use the + button to attach it again and run a new check.</p>`
+      }
     </div>`;
-  document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
+
+  if (!canRetry) return;
+  document.getElementById("retryBtn")?.addEventListener("click", () => {
+    if (isUpload) runUploadCheck(uploadCache.get(entry.id), entry.id);
+    else runCheck(entry.url, entry.id);
+  });
 }
 
 /**
@@ -835,22 +999,37 @@ function incompleteFrom({ truncated, failure }) {
   return null;
 }
 
+const CHECK_INSTRUCTIONS =
+  "List the distinct factual claims it makes, check each one, and explain what the evidence " +
+  "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
+  "|Insufficient evidence>` summarizing the main claim — no other text on that line.";
+
 function composeCheckPrompt(url) {
-  return (
-    `Fact-check this video: ${url}\n\n` +
-    "List the distinct factual claims it makes, check each one, and explain what the evidence " +
-    "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
-    "|Insufficient evidence>` summarizing the main claim — no other text on that line."
-  );
+  return `Fact-check this video: ${url}\n\n${CHECK_INSTRUCTIONS}`;
+}
+
+function composeUploadPrompt() {
+  return `Fact-check the video attached to this message.\n\n${CHECK_INSTRUCTIONS}`;
 }
 
 /** The conversation an entry represents so far: the original check, then every follow-up
  * that's already settled — what a new follow-up continues, not restarts. */
 function historyFor(entry) {
-  const history = [
-    { role: "user", content: entry.prompt },
-    { role: "assistant", content: entry.rawAnswer },
-  ];
+  const first = { role: "user", content: entry.prompt };
+  // A link re-resolves itself every request — the text alone is enough. An upload has no
+  // such text to point at; the video only travels if its bytes are still in `uploadCache`.
+  if (entry.platform === "Upload") {
+    const cached = uploadCache.get(entry.id);
+    if (cached) {
+      first.attachment = { mimeType: cached.mimeType, data: cached.data };
+    } else {
+      first.content +=
+        "\n\n[The uploaded video is no longer available to re-attach in this session. Answer " +
+        "from what was already established about it in the conversation below.]";
+    }
+  }
+
+  const history = [first, { role: "assistant", content: entry.rawAnswer }];
   for (const f of entry.followups) {
     history.push({ role: "user", content: f.question }, { role: "assistant", content: f.answer });
   }
@@ -859,20 +1038,41 @@ function historyFor(entry) {
 
 /* ---------------------------------------------------------------- the two turns */
 
-async function runCheck(url, existingId) {
+/**
+ * Runs one fresh check and writes it into the library, shared by the two ways to start
+ * one — a pasted link (`runCheck`) and an uploaded video (`runUploadCheck`). They differ
+ * only in what the entry looks like and what the first message contains; everything
+ * about running the turn, updating the library, and rendering the result is identical,
+ * so it lives here once rather than twice.
+ *
+ * @param existingId Set on a retry: reuse the entry's id and history slot instead of
+ *   filing a new library row for the same check.
+ * @param entryFields Platform-specific fields merged onto the entry — `{url, platform,
+ *   title}` for a link, `{url: null, platform: "Upload", title, upload}` for a file.
+ * @param message The first user turn — `{role: "user", content}` for a link,
+ *   plus `attachment` for a file.
+ */
+async function runExtraction(existingId, entryFields, message) {
   if (inFlight) return;
 
   const id = existingId ?? crypto.randomUUID();
-  const prompt = composeCheckPrompt(url);
   let entry = findEntry(id);
   if (!entry) {
-    entry = { id, url, platform: platformFor(url), title: url, createdAt: Date.now(), status: "running", prompt, followups: [] };
+    entry = {
+      id,
+      createdAt: Date.now(),
+      status: "running",
+      prompt: message.content,
+      followups: [],
+      ...entryFields,
+    };
     library.unshift(entry);
   } else {
     entry.status = "running";
     entry.error = undefined;
-    entry.prompt = prompt;
+    entry.prompt = message.content;
     entry.followups = [];
+    Object.assign(entry, entryFields);
   }
   selectedId = id;
   pendingFollowup = null;
@@ -886,9 +1086,10 @@ async function runCheck(url, existingId) {
   inFlight = controller;
   el.checkBtn.disabled = true;
   el.newCheckBtn.disabled = true;
+  el.uploadBtn.disabled = true;
 
   try {
-    const { answer, sources, incomplete } = await streamChat([{ role: "user", content: prompt }], {
+    const { answer, sources, incomplete } = await streamChat([message], {
       signal: controller.signal,
       onStage: (frame) => {
         const status = document.getElementById("runStatus");
@@ -926,8 +1127,43 @@ async function runCheck(url, existingId) {
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
+    el.uploadBtn.disabled = false;
     updateComposerMode();
   }
+}
+
+async function runCheck(url, existingId) {
+  await runExtraction(
+    existingId,
+    { url, platform: platformFor(url), title: url },
+    { role: "user", content: composeCheckPrompt(url) },
+  );
+}
+
+/**
+ * `upload` is `{name, mimeType, size, data}` — either fresh from the picker (a new check)
+ * or pulled back out of `uploadCache` (a retry). Either way its bytes go straight into
+ * `uploadCache` under this run's id before the request goes out, so the video pane and a
+ * future follow-up can find them without asking the user to attach it twice.
+ */
+async function runUploadCheck(upload, existingId) {
+  const id = existingId ?? crypto.randomUUID();
+  uploadCache.set(id, upload);
+  clearPendingUpload();
+  await runExtraction(
+    id,
+    {
+      url: null,
+      platform: "Upload",
+      title: upload.name,
+      upload: { mimeType: upload.mimeType, size: upload.size },
+    },
+    {
+      role: "user",
+      content: composeUploadPrompt(),
+      attachment: { mimeType: upload.mimeType, data: upload.data },
+    },
+  );
 }
 
 async function runFollowup(entry, question) {
@@ -942,6 +1178,7 @@ async function runFollowup(entry, question) {
   inFlight = controller;
   el.checkBtn.disabled = true;
   el.newCheckBtn.disabled = true;
+  el.uploadBtn.disabled = true;
   let settled = false;
 
   try {
@@ -973,6 +1210,7 @@ async function runFollowup(entry, question) {
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
+    el.uploadBtn.disabled = false;
     if (selectedId === entry.id) renderResultCard(entry);
     updateComposerMode();
   }
@@ -987,6 +1225,12 @@ async function runFollowup(entry, question) {
  * surprise on submit.
  */
 function updateComposerMode() {
+  // An attached file always means "run a new check" — there's no follow-up reading to do
+  // on the text field while a video is queued up in the chip that replaced it.
+  if (pendingUpload) {
+    el.checkBtn.textContent = "Check";
+    return;
+  }
   const entry = selectedDoneEntry();
   if (!entry) {
     el.checkBtn.textContent = "Check";
@@ -1007,8 +1251,13 @@ async function loadServerConfig() {
     const response = await fetch("/api/config");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const config = await response.json();
+    if (Number.isFinite(config.maxUploadBytes) && config.maxUploadBytes > 0) {
+      maxUploadBytes = config.maxUploadBytes;
+    }
+    el.uploadBtn.title = `Upload a video (MP4, MOV, WebM — up to ${formatBytes(maxUploadBytes)})`;
     if (!config.apiKeyConfigured) {
       el.checkBtn.disabled = true;
+      el.uploadBtn.disabled = true;
       el.linkInput.placeholder = "Server has no GEMINI_API_KEY — see web/README.md";
       return;
     }
@@ -1017,6 +1266,7 @@ async function loadServerConfig() {
     }
   } catch {
     el.checkBtn.disabled = true;
+    el.uploadBtn.disabled = true;
     el.linkInput.placeholder = "Server unreachable";
   }
 }
@@ -1024,6 +1274,10 @@ async function loadServerConfig() {
 /* ---------------------------------------------------------------- wiring */
 
 el.checkBtn.addEventListener("click", () => {
+  if (pendingUpload) {
+    runUploadCheck(pendingUpload);
+    return;
+  }
   const entry = selectedDoneEntry();
   const raw = el.linkInput.value;
   if (entry && looksLikeFollowup(raw)) {
@@ -1033,6 +1287,21 @@ el.checkBtn.addEventListener("click", () => {
   }
   const url = normalizeLink(raw);
   if (url) confirmAndRunCheck(url);
+});
+
+el.uploadBtn.addEventListener("click", () => {
+  if (inFlight) return;
+  el.uploadInput.click();
+});
+
+el.uploadInput.addEventListener("change", () => {
+  handleUploadFile(el.uploadInput.files?.[0]);
+});
+
+el.uploadChipRemove.addEventListener("click", () => {
+  clearPendingUpload();
+  updateComposerMode();
+  el.linkInput.focus();
 });
 
 el.linkConfirmForm.addEventListener("submit", () => {
