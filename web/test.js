@@ -45,6 +45,7 @@ import {
   parseEmbedPage,
   resolveTikTokVideo,
   downloadTikTokMedia,
+  fetchTikTokOEmbed,
   TikTokError,
 } from "./lib/tiktok.js";
 import {
@@ -1736,6 +1737,122 @@ test("the CDN's content type wins over the resolver's guess", async () => {
   const generic = async () =>
     mediaResponse(Buffer.from("bytes"), { headers: { "content-type": "application/octet-stream" } });
   assert.equal((await downloadTikTokMedia(resolvedClip(), { fetchImpl: generic })).mimeType, "video/mp4");
+});
+
+test("jitter is a no-op unless a caller opts in", async () => {
+  const calls = [];
+  const fetchImpl = async () => {
+    calls.push(Date.now());
+    return htmlResponse(tikTokPage());
+  };
+  const start = Date.now();
+  await resolveTikTokVideo(SOURCE_URL, { fetchImpl });
+  assert.ok(Date.now() - start < 100, "no jitter by default — the fetch should fire immediately");
+});
+
+test("jitter delays the request when a caller opts in, through an injected sleep", async () => {
+  const slept = [];
+  const sleepImpl = async (ms) => {
+    slept.push(ms);
+  };
+  const fetchImpl = async () => htmlResponse(tikTokPage());
+  await resolveTikTokVideo(SOURCE_URL, { fetchImpl, jitter: true, sleepImpl });
+  assert.equal(slept.length, 1);
+  assert.ok(slept[0] >= 150 && slept[0] <= 900, `jitter ${slept[0]}ms should land in [150, 900]`);
+});
+
+test("oEmbed reads title, author and thumbnail from TikTok's real endpoint", async () => {
+  let seenURL;
+  const fetchImpl = async (url) => {
+    seenURL = url;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        title: "A caption",
+        author_name: "scout2015",
+        thumbnail_url: "https://p16.tiktokcdn.com/thumb.jpg",
+      }),
+    };
+  };
+  const meta = await fetchTikTokOEmbed(SOURCE_URL, { fetchImpl });
+  assert.deepEqual(meta, {
+    title: "A caption",
+    authorName: "scout2015",
+    thumbnailURL: "https://p16.tiktokcdn.com/thumb.jpg",
+  });
+  assert.ok(seenURL.startsWith("https://www.tiktok.com/oembed?url="));
+  assert.ok(seenURL.includes(encodeURIComponent(SOURCE_URL)));
+});
+
+test("oEmbed is best-effort — a failure returns null instead of throwing", async () => {
+  assert.equal(await fetchTikTokOEmbed(SOURCE_URL, { fetchImpl: async () => ({ ok: false, status: 404 }) }), null);
+  assert.equal(
+    await fetchTikTokOEmbed(SOURCE_URL, {
+      fetchImpl: async () => {
+        throw new Error("network down");
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    await fetchTikTokOEmbed(SOURCE_URL, {
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+    }),
+    null,
+    "an empty body carries nothing worth keeping",
+  );
+});
+
+test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => resolvedClip(),
+        download: async () => {
+          throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", { retryable: true });
+        },
+        oEmbed: async () => ({ title: "A caption", authorName: "scout2015", thumbnailURL: null }),
+      },
+    ],
+  });
+
+  const entry = clips.attachments.get(SOURCE_URL);
+  assert.equal(entry.error, undefined, "the oEmbed fallback clears the download error");
+  assert.ok(entry.metadataOnly);
+
+  const contents = toGeminiContents(messages, { clips });
+  assert.equal(contents[0].parts.length, 1, "no video part — only the fallback note");
+  assert.match(contents[0].parts[0].text, /could not be downloaded, but its public listing says/);
+  assert.match(contents[0].parts[0].text, /scout2015/);
+  assert.match(contents[0].parts[0].text, /A caption/);
+});
+
+test("when oEmbed also fails, the original download error still surfaces", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => resolvedClip(),
+        download: async () => {
+          throw new TikTokError("TikTok's CDN refused the download (HTTP 403).");
+        },
+        oEmbed: async () => null,
+      },
+    ],
+  });
+
+  const entry = clips.attachments.get(SOURCE_URL);
+  assert.match(entry.error, /CDN refused the download/);
+  const contents = toGeminiContents(messages, { clips });
+  assert.match(contents[0].parts[0].text, /could not be attached: TikTok's CDN refused the download/);
 });
 
 test("a small clip rides inline, as base64 next to the text", async () => {

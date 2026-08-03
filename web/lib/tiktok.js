@@ -61,6 +61,22 @@ export const USER_AGENT =
 
 const EMBED_BASE = "https://www.tiktok.com/embed/v2";
 
+/** TikTok's real oEmbed endpoint — title, author, thumbnail. No video, see below. */
+const OEMBED_ENDPOINT = "https://www.tiktok.com/oembed";
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A random pause before a request, so every fetch this module makes doesn't land on the
+ * same offset within its second — a fixed cadence is one of the crudest bot signatures.
+ * Off by default so tests stay instant; callers that talk to the real TikTok (the API
+ * routes, not the test suite) opt in explicitly.
+ */
+async function jitterDelay(enabled, { minMs = 150, maxMs = 900, sleepImpl = defaultSleep } = {}) {
+  if (!enabled) return;
+  await sleepImpl(minMs + Math.floor(Math.random() * (maxMs - minMs + 1)));
+}
+
 /**
  * Hosts we'll fetch media bytes from.
  *
@@ -317,7 +333,8 @@ export function parseEmbedPage(html, { videoID, sourceURL }) {
  * A short link carries no ID at all — only the redirect knows it. Fetch and read where we
  * landed; `fetch` follows redirects, so `response.url` is the canonical URL.
  */
-async function followShortLink(urlString, { fetchImpl, signal, timeoutMs }) {
+async function followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter, sleepImpl }) {
+  await jitterDelay(jitter, { sleepImpl });
   let response;
   try {
     response = await fetchWithTimeout(urlString, {
@@ -326,6 +343,11 @@ async function followShortLink(urlString, { fetchImpl, signal, timeoutMs }) {
       timeoutMs,
       headers: { "user-agent": USER_AGENT },
       redirect: "follow",
+      // No cookie jar, no auth header, ever — an unauthenticated request is the whole
+      // reason this doesn't fall under TikTok's account-ToS terms as well as its scraping
+      // ones. Explicit rather than merely "we never set one," so a future change can't
+      // grow a session by accident.
+      credentials: "omit",
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -354,16 +376,24 @@ async function followShortLink(urlString, { fetchImpl, signal, timeoutMs }) {
  */
 export async function resolveTikTokVideo(
   urlString,
-  { fetchImpl = fetch, signal, timeoutMs = EMBED_TIMEOUT_MS, embedBase = EMBED_BASE } = {},
+  {
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = EMBED_TIMEOUT_MS,
+    embedBase = EMBED_BASE,
+    jitter = false,
+    sleepImpl,
+  } = {},
 ) {
   let videoID = tikTokVideoID(urlString);
   if (!videoID) {
     if (!isTikTokShortLink(urlString)) {
       throw new TikTokError("That link doesn't point to a TikTok video.", { kind: "notAVideo" });
     }
-    videoID = await followShortLink(urlString, { fetchImpl, signal, timeoutMs });
+    videoID = await followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter, sleepImpl });
   }
 
+  await jitterDelay(jitter, { sleepImpl });
   let response;
   try {
     response = await fetchWithTimeout(`${embedBase}/${encodeURIComponent(videoID)}`, {
@@ -371,6 +401,7 @@ export async function resolveTikTokVideo(
       signal,
       timeoutMs,
       headers: { "user-agent": USER_AGENT, accept: "text/html" },
+      credentials: "omit",
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -406,7 +437,14 @@ const tooLarge = (message) => new TikTokError(message, { kind: "tooLarge" });
 /** Fetch the file a `resolveTikTokVideo` result pointed at. */
 export async function downloadTikTokMedia(
   resolved,
-  { fetchImpl = fetch, signal, timeoutMs = MEDIA_TIMEOUT_MS, maxBytes = MAX_MEDIA_BYTES } = {},
+  {
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = MEDIA_TIMEOUT_MS,
+    maxBytes = MAX_MEDIA_BYTES,
+    jitter = false,
+    sleepImpl,
+  } = {},
 ) {
   let mediaURL;
   try {
@@ -427,6 +465,7 @@ export async function downloadTikTokMedia(
     );
   }
 
+  await jitterDelay(jitter, { sleepImpl });
   let response;
   try {
     response = await fetchWithTimeout(mediaURL.toString(), {
@@ -437,6 +476,7 @@ export async function downloadTikTokMedia(
         "user-agent": USER_AGENT,
         ...(resolved.referer ? { referer: resolved.referer } : {}),
       },
+      credentials: "omit",
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -470,4 +510,54 @@ export async function downloadTikTokMedia(
       : resolved.mimeType;
 
   return { bytes, mimeType };
+}
+
+/* ---------------- Metadata-only fallback ---------------- */
+
+/**
+ * TikTok's real oEmbed response for a share URL — title, author, thumbnail. No video in
+ * it (see the file header: that's exactly why the embed-state trick exists), but the
+ * embed page's CDN URL is signed and short-lived, and every so often it's already dead —
+ * or the CDN host has moved — by the time `downloadTikTokMedia` gets to it. Rather than
+ * fail the link outright, `resolveClipParts` calls this to give the model *something*:
+ * the caption and creator TikTok is happy to hand an anonymous request no matter what.
+ *
+ * Best-effort: returns `null` on any failure instead of throwing, since this only ever
+ * runs as a fallback after the real download already failed — a second error here isn't
+ * worth surfacing over the first.
+ */
+export async function fetchTikTokOEmbed(
+  urlString,
+  { fetchImpl = fetch, signal, timeoutMs = EMBED_TIMEOUT_MS, jitter = false, sleepImpl } = {},
+) {
+  await jitterDelay(jitter, { sleepImpl });
+  let response;
+  try {
+    response = await fetchWithTimeout(`${OEMBED_ENDPOINT}?url=${encodeURIComponent(urlString)}`, {
+      fetchImpl,
+      signal,
+      timeoutMs,
+      headers: { "user-agent": USER_AGENT, accept: "application/json" },
+      credentials: "omit",
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+
+  let json;
+  try {
+    json = await response.json();
+  } catch {
+    return null;
+  }
+  if (!json || typeof json !== "object") return null;
+
+  const title = typeof json.title === "string" && json.title.trim() ? json.title.trim() : null;
+  const authorName =
+    typeof json.author_name === "string" && json.author_name.trim() ? json.author_name.trim() : null;
+  const thumbnailURL = typeof json.thumbnail_url === "string" ? json.thumbnail_url : null;
+  if (!title && !authorName && !thumbnailURL) return null;
+
+  return { title, authorName, thumbnailURL };
 }
