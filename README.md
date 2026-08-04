@@ -201,9 +201,16 @@ full resolve-and-download wait again before a token could be produced.
 `CLIP_CACHE_MAX_BYTES` (one maximum-sized clip's worth by default, which is around ten
 typical ones) and evicted oldest-first. It is process-global and shared across requests on a
 warm instance, so it is off in the library and switched on by `api/chat.js`, where
-deployment decisions are made. Two smaller cuts came with it: the whole clip stage now runs
-under a budget, so one hung platform can't hold a request open, and TikTok's anti-cadence
-jitter is paid once per resolve rather than once per request within it.
+deployment decisions are made. A smaller cut came with it: the whole clip stage now runs
+under a budget, so one hung platform can't hold a request open.
+
+**The anti-cadence jitter shipped in the compliance pass has been removed.** TikTok's fetch
+path briefly paused a random amount before every request, on the theory that a fixed cadence
+is a bot signature. It added latency to every real request for a benefit that was never
+measured against how TikTok actually rate-limits, so it's gone — retries still use full
+jitter in their backoff (`web/lib/retry.js`), which is a different, better-justified thing:
+that jitter exists to keep clustered retries from reconverging on the same instant, not to
+disguise request timing.
 
 ## Two things to action
 

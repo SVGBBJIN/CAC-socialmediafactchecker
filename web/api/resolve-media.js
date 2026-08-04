@@ -102,9 +102,7 @@ export default async function handler(req, res) {
   const allowedHosts = isTikTok ? TIKTOK_MEDIA_HOSTS : INSTAGRAM_MEDIA_HOSTS;
 
   try {
-    // Same reasoning as /api/chat's clipOptions.jitter: a random pre-request pause so this
-    // route's requests don't land on a uniform cadence either.
-    const resolved = await resolve(url, { jitter: true });
+    const resolved = await resolve(url);
     let mediaHost;
     try {
       mediaHost = new URL(resolved.mediaURL).hostname;

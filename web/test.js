@@ -1748,7 +1748,7 @@ test("the CDN's content type wins over the resolver's guess", async () => {
   assert.equal((await downloadTikTokMedia(resolvedClip(), { fetchImpl: generic })).mimeType, "video/mp4");
 });
 
-test("jitter is a no-op unless a caller opts in", async () => {
+test("a resolve fires its fetch immediately — no pre-request pause", async () => {
   const calls = [];
   const fetchImpl = async () => {
     calls.push(Date.now());
@@ -1756,18 +1756,7 @@ test("jitter is a no-op unless a caller opts in", async () => {
   };
   const start = Date.now();
   await resolveTikTokVideo(SOURCE_URL, { fetchImpl });
-  assert.ok(Date.now() - start < 100, "no jitter by default — the fetch should fire immediately");
-});
-
-test("jitter delays the request when a caller opts in, through an injected sleep", async () => {
-  const slept = [];
-  const sleepImpl = async (ms) => {
-    slept.push(ms);
-  };
-  const fetchImpl = async () => htmlResponse(tikTokPage());
-  await resolveTikTokVideo(SOURCE_URL, { fetchImpl, jitter: true, sleepImpl });
-  assert.equal(slept.length, 1);
-  assert.ok(slept[0] >= 150 && slept[0] <= 900, `jitter ${slept[0]}ms should land in [150, 900]`);
+  assert.ok(Date.now() - start < 100, "the fetch should fire immediately");
 });
 
 test("oEmbed reads title, author and thumbnail from TikTok's real endpoint", async () => {

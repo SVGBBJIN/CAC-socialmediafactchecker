@@ -71,19 +71,6 @@ const EMBED_BASE = "https://www.tiktok.com/embed/v2";
 /** TikTok's real oEmbed endpoint — title, author, thumbnail. No video, see below. */
 const OEMBED_ENDPOINT = "https://www.tiktok.com/oembed";
 
-const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * A random pause before a request, so every fetch this module makes doesn't land on the
- * same offset within its second — a fixed cadence is one of the crudest bot signatures.
- * Off by default so tests stay instant; callers that talk to the real TikTok (the API
- * routes, not the test suite) opt in explicitly.
- */
-async function jitterDelay(enabled, { minMs = 150, maxMs = 900, sleepImpl = defaultSleep } = {}) {
-  if (!enabled) return;
-  await sleepImpl(minMs + Math.floor(Math.random() * (maxMs - minMs + 1)));
-}
-
 /**
  * Hosts we'll fetch media bytes from.
  *
@@ -412,7 +399,6 @@ export async function resolveTikTokVideo(
     signal,
     timeoutMs = EMBED_TIMEOUT_MS,
     embedBase = EMBED_BASE,
-    jitter = false,
     sleepImpl,
     retry = RESOLVE_RETRY,
   } = {},
@@ -421,15 +407,8 @@ export async function resolveTikTokVideo(
 
   let videoID = tikTokVideoID(urlString);
   if (!videoID && !isTikTokShortLink(urlString)) {
-    // Decided without a request, so it costs neither a fetch nor the pause before one.
     throw new TikTokError("That link doesn't point to a TikTok video.", { kind: "notAVideo" });
   }
-
-  // Once for the whole chain, not once per request. The pause exists so our fetches don't
-  // land on a uniform offset within the second; a short link's redirect and the embed page
-  // that follows it are already separated by a real round trip, so paying the pause twice
-  // bought nothing and cost up to another 900ms on the slowest link shape there is.
-  await jitterDelay(jitter, { sleepImpl });
 
   if (!videoID) {
     videoID = await withRetry(
@@ -498,7 +477,6 @@ export async function downloadTikTokMedia(
     signal,
     timeoutMs = MEDIA_TIMEOUT_MS,
     maxBytes = MAX_MEDIA_BYTES,
-    jitter = false,
     sleepImpl,
     retry = MEDIA_RETRY,
   } = {},
@@ -521,8 +499,6 @@ export async function downloadTikTokMedia(
       { kind: "malformed" },
     );
   }
-
-  await jitterDelay(jitter, { sleepImpl });
 
   return withRetry(
     ({ remainingMs }) =>
@@ -628,9 +604,8 @@ async function fetchMediaOnce(mediaURL, resolved, { fetchImpl, signal, timeoutMs
  */
 export async function fetchTikTokOEmbed(
   urlString,
-  { fetchImpl = fetch, signal, timeoutMs = EMBED_TIMEOUT_MS, jitter = false, sleepImpl } = {},
+  { fetchImpl = fetch, signal, timeoutMs = EMBED_TIMEOUT_MS } = {},
 ) {
-  await jitterDelay(jitter, { sleepImpl });
   let response;
   try {
     response = await fetchWithTimeout(`${OEMBED_ENDPOINT}?url=${encodeURIComponent(urlString)}`, {

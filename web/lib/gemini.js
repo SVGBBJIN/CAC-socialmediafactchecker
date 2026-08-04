@@ -740,16 +740,12 @@ export async function resolveClipParts(
     downloadImpl = null,
     uploadImpl = uploadFile,
     deleteImpl = deleteFile,
-    // Off by default so the test suite stays instant; the API routes opt in. See
-    // `jitterDelay` in lib/tiktok.js for why this exists at all.
-    jitter = false,
     sleepImpl,
     budgetMs = CLIP_BUDGET_MS,
-    // Off by default, and opted into by the API route, for the same reason `jitter` is:
-    // this is process-global state shared by every request a warm instance handles, and a
-    // test that stubs the network must not quietly be answered from a previous test's
-    // download. Turning it on is a deployment decision, so it is made where deployments
-    // are configured. See `CLIP_CACHE_TTL_MS`.
+    // Off by default, and opted into by the API route: this is process-global state shared
+    // by every request a warm instance handles, and a test that stubs the network must not
+    // quietly be answered from a previous test's download. Turning it on is a deployment
+    // decision, so it is made where deployments are configured. See `CLIP_CACHE_TTL_MS`.
     cache = false,
     cacheTTLMs = CLIP_CACHE_TTL_MS,
     cacheMaxBytes = clipCacheLimitFromEnv(),
@@ -801,7 +797,7 @@ export async function resolveClipParts(
       ? "it took too long to fetch"
       : error?.message || "the video could not be fetched";
 
-  const clipOptions = { fetchImpl, signal: budget.signal, jitter, sleepImpl };
+  const clipOptions = { fetchImpl, signal: budget.signal, sleepImpl };
 
   try {
     // What we already have from an earlier turn of this conversation. Checked before any
