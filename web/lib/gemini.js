@@ -838,6 +838,14 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
     const notes = [];
 
     if (isUser) {
+      // A client-attached image (see guard.js's `validateMessages`) rides in as its own
+      // inline_data part, same shape a downloaded TikTok/Instagram clip uses. Only the
+      // last user turn can carry one — see the note on `image` in guard.js for why it
+      // isn't replayed across history.
+      if (message.image?.data && message.image?.mimeType) {
+        parts.push({ inline_data: { mime_type: message.image.mimeType, data: message.image.data } });
+      }
+
       for (const id of findYouTubeVideoIDs(text)) {
         if (attachedVideos.has(id)) continue;
         attachedVideos.add(id);

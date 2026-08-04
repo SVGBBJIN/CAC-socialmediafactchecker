@@ -34,8 +34,11 @@ async function readBody(req) {
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    // Refuse an oversized body before buffering it all.
-    if (size > 1_000_000) throw new GuardError("Request body too large.", 413);
+    // Refuse an oversized body before buffering it all. Raised from 1MB to fit a
+    // base64-encoded image attachment (see guard.js's `maxImageBase64Bytes`) alongside
+    // the text — the real per-image cap is enforced there, this is just the floor big
+    // enough to let one through.
+    if (size > 8_000_000) throw new GuardError("Request body too large.", 413);
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");

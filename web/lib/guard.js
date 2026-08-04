@@ -34,6 +34,12 @@ export function config(env = process.env) {
     // entirely rather than asking Gemini to disable thinking, which not every model in
     // the chain may accept — see `DEFAULT_THINKING_BUDGET_TOKENS` in lib/gemini.js.
     thinkingBudgetTokens: nonNegativeInt(env.THINKING_BUDGET_TOKENS, 4096),
+    // Base64 size cap for a client-attached image (see `validateMessages`'s `image`
+    // handling). ~4.5MB of raw bytes once decoded — comfortably more than a phone photo
+    // recompressed by the browser before upload (see app.js's canvas resize), and small
+    // enough that one turn's image can't dominate the request the way an unbounded upload
+    // would.
+    maxImageBase64Bytes: positiveInt(env.MAX_IMAGE_BASE64_BYTES, 6_000_000),
     // The same cap for a round that still holds its search tools — a round deciding what
     // to look up rather than writing the verdict, and the round whose deliberation the
     // reader waits through before the first search even runs. Lower on purpose; see
@@ -150,6 +156,32 @@ export function resetRateLimits() {
  * Validate the request body and trim it to what we're willing to send upstream.
  * Every cap here is a spend cap: unbounded history is unbounded tokens.
  */
+const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+
+/**
+ * The `image` field on the *last* message, validated, or `undefined`.
+ *
+ * Only the last message may carry one, and only that call site (the one building the
+ * outgoing request) ever passes it — a mid-history message with an image would mean
+ * re-sending those bytes to Gemini on every later turn of the conversation, the same
+ * cost `toGeminiContents` already refuses to pay twice for a re-quoted video link. The
+ * browser only ever attaches an image to the turn it was uploaded for, so this is not a
+ * capability being removed, only one that was never offered.
+ */
+function validatedImage(raw, limits) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const mimeType = typeof raw.mimeType === "string" ? raw.mimeType.toLowerCase() : "";
+  const data = typeof raw.data === "string" ? raw.data : "";
+  if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType) || !data) return undefined;
+  if (data.length > limits.maxImageBase64Bytes) {
+    throw new GuardError(
+      `Attached image is too large (limit ~${Math.floor((limits.maxImageBase64Bytes * 0.75) / 1_000_000)}MB).`,
+      413,
+    );
+  }
+  return { mimeType, data };
+}
+
 export function validateMessages(body, limits) {
   const messages = body?.messages;
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -157,18 +189,23 @@ export function validateMessages(body, limits) {
   }
 
   const cleaned = [];
-  for (const message of messages) {
+  messages.forEach((message, index) => {
     const role = message?.role === "assistant" ? "assistant" : "user";
     const content = typeof message?.content === "string" ? message.content : "";
-    if (content.trim().length === 0) continue;
+    if (content.trim().length === 0) return;
     if (content.length > limits.maxInputChars) {
       throw new GuardError(
         `Message is too long (${content.length} characters, limit ${limits.maxInputChars}).`,
         413,
       );
     }
-    cleaned.push({ role, content });
-  }
+    const out = { role, content };
+    if (role === "user" && index === messages.length - 1) {
+      const image = validatedImage(message?.image, limits);
+      if (image) out.image = image;
+    }
+    cleaned.push(out);
+  });
 
   if (cleaned.length === 0) {
     throw new GuardError("Request needs at least one non-empty message.", 400);

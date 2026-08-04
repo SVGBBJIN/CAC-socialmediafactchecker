@@ -7,6 +7,8 @@
 import { config } from "../lib/guard.js";
 import { modelChainFromEnv } from "../lib/gemini.js";
 import { healthSnapshot } from "../lib/degradation.js";
+import { providerFromEnv } from "../lib/search.js";
+import { searchEnabled } from "../lib/verified-chat.js";
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
@@ -35,6 +37,21 @@ export default async function handler(req, res) {
       // rate limiter in guard.js, and it fails the same safe way — silence, never a
       // degradation claimed that isn't happening.
       health: healthSnapshot({ models: modelChainFromEnv() }),
+      // Provider name only, never a key or a fragment of one — same rule as everything
+      // else in this response. Read-only in the settings panel: search behaviour is
+      // operator config, not something a client request can change.
+      search: describeSearchConfig(),
     }),
   );
+}
+
+function describeSearchConfig() {
+  if (!searchEnabled()) return { enabled: false, provider: null };
+  try {
+    return { enabled: true, provider: providerFromEnv().name };
+  } catch {
+    // Misconfigured (e.g. a key env var set to an empty string) — same as disabled from
+    // the client's point of view.
+    return { enabled: false, provider: null };
+  }
 }
