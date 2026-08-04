@@ -9,11 +9,10 @@
 import {
   findTikTokLinks,
   isTikTokLink,
-  resolveTikTokVideo,
-  downloadTikTokMedia,
   fetchTikTokOEmbed,
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
+import { resolveTikTokPrimary, downloadTikTokWithFallback } from "./tiktok-capture.js";
 import {
   findInstagramLinks,
   isInstagramLink,
@@ -535,11 +534,15 @@ export const CLIP_PROVIDERS = [
     platform: "TikTok",
     find: findTikTokLinks,
     matches: isTikTokLink,
-    resolve: resolveTikTokVideo,
-    download: downloadTikTokMedia,
-    // TikTok's oEmbed carries no video (see lib/tiktok.js), only a title, author and
-    // thumbnail — but that's still worth handing the model when the real download fails.
-    // Instagram has no equivalent: its oEmbed needs a Meta App Review token we don't have.
+    // Primary: render TikTok's own oEmbed player in a headless browser and capture what
+    // plays. Falls back internally to the old embed-state-blob + CDN download
+    // (lib/tiktok.js) when capture fails — see the comment on `downloadTikTokWithFallback`
+    // in lib/tiktok-capture.js for why that fallback is a demotion rather than a deletion.
+    resolve: resolveTikTokPrimary,
+    download: downloadTikTokWithFallback,
+    // Metadata-only, last resort: if both the capture and the CDN fallback above fail,
+    // this is still worth handing the model when the real download fails. Instagram has
+    // no equivalent: its oEmbed needs a Meta App Review token we don't have.
     oEmbed: fetchTikTokOEmbed,
   },
   {

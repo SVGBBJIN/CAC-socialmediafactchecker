@@ -63,7 +63,7 @@ frozen means:
 | Platform | Path | web | Swift |
 |---|---|---|---|
 | **YouTube** | Gemini native URL ingestion | Working | Working |
-| **TikTok** | embed page → CDN MP4 → Gemini Flash | Working | Working — Gemini leg needs a key to confirm |
+| **TikTok** | render oEmbed player → capture → Gemini Flash, falling back to embed page → CDN MP4 → Gemini Flash | Working — capture leg unverified live, see below | Working (CDN-fetch only, unchanged) — Gemini leg needs a key to confirm |
 | **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
 
 Only platforms that can actually be served get registered, so an Instagram link shared
@@ -103,6 +103,39 @@ silent B-roll now yields on-screen text where the capture path yielded nothing.
 
 Verified live on 2026-07-28 through the compiled resolver: anonymous request, no
 credential, 3.2 MB `video/mp4` with a valid `ftyp` box.
+
+This is unchanged, and is what the Swift side still does — `Sources/` is frozen (see
+below), so it never picked up the web-only change described next.
+
+### `web/`'s TikTok path changed again: oEmbed capture is now primary
+
+The CDN-scrape path above is exactly what's described — but as of this pass, it's no
+longer what `web/` tries first. `web/lib/tiktok-capture.js` renders TikTok's real,
+*documented* oEmbed player (`GET /oembed`, then the `<blockquote>` + `embed.js` it
+returns) in a headless browser, and records what plays via `captureStream()` +
+`MediaRecorder` from inside the page. The CDN-scrape path — reading a direct MP4 URL out
+of the embed page's undocumented `__FRONTITY_CONNECT_STATE__` blob — is now the fallback,
+tried only when capture fails.
+
+The reason is legal posture, not reliability: that state blob is internal page state
+TikTok serves to its own iframe, and reading it is scraping no matter how carefully the
+parser is written. oEmbed is TikTok's published integration point for a third party
+showing one of its posts, and rendering it in a real browser is using that integration
+point as designed rather than reverse-engineering around it. It costs real things back:
+capture is real-time (a 45-second clip takes at least 45 seconds to record, where the CDN
+download took as long as the file's size implied), and it puts a headless Chromium in the
+request path — `playwright-core` plus, for a Vercel deployment, `@sparticuz/chromium`
+providing a serverless-packaged binary. `web/`'s dependency count goes from zero to two
+because of this.
+
+**This has not been run against the live site.** Whether TikTok's embed `<video>` actually
+exposes an audio track to `captureStream()` is unconfirmed — a sandboxed spike hit a
+network-layer TLS reset against TikTok before it could find out. Fifteen tests in
+`web/test-tiktok-capture.js` cover the resolve/capture/fallback logic against stubbed
+Chromium and network responses, the same injection pattern the rest of `web/`'s test suite
+uses, but none of them can confirm the one fact the whole path depends on. Run one real
+capture against a real deployment before trusting this in production — see the header of
+`web/lib/tiktok-capture.js` for the full reasoning and what to check.
 
 ### Instagram doesn't either
 
@@ -157,6 +190,9 @@ service already in trouble.
    verified against live TikTok; the analysis leg reuses the same `generateContent` client
    the working YouTube path uses, but has not been run with a key.
    [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md)
+3. **Confirm TikTok's embed player actually exposes audio to `captureStream()`.** The new
+   primary web path depends on it and it has not been checked against the live site — see
+   [the section above](#webs-tiktok-path-changed-again-oembed-capture-is-now-primary).
 
 ## Layout
 
@@ -175,7 +211,9 @@ Sources/SeerUI/            SwiftUI progress animation + its observable model
 Sources/SeerUIDemo/        Runnable harness for the above — no key, no network
 Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
 web/                       The fact-checker. Static front end, Gemini key server-side
-  lib/tiktok.js            ⟷ Sources/SeerCore/Media/TikTokMediaResolver.swift
+  lib/tiktok-capture.js    no Swift counterpart — the primary path, oEmbed capture
+  lib/tiktok.js            ⟷ Sources/SeerCore/Media/TikTokMediaResolver.swift — now the
+                            fallback on the web side; still the only path in Swift
   lib/gemini-files.js      ⟷ Sources/SeerCore/Gemini/GeminiFilesClient.swift
   lib/gemini.js            ⟷ Sources/SeerCore/Gemini/GeminiVideoClient.swift
   lib/media-fetch.js       ⟷ Sources/SeerCore/Media/MediaDownloader.swift

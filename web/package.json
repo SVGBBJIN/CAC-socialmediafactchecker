@@ -6,11 +6,17 @@
   "description": "Fact-checking library UI for Seer. Static front end, Gemini called from a server-side route that holds the key.",
   "scripts": {
     "dev": "node server.js",
-    "test": "node --test test.js test-search.js test-find.js test-cleanup.js",
+    "test": "node --test test.js test-search.js test-find.js test-cleanup.js test-tiktok-capture.js",
     "search": "node bin/search.mjs",
     "find": "node bin/find.mjs"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "playwright-core": "^1.48.0"
+  },
+  "optionalDependencies": {
+    "@sparticuz/chromium": "^131.0.0"
   }
 }

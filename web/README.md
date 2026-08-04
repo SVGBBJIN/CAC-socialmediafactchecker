@@ -2,18 +2,23 @@
 
 A fact-checking library UI over Gemini: paste a video link, get claims checked against
 live sources. Static front end in `public/`, one server route in `api/` that holds the
-key. No build step, no dependencies.
+key. No build step.
+
+Almost no dependencies, too: everything except the TikTok capture path (see below) is the
+Node 20+ standard library. `npm install` is needed once for that path's two packages —
+`playwright-core` (a headless browser) and `@sparticuz/chromium` (a serverless-packaged
+Chromium build, so a Vercel deployment doesn't have to bundle a full browser itself).
 
 ## Run it
 
 ```bash
 cp web/.env.example web/.env.local     # then paste your rotated key into GEMINI_API_KEY
-cd web && npm run dev                  # → http://127.0.0.1:3000
+cd web && npm install                  # pulls in the TikTok capture path's browser
+npm run dev                            # → http://127.0.0.1:3000
 ```
 
-There is nothing to install — `npm run dev` runs `node server.js`, and everything used is
-in the Node 20+ standard library. On boot the server prints whether it found your key, so
-a missing one is obvious immediately rather than at the first message.
+`npm run dev` runs `node server.js`. On boot the server prints whether it found your key,
+so a missing one is obvious immediately rather than at the first message.
 
 ## Where the key goes, and why there
 
