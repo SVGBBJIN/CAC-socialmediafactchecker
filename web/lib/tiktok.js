@@ -30,7 +30,14 @@
 // returned HTTP 200 to an anonymous request, the blob parsed at the documented path, and
 // the extracted URL served a 3.2 MB `video/mp4` with no credential and no `Referer`.
 
-import { fetchWithTimeout, hostAllowed, readCapped } from "./media-fetch.js";
+import {
+  fetchWithTimeout,
+  fetchStream,
+  hostAllowed,
+  readCapped,
+  StalledTransferError,
+} from "./media-fetch.js";
+import { withRetry, retryAfterMs } from "./retry.js";
 
 /** Longest we'll wait for the embed page, and for the CDN to start sending the file. */
 export const EMBED_TIMEOUT_MS = 15_000;
@@ -109,13 +116,38 @@ export const ALLOWED_MEDIA_HOSTS = [
  * video and tells the model why either way, but only the latter is worth a retry.
  */
 export class TikTokError extends Error {
-  constructor(message, { kind = "upstream", retryable = false } = {}) {
+  constructor(message, { kind = "upstream", retryable = false, retryAfterMs = null } = {}) {
     super(message);
     this.name = "TikTokError";
     this.kind = kind;
     this.retryable = retryable;
+    // What the server asked us to wait, when it said. `withRetry` prefers this over its
+    // own backoff curve: a host that has published a number knows better than we do.
+    this.retryAfterMs = retryAfterMs;
   }
 }
+
+/**
+ * How hard each step tries again. Both are `withRetry` option bags — see lib/retry.js.
+ *
+ * The metadata steps are cheap and quick, so they retry on a short curve. The download is
+ * neither, so its budget is what actually bounds it: three 60-second attempts would be
+ * three minutes of silence, and `remainingMs` shrinks each attempt's own deadline to fit
+ * what is left.
+ */
+export const RESOLVE_RETRY = { retries: 2, baseMs: 350, maxMs: 3_000, budgetMs: 25_000 };
+export const MEDIA_RETRY = { retries: 2, baseMs: 600, maxMs: 5_000, budgetMs: 75_000 };
+
+/**
+ * Which failures are worth repeating *against the same URL*.
+ *
+ * Narrower than `error.retryable`, and deliberately so. A signed CDN URL that comes back
+ * 403 has expired, and asking the same expired URL again is the one retry that cannot
+ * possibly work — the fix is to resolve the post again for a fresh URL, which is the
+ * caller's job (`resolveClipParts` in lib/gemini.js does it). It stays marked retryable so
+ * that caller knows the link is fine and the URL isn't; it just isn't repeated here.
+ */
+const retryableInPlace = (error) => error?.retryable === true && error?.kind !== "expired";
 
 /* ---------------- URL shapes ---------------- */
 
@@ -333,8 +365,7 @@ export function parseEmbedPage(html, { videoID, sourceURL }) {
  * A short link carries no ID at all — only the redirect knows it. Fetch and read where we
  * landed; `fetch` follows redirects, so `response.url` is the canonical URL.
  */
-async function followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter, sleepImpl }) {
-  await jitterDelay(jitter, { sleepImpl });
+async function followShortLink(urlString, { fetchImpl, signal, timeoutMs }) {
   let response;
   try {
     response = await fetchWithTimeout(urlString, {
@@ -383,17 +414,39 @@ export async function resolveTikTokVideo(
     embedBase = EMBED_BASE,
     jitter = false,
     sleepImpl,
+    retry = RESOLVE_RETRY,
   } = {},
 ) {
+  const retryOptions = { ...retry, signal, sleepImpl, isRetryable: retryableInPlace };
+
   let videoID = tikTokVideoID(urlString);
-  if (!videoID) {
-    if (!isTikTokShortLink(urlString)) {
-      throw new TikTokError("That link doesn't point to a TikTok video.", { kind: "notAVideo" });
-    }
-    videoID = await followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter, sleepImpl });
+  if (!videoID && !isTikTokShortLink(urlString)) {
+    // Decided without a request, so it costs neither a fetch nor the pause before one.
+    throw new TikTokError("That link doesn't point to a TikTok video.", { kind: "notAVideo" });
   }
 
+  // Once for the whole chain, not once per request. The pause exists so our fetches don't
+  // land on a uniform offset within the second; a short link's redirect and the embed page
+  // that follows it are already separated by a real round trip, so paying the pause twice
+  // bought nothing and cost up to another 900ms on the slowest link shape there is.
   await jitterDelay(jitter, { sleepImpl });
+
+  if (!videoID) {
+    videoID = await withRetry(
+      () => followShortLink(urlString, { fetchImpl, signal, timeoutMs }),
+      retryOptions,
+    );
+  }
+
+  const html = await withRetry(
+    () => fetchEmbedPage(videoID, { fetchImpl, signal, timeoutMs, embedBase }),
+    retryOptions,
+  );
+  return parseEmbedPage(html, { videoID, sourceURL: urlString });
+}
+
+/** One go at the embed page. Everything about *repeating* it lives in the caller. */
+async function fetchEmbedPage(videoID, { fetchImpl, signal, timeoutMs, embedBase }) {
   let response;
   try {
     response = await fetchWithTimeout(`${embedBase}/${encodeURIComponent(videoID)}`, {
@@ -417,12 +470,15 @@ export async function resolveTikTokVideo(
         kind: "unavailable",
       });
     }
+    const throttled = response.status === 429;
     throw new TikTokError(`TikTok embed page failed (HTTP ${response.status}).`, {
-      retryable: response.status >= 500 || response.status === 429,
+      kind: throttled ? "rateLimited" : "upstream",
+      retryable: response.status >= 500 || throttled || response.status === 408,
+      retryAfterMs: throttled ? retryAfterMs(response) : null,
     });
   }
 
-  return parseEmbedPage(await response.text(), { videoID, sourceURL: urlString });
+  return response.text();
 }
 
 /* ---------------- CDN → bytes ---------------- */
@@ -444,6 +500,7 @@ export async function downloadTikTokMedia(
     maxBytes = MAX_MEDIA_BYTES,
     jitter = false,
     sleepImpl,
+    retry = MEDIA_RETRY,
   } = {},
 ) {
   let mediaURL;
@@ -466,9 +523,30 @@ export async function downloadTikTokMedia(
   }
 
   await jitterDelay(jitter, { sleepImpl });
+
+  return withRetry(
+    ({ remainingMs }) =>
+      fetchMediaOnce(mediaURL, resolved, {
+        fetchImpl,
+        signal,
+        maxBytes,
+        // Never longer than what is left of the retry budget: an attempt allowed to run
+        // its full minute after the budget has all but gone is how "three tries" becomes
+        // three minutes of nothing.
+        timeoutMs: Math.max(1_000, Math.min(timeoutMs, remainingMs || timeoutMs)),
+      }),
+    { ...retry, signal, sleepImpl, isRetryable: retryableInPlace },
+  );
+}
+
+/** One go at the CDN. Everything about *repeating* it lives in the caller. */
+async function fetchMediaOnce(mediaURL, resolved, { fetchImpl, signal, timeoutMs, maxBytes }) {
   let response;
+  let release = () => {};
   try {
-    response = await fetchWithTimeout(mediaURL.toString(), {
+    // `fetchStream` rather than `fetchWithTimeout`: the deadline has to outlive the
+    // headers here, because the headers are the fast part. See lib/media-fetch.js.
+    ({ response, release } = await fetchStream(mediaURL.toString(), {
       fetchImpl,
       signal,
       timeoutMs,
@@ -477,7 +555,7 @@ export async function downloadTikTokMedia(
         ...(resolved.referer ? { referer: resolved.referer } : {}),
       },
       credentials: "omit",
-    });
+    }));
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new TikTokError(`Could not download the TikTok clip: ${error.message}`, {
@@ -485,31 +563,53 @@ export async function downloadTikTokMedia(
     });
   }
 
-  if (!response.ok) {
-    // Signed CDN URLs expire; a 403 here usually means the embed page was read too long
-    // ago rather than that anything is wrong with the link.
-    throw new TikTokError(`TikTok's CDN refused the download (HTTP ${response.status}).`, {
-      retryable: true,
-    });
-  }
-  if (!response.body) {
-    throw new TikTokError("TikTok's CDN returned an empty response.", { retryable: true });
-  }
+  try {
+    if (!response.ok) {
+      // Signed CDN URLs expire; a 403 here usually means the embed page was read too long
+      // ago rather than that anything is wrong with the link. Named as its own kind so the
+      // caller resolves the post again for a fresh URL instead of asking a dead one twice.
+      const expired = response.status === 403 || response.status === 410;
+      const throttled = response.status === 429;
+      throw new TikTokError(`TikTok's CDN refused the download (HTTP ${response.status}).`, {
+        kind: expired ? "expired" : throttled ? "rateLimited" : "upstream",
+        retryable: true,
+        retryAfterMs: throttled ? retryAfterMs(response) : null,
+      });
+    }
+    if (!response.body) {
+      throw new TikTokError("TikTok's CDN returned an empty response.", { retryable: true });
+    }
 
-  const bytes = await readCapped(response, maxBytes, tooLarge);
-  if (bytes.length === 0) {
-    throw new TikTokError("TikTok's CDN returned an empty file.", { retryable: true });
+    let bytes;
+    try {
+      bytes = await readCapped(response, maxBytes, tooLarge);
+    } catch (error) {
+      if (signal?.aborted || error instanceof TikTokError) throw error;
+      // A stalled transfer, or a socket that died partway through the file: the clip is
+      // fine, the connection wasn't.
+      throw new TikTokError(
+        error instanceof StalledTransferError
+          ? `TikTok's CDN stopped sending the clip — ${error.message}.`
+          : `Could not download the TikTok clip: ${error.message}`,
+        { retryable: true },
+      );
+    }
+    if (bytes.length === 0) {
+      throw new TikTokError("TikTok's CDN returned an empty file.", { retryable: true });
+    }
+
+    // Trust the server's type over the resolver's guess when it sends a usable one: the
+    // resolver infers `video/mp4` from context, the CDN knows.
+    const declared = response.headers?.get?.("content-type")?.split(";")[0]?.trim();
+    const mimeType =
+      declared && declared.includes("/") && declared !== "application/octet-stream"
+        ? declared
+        : resolved.mimeType;
+
+    return { bytes, mimeType };
+  } finally {
+    release();
   }
-
-  // Trust the server's type over the resolver's guess when it sends a usable one: the
-  // resolver infers `video/mp4` from context, the CDN knows.
-  const declared = response.headers?.get?.("content-type")?.split(";")[0]?.trim();
-  const mimeType =
-    declared && declared.includes("/") && declared !== "application/octet-stream"
-      ? declared
-      : resolved.mimeType;
-
-  return { bytes, mimeType };
 }
 
 /* ---------------- Metadata-only fallback ---------------- */

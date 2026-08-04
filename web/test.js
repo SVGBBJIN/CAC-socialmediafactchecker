@@ -29,7 +29,16 @@ import {
   DEFAULT_ANSWER_HOLD_MS,
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
+  resetClipCache,
 } from "./lib/gemini.js";
+import {
+  withRetry,
+  backoffDelay,
+  // `retryAfterMs` is also the name of gemini.js's own Gemini-header reader, imported
+  // above. Different header, different layer, same job — aliased rather than renamed.
+  retryAfterMs as clipRetryAfterMs,
+} from "./lib/retry.js";
+import { readCapped, fetchStream, StalledTransferError } from "./lib/media-fetch.js";
 import {
   ModelHealth,
   planChain,
@@ -1804,7 +1813,44 @@ test("oEmbed is best-effort — a failure returns null instead of throwing", asy
   );
 });
 
-test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", async () => {
+test("a dead CDN URL falls back to what the resolve already returned, without asking oEmbed", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  let oEmbedCalls = 0;
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        // A resolve that succeeded came back with the caption and the creator — that is
+        // what the embed page *is* — so the cheapest fallback needs no network call.
+        resolve: async () => resolvedClip(),
+        download: async () => {
+          throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", { kind: "expired", retryable: true });
+        },
+        oEmbed: async () => {
+          oEmbedCalls += 1;
+          return { title: "A caption", authorName: "scout2015", thumbnailURL: null };
+        },
+      },
+    ],
+  });
+
+  assert.equal(oEmbedCalls, 0, "the post's own metadata is already in hand");
+  const entry = clips.attachments.get(SOURCE_URL);
+  assert.ok(entry.metadataOnly);
+
+  const contents = toGeminiContents(messages, { clips });
+  assert.equal(contents[0].parts.length, 1, "no video part — only the fallback note");
+  assert.match(contents[0].parts[0].text, /could not be downloaded.*but its public listing says/);
+  assert.match(contents[0].parts[0].text, /Scout, Suki & Stella/);
+  assert.match(contents[0].parts[0].text, /Scramble up ur name/);
+  // Why the clip is missing rides in the same note: a caption is not a substitute for
+  // having watched the video, and the model is owed the difference.
+  assert.match(contents[0].parts[0].text, /CDN refused the download/);
+});
+
+test("a post that carried no metadata of its own falls back to the platform's oEmbed", async () => {
   const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
   const clips = await resolveClipParts(messages, {
     providers: [
@@ -1812,7 +1858,7 @@ test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", 
         platform: "TikTok",
         find: findTikTokLinks,
         matches: () => true,
-        resolve: async () => resolvedClip(),
+        resolve: async () => resolvedClip({ caption: null, authorName: null }),
         download: async () => {
           throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", { retryable: true });
         },
@@ -1821,18 +1867,13 @@ test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", 
     ],
   });
 
-  const entry = clips.attachments.get(SOURCE_URL);
-  assert.equal(entry.error, undefined, "the oEmbed fallback clears the download error");
-  assert.ok(entry.metadataOnly);
-
   const contents = toGeminiContents(messages, { clips });
   assert.equal(contents[0].parts.length, 1, "no video part — only the fallback note");
-  assert.match(contents[0].parts[0].text, /could not be downloaded, but its public listing says/);
   assert.match(contents[0].parts[0].text, /scout2015/);
   assert.match(contents[0].parts[0].text, /A caption/);
 });
 
-test("when oEmbed also fails, the original download error still surfaces", async () => {
+test("when nothing carries metadata, the original download error still surfaces", async () => {
   const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
   const clips = await resolveClipParts(messages, {
     providers: [
@@ -1840,7 +1881,7 @@ test("when oEmbed also fails, the original download error still surfaces", async
         platform: "TikTok",
         find: findTikTokLinks,
         matches: () => true,
-        resolve: async () => resolvedClip(),
+        resolve: async () => resolvedClip({ caption: null, authorName: null }),
         download: async () => {
           throw new TikTokError("TikTok's CDN refused the download (HTTP 403).");
         },
@@ -2096,6 +2137,486 @@ test("attachMedia: false leaves a link as plain text and fetches nothing", async
   assert.equal(sentBody.contents[0].parts[0].text, SOURCE_URL);
 });
 
+/* ---------------- Retry policy ---------------- */
+
+// The `retryable` flag on TikTokError/InstagramError was set carefully from the start and
+// then read by nothing. These cover the layer that finally acts on it — and, just as
+// importantly, the failures it must *not* act on.
+
+test("backoff doubles per attempt, is capped, and is drawn from zero", () => {
+  // Full jitter: the schedule below is the ceiling, and the draw lands anywhere under it.
+  assert.equal(backoffDelay(1, { baseMs: 400, maxMs: 4000, randomness: 1 }), 400);
+  assert.equal(backoffDelay(2, { baseMs: 400, maxMs: 4000, randomness: 1 }), 800);
+  assert.equal(backoffDelay(3, { baseMs: 400, maxMs: 4000, randomness: 1 }), 1600);
+  assert.equal(backoffDelay(9, { baseMs: 400, maxMs: 4000, randomness: 1 }), 4000, "capped");
+
+  assert.equal(backoffDelay(3, { baseMs: 400, maxMs: 4000, randomness: 0 }), 0);
+  assert.equal(backoffDelay(3, { baseMs: 400, maxMs: 4000, randomness: 0.5 }), 800);
+  assert.equal(backoffDelay(0, {}), 0, "there is no backoff before the first attempt");
+});
+
+test("Retry-After is read in both spellings the header allows", () => {
+  const header = (value) => ({ headers: { get: () => value } });
+  assert.equal(clipRetryAfterMs(header("12")), 12_000);
+  assert.equal(clipRetryAfterMs(header("0")), 0);
+  assert.equal(clipRetryAfterMs(header(null)), null);
+  assert.equal(clipRetryAfterMs(header("soon")), null);
+  assert.equal(clipRetryAfterMs({}), null);
+
+  const inTwoMinutes = new Date(Date.now() + 120_000).toUTCString();
+  const parsed = clipRetryAfterMs(header(inTwoMinutes));
+  assert.ok(parsed > 110_000 && parsed <= 120_000, `HTTP-date form read as ${parsed}ms`);
+});
+
+test("only a failure that says it is transient is repeated", async () => {
+  let calls = 0;
+  const slept = [];
+  const sleepImpl = async (ms) => slept.push(ms);
+
+  const value = await withRetry(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw new TikTokError("upstream is having a moment", { retryable: true });
+      return "got it";
+    },
+    { sleepImpl, randomness: 1, baseMs: 100 },
+  );
+  assert.equal(value, "got it");
+  assert.deepEqual(slept, [100, 200], "doubling, and only between attempts");
+
+  // A decision — a private post, a photo carousel — is an answer. Asking again changes
+  // nothing but the bill.
+  let decided = 0;
+  await assert.rejects(
+    withRetry(
+      async () => {
+        decided += 1;
+        throw new TikTokError("that post is private", { kind: "unavailable" });
+      },
+      { sleepImpl },
+    ),
+    /that post is private/,
+  );
+  assert.equal(decided, 1);
+});
+
+test("a server that says how long to wait is believed over the backoff curve", async () => {
+  const slept = [];
+  let calls = 0;
+  await withRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new TikTokError("slow down", { retryable: true, retryAfterMs: 2_500 });
+      }
+      return "ok";
+    },
+    { sleepImpl: async (ms) => slept.push(ms), baseMs: 100, randomness: 1 },
+  );
+  assert.deepEqual(slept, [2_500]);
+});
+
+test("retrying stops at the budget rather than sleeping past it", async () => {
+  let calls = 0;
+  const slept = [];
+  await assert.rejects(
+    withRetry(
+      async () => {
+        calls += 1;
+        throw new TikTokError("still down", { retryable: true, retryAfterMs: 30_000 });
+      },
+      { sleepImpl: async (ms) => slept.push(ms), budgetMs: 5_000, retries: 5 },
+    ),
+    /still down/,
+  );
+  assert.equal(calls, 1, "a 30s wait inside a 5s budget is a reason to stop, not to wait");
+  assert.deepEqual(slept, [], "and stopping means not sleeping first");
+});
+
+test("an abort ends the retries instead of being waited out", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  await assert.rejects(
+    withRetry(
+      async () => {
+        calls += 1;
+        controller.abort();
+        throw new TikTokError("gone", { retryable: true });
+      },
+      { signal: controller.signal, sleepImpl: async () => {}, retries: 3 },
+    ),
+    /gone/,
+  );
+  assert.equal(calls, 1, "nobody is waiting for a better answer");
+});
+
+test("each attempt is handed what is left of the budget, so three tries can't run three times as long", async () => {
+  const seen = [];
+  await assert.rejects(
+    withRetry(
+      async ({ remainingMs }) => {
+        seen.push(remainingMs);
+        await new Promise((r) => setTimeout(r, 30));
+        throw new TikTokError("timed out", { retryable: true });
+      },
+      { sleepImpl: async () => {}, budgetMs: 1_000, retries: 2 },
+    ),
+    /timed out/,
+  );
+  assert.equal(seen.length, 3);
+  assert.equal(seen[0], 1_000);
+  assert.ok(seen[1] < seen[0] && seen[2] < seen[1], `budget should shrink: ${seen.join(", ")}`);
+});
+
+/* ---------------- Transfer deadlines ---------------- */
+
+test("a transfer that goes quiet is abandoned rather than waited on forever", async () => {
+  // The case this exists for: a CDN answers 200 and then stops sending. Before the stall
+  // guard the read had no deadline at all — `fetchWithTimeout` disarms at the headers —
+  // so the request hung until the platform killed the function.
+  const response = {
+    headers: { get: () => null },
+    body: (async function* () {
+      yield Buffer.alloc(8);
+      await new Promise(() => {}); // never resolves
+    })(),
+  };
+
+  await assert.rejects(
+    readCapped(response, 1024, (m) => new Error(m), { stallTimeoutMs: 20 }),
+    (error) => error instanceof StalledTransferError && /no data for/.test(error.message),
+  );
+});
+
+test("a healthy transfer is not cut off by the stall guard, however many chunks it takes", async () => {
+  const response = {
+    headers: { get: () => null },
+    body: (async function* () {
+      for (let i = 0; i < 5; i += 1) {
+        await new Promise((r) => setTimeout(r, 5));
+        yield Buffer.alloc(4);
+      }
+    })(),
+  };
+  const bytes = await readCapped(response, 1024, (m) => new Error(m), { stallTimeoutMs: 60 });
+  assert.equal(bytes.length, 20);
+});
+
+test("the fetch deadline stays armed until the body has been read", async () => {
+  let sawSignal;
+  const { response, release } = await fetchStream("https://example.test/clip.mp4", {
+    fetchImpl: async (_url, init) => {
+      sawSignal = init.signal;
+      return { ok: true, status: 200 };
+    },
+    timeoutMs: 15,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(sawSignal.aborted, false, "headers arrived in time");
+
+  // The old `fetchWithTimeout` cleared its timer here. This one is still counting, which
+  // is the whole point: the transfer is the part that takes time.
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(sawSignal.aborted, true, "the transfer ran past the deadline and was cut off");
+  release();
+});
+
+test("releasing the deadline stops it from firing at a request that is already done", async () => {
+  let sawSignal;
+  const { release } = await fetchStream("https://example.test/clip.mp4", {
+    fetchImpl: async (_url, init) => {
+      sawSignal = init.signal;
+      return { ok: true, status: 200 };
+    },
+    timeoutMs: 15,
+  });
+  release();
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(sawSignal.aborted, false);
+});
+
+/* ---------------- Retrying the platforms ---------------- */
+
+test("a 503 from TikTok's embed host is tried again, not reported as a broken link", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return calls < 3 ? htmlResponse("", { status: 503 }) : htmlResponse(tikTokPage());
+  };
+
+  const clip = await resolveTikTokVideo(SOURCE_URL, { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(clip.videoID, VIDEO_ID);
+  assert.equal(calls, 3);
+});
+
+test("a removed video is not tried again — a 400 from the embed endpoint is an answer", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return htmlResponse("", { status: 400 });
+  };
+
+  await assert.rejects(
+    resolveTikTokVideo(SOURCE_URL, { fetchImpl, sleepImpl: async () => {} }),
+    (error) => error.kind === "unavailable",
+  );
+  assert.equal(calls, 1);
+});
+
+test("a throttled embed page waits as long as TikTok asked", async () => {
+  const slept = [];
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        ok: false,
+        status: 429,
+        url: SOURCE_URL,
+        headers: { get: (n) => (String(n).toLowerCase() === "retry-after" ? "3" : null) },
+        text: async () => "",
+        body: null,
+      };
+    }
+    return htmlResponse(tikTokPage());
+  };
+
+  await resolveTikTokVideo(SOURCE_URL, { fetchImpl, sleepImpl: async (ms) => slept.push(ms) });
+  assert.deepEqual(slept, [3_000]);
+});
+
+test("a dropped connection mid-download is tried again", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("socket hang up");
+    return mediaResponse(Buffer.from("clip bytes"));
+  };
+
+  const media = await downloadTikTokMedia(resolvedClip(), { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(media.bytes.toString(), "clip bytes");
+  assert.equal(calls, 2);
+});
+
+test("an expired signed CDN URL is not asked twice — the same dead URL cannot come back", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return mediaResponse(Buffer.alloc(0), { status: 403 });
+  };
+
+  await assert.rejects(
+    downloadTikTokMedia(resolvedClip(), { fetchImpl, sleepImpl: async () => {} }),
+    (error) => error.kind === "expired" && error.retryable,
+  );
+  assert.equal(calls, 1, "the repair is a fresh URL, which is the caller's to fetch");
+});
+
+test("a clip whose CDN URL expired is re-resolved once and downloaded from the new one", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  let resolves = 0;
+  let downloads = 0;
+
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => {
+          resolves += 1;
+          return resolvedClip({ mediaURL: `${MEDIA_URL}?sig=${resolves}` });
+        },
+        download: async (resolved) => {
+          downloads += 1;
+          if (downloads === 1) {
+            throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", {
+              kind: "expired",
+              retryable: true,
+            });
+          }
+          assert.match(resolved.mediaURL, /sig=2/, "the second attempt uses the fresh URL");
+          return { bytes: Buffer.from("clip"), mimeType: "video/mp4" };
+        },
+      },
+    ],
+  });
+
+  assert.equal(resolves, 2);
+  assert.equal(downloads, 2);
+  const entry = clips.attachments.get(SOURCE_URL);
+  assert.equal(entry.error, undefined);
+  assert.ok(entry.part.inline_data, "the clip is attached, not described");
+});
+
+test("a second expiry in the same breath is not a clock problem — it stops there", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  let downloads = 0;
+
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => resolvedClip({ caption: null, authorName: null }),
+        download: async () => {
+          downloads += 1;
+          throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", {
+            kind: "expired",
+            retryable: true,
+          });
+        },
+      },
+    ],
+  });
+
+  assert.equal(downloads, 2, "one repair, not a loop");
+  assert.match(clips.attachments.get(SOURCE_URL).error, /CDN refused/);
+});
+
+/* ---------------- The clip cache ---------------- */
+
+test("a follow-up turn about the same clip reuses it instead of downloading it again", async () => {
+  resetClipCache();
+  let resolves = 0;
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => {
+        resolves += 1;
+        return resolvedClip();
+      },
+      download: async () => {
+        downloads += 1;
+        return { bytes: Buffer.from("clip bytes"), mimeType: "video/mp4" };
+      },
+    },
+  ];
+
+  const first = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  await resolveClipParts(first, { providers, cache: true });
+  assert.equal(resolves, 1);
+  assert.equal(downloads, 1);
+
+  // The next turn replays the same history — that is how the model keeps seeing the video
+  // — and before the cache that meant resolving and downloading it all over again.
+  const second = [...first, { role: "assistant", content: "It claims..." }, { role: "user", content: "what about the end?" }];
+  const clips = await resolveClipParts(second, { providers, cache: true });
+  assert.equal(resolves, 1, "no second resolve");
+  assert.equal(downloads, 1, "no second download");
+
+  const parts = toGeminiContents(second, { clips })[0].parts;
+  assert.equal(parts.filter((p) => p.inline_data).length, 1, "the clip is still attached");
+  assert.equal(
+    parts.find((p) => p.inline_data).inline_data.data,
+    Buffer.from("clip bytes").toString("base64"),
+  );
+  resetClipCache();
+});
+
+test("the cache is off unless a caller asks for it", async () => {
+  resetClipCache();
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => resolvedClip(),
+      download: async () => {
+        downloads += 1;
+        return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+      },
+    },
+  ];
+
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  await resolveClipParts(messages, { providers });
+  await resolveClipParts(messages, { providers });
+  assert.equal(downloads, 2);
+});
+
+test("a cached clip is dropped once it has gone stale", async () => {
+  resetClipCache();
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => resolvedClip(),
+      download: async () => {
+        downloads += 1;
+        return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+      },
+    },
+  ];
+
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  await resolveClipParts(messages, { providers, cache: true, cacheTTLMs: 1 });
+  await new Promise((r) => setTimeout(r, 5));
+  await resolveClipParts(messages, { providers, cache: true, cacheTTLMs: 1 });
+  assert.equal(downloads, 2);
+  resetClipCache();
+});
+
+test("the cache stays under its byte ceiling, dropping the oldest clip first", async () => {
+  resetClipCache();
+  const downloaded = [];
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async (link) => resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link }),
+      download: async (resolved) => {
+        downloaded.push(resolved.videoID);
+        return { bytes: Buffer.alloc(600), mimeType: "video/mp4" };
+      },
+    },
+  ];
+  const link = (n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`;
+  const options = { providers, cache: true, cacheMaxBytes: 1000 };
+
+  await resolveClipParts([{ role: "user", content: link(1) }], options);
+  await resolveClipParts([{ role: "user", content: link(2) }], options);
+  assert.equal(downloaded.length, 2);
+
+  // Two 600-byte clips don't fit in 1000 bytes, so the first one is gone and the second
+  // is still there.
+  await resolveClipParts([{ role: "user", content: link(2) }], options);
+  assert.equal(downloaded.length, 2, "the newest clip is still cached");
+  await resolveClipParts([{ role: "user", content: link(1) }], options);
+  assert.equal(downloaded.length, 3, "the oldest was evicted to stay under the ceiling");
+  resetClipCache();
+});
+
+test("the clip stage gives up on its budget and says so, rather than holding the request", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    budgetMs: 10,
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async (_link, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          }),
+        download: async () => ({ bytes: Buffer.from("x"), mimeType: "video/mp4" }),
+      },
+    ],
+  });
+
+  const note = toGeminiContents(messages, { clips })[0].parts[0].text;
+  assert.match(note, /could not be attached: it took too long to fetch/);
+});
+
 /* ---------------- Instagram ---------------- */
 
 // The payload below is **real**. It is the `xdt_shortcode_media` object Instagram's
@@ -2344,14 +2865,57 @@ test("concurrent resolves share one homepage seed", async () => {
   assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 1);
 });
 
-test("a throttled query is reported as try-again, not as a broken link", async () => {
+test("a throttled query is retried, then reported as try-again rather than a broken link", async () => {
   resetInstagramSession();
-  const { fetchImpl } = igFetch(() => igQueryResponse({}, { status: 429 }));
+  let queries = 0;
+  const { fetchImpl } = igFetch(() => {
+    queries += 1;
+    return igQueryResponse({}, { status: 429 });
+  });
 
   await assert.rejects(
-    resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl }),
+    resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async () => {} }),
     (error) => error.kind === "rateLimited" && error.retryable && /rate-limiting/.test(error.message),
   );
+  // Throttling anonymous datacenter traffic is Instagram's normal state, not an incident,
+  // so the first refusal is not the answer — but the third is.
+  assert.equal(queries, 3);
+});
+
+test("a throttle that comes back clears on the retry, and the reel is not lost", async () => {
+  resetInstagramSession();
+  let queries = 0;
+  const { fetchImpl, calls } = igFetch(() => {
+    queries += 1;
+    return queries === 1 ? igQueryResponse({}, { status: 429 }) : igQueryResponse(igPayload());
+  });
+
+  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(clip.videoID, IG_SHORTCODE);
+  // A 429 and a spent session look alike from here, so the retry gets a fresh token.
+  assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 2);
+});
+
+test("Instagram's own Retry-After is waited out rather than second-guessed", async () => {
+  resetInstagramSession();
+  const slept = [];
+  let queries = 0;
+  const { fetchImpl } = igFetch(() => {
+    queries += 1;
+    if (queries === 1) {
+      return {
+        ok: false,
+        status: 429,
+        url: "https://www.instagram.com/graphql/query",
+        headers: { get: (n) => (String(n).toLowerCase() === "retry-after" ? "2" : null) },
+        json: async () => ({}),
+      };
+    }
+    return igQueryResponse(igPayload());
+  });
+
+  await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async (ms) => slept.push(ms) });
+  assert.deepEqual(slept, [2_000]);
 });
 
 test("a 403 re-seeds the session once before giving up", async () => {
@@ -2363,9 +2927,53 @@ test("a 403 re-seeds the session once before giving up", async () => {
     return queries === 1 ? igQueryResponse({}, { status: 403 }) : igQueryResponse(igPayload());
   });
 
-  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl });
+  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async () => {} });
   assert.equal(clip.videoID, IG_SHORTCODE);
   assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 2);
+});
+
+test("one caller giving up on the shared seed doesn't take the others down with it", async () => {
+  resetInstagramSession();
+  // The seed used to run under whichever caller arrived first, signal and all. On a warm
+  // instance those callers are unrelated requests, so the first one hanging up aborted the
+  // homepage load every other concurrent resolve was waiting on.
+  const controller = new AbortController();
+  let seeds = 0;
+  let releaseSeed;
+  const seeded = new Promise((resolve) => {
+    releaseSeed = resolve;
+  });
+
+  const fetchImpl = async (url) => {
+    if (String(url) === "https://www.instagram.com/") {
+      seeds += 1;
+      await seeded;
+      return {
+        ok: true,
+        status: 200,
+        url: String(url),
+        headers: {
+          get: (name) =>
+            String(name).toLowerCase() === "set-cookie" ? "csrftoken=tok123; Path=/" : null,
+        },
+        body: null,
+      };
+    }
+    return igQueryResponse(igPayload());
+  };
+
+  const abandoned = resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, signal: controller.signal });
+  const patient = resolveInstagramVideo(`https://www.instagram.com/p/${IG_SHORTCODE}/`, { fetchImpl });
+
+  // Let both reach the shared seed before the first one walks away.
+  await new Promise((r) => setTimeout(r, 5));
+  controller.abort();
+  await assert.rejects(abandoned, (error) => error.name === "AbortError");
+
+  releaseSeed();
+  const clip = await patient;
+  assert.equal(clip.videoID, IG_SHORTCODE, "the caller still waiting got its reel");
+  assert.equal(seeds, 1, "and still only one homepage load between them");
 });
 
 test("a share link is followed, and the shortcode read off where it landed", async () => {

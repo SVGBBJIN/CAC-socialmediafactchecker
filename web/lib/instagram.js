@@ -37,10 +37,18 @@
 // (`INSTAGRAM_DOC_ID`) to make recovery a config change rather than a deploy, and every
 // parse failure below is distinct and loud about which step stopped finding what it
 // expected. Instagram also rate-limits anonymous traffic from datacenter IPs harder than
-// TikTok does; a 401/429 is reported as retryable rather than as a broken link, because
-// that is what it usually is.
+// TikTok does; a 401/429 is retried with backoff and a fresh token before it is reported at
+// all, and reported as "try again shortly" rather than as a broken link when it survives
+// that, because that is what it usually is.
 
-import { fetchWithTimeout, hostAllowed, readCapped } from "./media-fetch.js";
+import {
+  fetchWithTimeout,
+  fetchStream,
+  hostAllowed,
+  readCapped,
+  StalledTransferError,
+} from "./media-fetch.js";
+import { withRetry, retryAfterMs } from "./retry.js";
 
 /** Longest we'll wait for the query, and for the CDN to start sending the file. */
 export const QUERY_TIMEOUT_MS = 15_000;
@@ -106,13 +114,33 @@ export const ALLOWED_MEDIA_HOSTS = ["cdninstagram.com", "fbcdn.net"];
  * and the caller drops the video and tells the model why either way.
  */
 export class InstagramError extends Error {
-  constructor(message, { kind = "upstream", retryable = false } = {}) {
+  constructor(message, { kind = "upstream", retryable = false, retryAfterMs = null } = {}) {
     super(message);
     this.name = "InstagramError";
     this.kind = kind;
     this.retryable = retryable;
+    // What Instagram asked us to wait, when it said. It says so far more often than TikTok
+    // does — throttling anonymous datacenter traffic is its normal state, not an incident.
+    this.retryAfterMs = retryAfterMs;
   }
 }
+
+/**
+ * How hard each step tries again. `withRetry` option bags — see lib/retry.js.
+ *
+ * More generous than TikTok's on the query step: a throttled reel is the single most
+ * common failure on this path, it is genuinely transient, and Instagram usually says how
+ * long to wait. The download budget matches TikTok's, because the file is the file.
+ */
+export const QUERY_RETRY = { retries: 2, baseMs: 500, maxMs: 4_000, budgetMs: 30_000 };
+export const MEDIA_RETRY = { retries: 2, baseMs: 600, maxMs: 5_000, budgetMs: 75_000 };
+
+/**
+ * Which failures are worth repeating *against the same URL*. Same rule as TikTok's: an
+ * expired signed CDN URL is the one retry that cannot work, so it is left to the caller,
+ * which can resolve the post again and get a live one.
+ */
+const retryableInPlace = (error) => error?.retryable === true && error?.kind !== "expired";
 
 /* ---------------- URL shapes ---------------- */
 
@@ -249,18 +277,30 @@ function readSetCookies(response) {
  * "Page Not Found" shell, which looks like a dead link and isn't one — so this runs first
  * and its token rides on every query.
  */
-async function seedSession({ fetchImpl, signal, timeoutMs }) {
+async function seedSession({ fetchImpl, timeoutMs }) {
   let response;
   try {
     response = await fetchWithTimeout(HOME_URL, {
       fetchImpl,
-      signal,
       timeoutMs,
       headers: { "user-agent": USER_AGENT, accept: "text/html" },
     });
   } catch (error) {
-    if (signal?.aborted) throw error;
     throw new InstagramError(`Could not reach Instagram: ${error.message}`, { retryable: true });
+  }
+
+  if (response.ok === false) {
+    const throttled = response.status === 429;
+    throw new InstagramError(
+      throttled
+        ? "Instagram is rate-limiting anonymous requests right now — try that link again shortly."
+        : `Instagram's homepage failed (HTTP ${response.status}).`,
+      {
+        kind: throttled ? "rateLimited" : "upstream",
+        retryable: throttled || response.status >= 500,
+        retryAfterMs: throttled ? retryAfterMs(response) : null,
+      },
+    );
   }
 
   // We only wanted the headers; don't pull 600 KB of page down to throw it away.
@@ -296,12 +336,24 @@ async function seedSession({ fetchImpl, signal, timeoutMs }) {
  * Concurrent callers share a single seed rather than each fetching their own: two links in
  * one message resolve in parallel, and without this that is two homepage loads to obtain
  * two interchangeable tokens.
+ *
+ * Two things that sharing a promise makes easy to get wrong, and which this gets right:
+ *
+ * - **The seed is nobody's request.** It used to run under whichever caller happened to
+ *   arrive first, signal and all — so that caller hanging up, or its 15-second deadline
+ *   expiring, aborted the seed *every other concurrent caller was waiting on*. On a warm
+ *   serverless instance those callers are unrelated requests. The seed now runs under its
+ *   own deadline only, and each caller races the shared promise against its own signal, so
+ *   giving up is a local decision.
+ * - **A stale token is refreshed once, not once per caller.** `stale` is the session the
+ *   caller just had refused; if it is no longer the cached one, somebody else has already
+ *   replaced it and this caller takes the new one rather than seeding a third.
  */
-async function session({ fetchImpl, signal, timeoutMs, refresh = false }) {
-  if (refresh) resetInstagramSession();
+async function session({ fetchImpl, signal, timeoutMs, stale = null }) {
+  if (stale && cachedSession === stale) resetInstagramSession();
   if (cachedSession && cachedSession.expiresAt > Date.now()) return cachedSession;
   if (!inFlightSession) {
-    inFlightSession = seedSession({ fetchImpl, signal, timeoutMs })
+    inFlightSession = seedSession({ fetchImpl, timeoutMs })
       .then((seeded) => {
         cachedSession = seeded;
         return seeded;
@@ -310,7 +362,30 @@ async function session({ fetchImpl, signal, timeoutMs, refresh = false }) {
         inFlightSession = null;
       });
   }
-  return inFlightSession;
+  return untilAborted(inFlightSession, signal);
+}
+
+/**
+ * A shared promise, given up on when *this* caller's signal fires.
+ *
+ * The shared promise is left running: it belongs to everyone else still waiting on it, and
+ * its rejection stays handled here, so one caller walking away can't turn into an
+ * unhandled rejection either.
+ */
+function untilAborted(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+function abortError() {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
 }
 
 /* ---------------- Shortcode → media URL ---------------- */
@@ -469,11 +544,17 @@ async function queryPost(shortcode, docID, { fetchImpl, signal, timeoutMs, auth,
 
   if (!response.ok) {
     // 401 and 429 both mean "not right now" rather than "not ever": Instagram throttles
-    // anonymous traffic, and a shared IP hits that without the link being at fault.
+    // anonymous traffic, and a shared IP hits that without the link being at fault. Both
+    // are also worth a fresh token — a throttle and a spent session look alike from here —
+    // so `resolveInstagramVideo` re-seeds on this kind before it asks again.
     if (response.status === 401 || response.status === 429) {
       throw new InstagramError(
         "Instagram is rate-limiting anonymous requests right now — try that link again shortly.",
-        { kind: "rateLimited", retryable: true },
+        {
+          kind: "rateLimited",
+          retryable: true,
+          retryAfterMs: retryAfterMs(response),
+        },
       );
     }
     if (response.status === 403) {
@@ -483,7 +564,7 @@ async function queryPost(shortcode, docID, { fetchImpl, signal, timeoutMs, auth,
       });
     }
     throw new InstagramError(`Instagram's post query failed (HTTP ${response.status}).`, {
-      retryable: response.status >= 500,
+      retryable: response.status >= 500 || response.status === 408,
     });
   }
 
@@ -507,8 +588,17 @@ async function queryPost(shortcode, docID, { fetchImpl, signal, timeoutMs, auth,
  */
 export async function resolveInstagramVideo(
   urlString,
-  { fetchImpl = fetch, signal, timeoutMs = QUERY_TIMEOUT_MS, docIDs = configuredDocIDs() } = {},
+  {
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = QUERY_TIMEOUT_MS,
+    docIDs = configuredDocIDs(),
+    sleepImpl,
+    retry = QUERY_RETRY,
+  } = {},
 ) {
+  const retryOptions = { ...retry, signal, sleepImpl, isRetryable: retryableInPlace };
+
   let shortcode = instagramShortcode(urlString);
   if (!shortcode) {
     if (!isInstagramShortLink(urlString)) {
@@ -516,34 +606,45 @@ export async function resolveInstagramVideo(
         kind: "notAVideo",
       });
     }
-    shortcode = await followShareLink(urlString, { fetchImpl, signal, timeoutMs });
+    shortcode = await withRetry(
+      () => followShareLink(urlString, { fetchImpl, signal, timeoutMs }),
+      retryOptions,
+    );
   }
 
-  let auth = await session({ fetchImpl, signal, timeoutMs });
+  let auth = await withRetry(() => session({ fetchImpl, signal, timeoutMs }), retryOptions);
   let lastError = null;
 
   for (const [index, docID] of docIDs.entries()) {
-    for (const attempt of [0, 1]) {
-      try {
-        return await queryPost(shortcode, docID, {
-          fetchImpl,
-          signal,
-          timeoutMs,
-          auth,
-          sourceURL: urlString,
-        });
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        lastError = error;
-        // A 403 on a token we cached ten minutes ago is most likely the token, not the
-        // link: re-seed once and try the same query again before blaming Instagram.
-        if (attempt === 0 && error?.kind === "forbidden") {
-          auth = await session({ fetchImpl, signal, timeoutMs, refresh: true });
-          continue;
+    // Whether the last failure looked like the token rather than the link. A 403 on a
+    // token cached ten minutes ago, and a 401/429 from a session Instagram has decided it
+    // has seen enough of, are the same repair: get a fresh one before asking again.
+    let staleToken = false;
+
+    try {
+      return await withRetry(async ({ attempt }) => {
+        if (attempt > 0 && staleToken) {
+          auth = await session({ fetchImpl, signal, timeoutMs, stale: auth });
+          staleToken = false;
         }
-        break;
-      }
+        try {
+          return await queryPost(shortcode, docID, {
+            fetchImpl,
+            signal,
+            timeoutMs,
+            auth,
+            sourceURL: urlString,
+          });
+        } catch (error) {
+          staleToken = error?.kind === "forbidden" || error?.kind === "rateLimited";
+          throw error;
+        }
+      }, retryOptions);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      lastError = error;
     }
+
     // Only a rotated query is worth trying the next id for. "Private post" and "photo
     // post" are answers, and asking them again under a different id changes nothing.
     if (lastError?.kind !== "malformed" || index === docIDs.length - 1) break;
@@ -559,7 +660,14 @@ const tooLarge = (message) => new InstagramError(message, { kind: "tooLarge" });
 /** Fetch the file a `resolveInstagramVideo` result pointed at. */
 export async function downloadInstagramMedia(
   resolved,
-  { fetchImpl = fetch, signal, timeoutMs = MEDIA_TIMEOUT_MS, maxBytes = MAX_MEDIA_BYTES } = {},
+  {
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = MEDIA_TIMEOUT_MS,
+    maxBytes = MAX_MEDIA_BYTES,
+    sleepImpl,
+    retry = MEDIA_RETRY,
+  } = {},
 ) {
   let mediaURL;
   try {
@@ -583,9 +691,28 @@ export async function downloadInstagramMedia(
     );
   }
 
+  return withRetry(
+    ({ remainingMs }) =>
+      fetchMediaOnce(mediaURL, resolved, {
+        fetchImpl,
+        signal,
+        maxBytes,
+        // Never longer than what is left of the retry budget — see the same note in
+        // lib/tiktok.js.
+        timeoutMs: Math.max(1_000, Math.min(timeoutMs, remainingMs || timeoutMs)),
+      }),
+    { ...retry, signal, sleepImpl, isRetryable: retryableInPlace },
+  );
+}
+
+/** One go at the CDN. Everything about *repeating* it lives in the caller. */
+async function fetchMediaOnce(mediaURL, resolved, { fetchImpl, signal, timeoutMs, maxBytes }) {
   let response;
+  let release = () => {};
   try {
-    response = await fetchWithTimeout(mediaURL.toString(), {
+    // `fetchStream` rather than `fetchWithTimeout`: the deadline has to outlive the
+    // headers here, because the headers are the fast part. See lib/media-fetch.js.
+    ({ response, release } = await fetchStream(mediaURL.toString(), {
       fetchImpl,
       signal,
       timeoutMs,
@@ -593,7 +720,7 @@ export async function downloadInstagramMedia(
         "user-agent": USER_AGENT,
         ...(resolved.referer ? { referer: resolved.referer } : {}),
       },
-    });
+    }));
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new InstagramError(`Could not download the Instagram clip: ${error.message}`, {
@@ -601,28 +728,51 @@ export async function downloadInstagramMedia(
     });
   }
 
-  if (!response.ok) {
-    // The CDN URL is signed and expires; a 403 here usually means the post was resolved
-    // too long ago rather than that anything is wrong with the link.
-    throw new InstagramError(`Instagram's CDN refused the download (HTTP ${response.status}).`, {
-      retryable: true,
-    });
-  }
-  if (!response.body) {
-    throw new InstagramError("Instagram's CDN returned an empty response.", { retryable: true });
-  }
+  try {
+    if (!response.ok) {
+      // The CDN URL is signed and expires; a 403 here usually means the post was resolved
+      // too long ago rather than that anything is wrong with the link. Named as its own
+      // kind so the caller resolves the post again for a fresh URL instead of asking a
+      // dead one twice.
+      const expired = response.status === 403 || response.status === 410;
+      const throttled = response.status === 429;
+      throw new InstagramError(`Instagram's CDN refused the download (HTTP ${response.status}).`, {
+        kind: expired ? "expired" : throttled ? "rateLimited" : "upstream",
+        retryable: true,
+        retryAfterMs: throttled ? retryAfterMs(response) : null,
+      });
+    }
+    if (!response.body) {
+      throw new InstagramError("Instagram's CDN returned an empty response.", { retryable: true });
+    }
 
-  const bytes = await readCapped(response, maxBytes, tooLarge);
-  if (bytes.length === 0) {
-    throw new InstagramError("Instagram's CDN returned an empty file.", { retryable: true });
+    let bytes;
+    try {
+      bytes = await readCapped(response, maxBytes, tooLarge);
+    } catch (error) {
+      if (signal?.aborted || error instanceof InstagramError) throw error;
+      // A stalled transfer, or a socket that died partway through the file: the reel is
+      // fine, the connection wasn't.
+      throw new InstagramError(
+        error instanceof StalledTransferError
+          ? `Instagram's CDN stopped sending the clip — ${error.message}.`
+          : `Could not download the Instagram clip: ${error.message}`,
+        { retryable: true },
+      );
+    }
+    if (bytes.length === 0) {
+      throw new InstagramError("Instagram's CDN returned an empty file.", { retryable: true });
+    }
+
+    // Trust the server's type over the resolver's guess when it sends a usable one.
+    const declared = response.headers?.get?.("content-type")?.split(";")[0]?.trim();
+    const mimeType =
+      declared && declared.includes("/") && declared !== "application/octet-stream"
+        ? declared
+        : resolved.mimeType;
+
+    return { bytes, mimeType };
+  } finally {
+    release();
   }
-
-  // Trust the server's type over the resolver's guess when it sends a usable one.
-  const declared = response.headers?.get?.("content-type")?.split(";")[0]?.trim();
-  const mimeType =
-    declared && declared.includes("/") && declared !== "application/octet-stream"
-      ? declared
-      : resolved.mimeType;
-
-  return { bytes, mimeType };
 }

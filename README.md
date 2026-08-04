@@ -149,6 +149,62 @@ model instead of failing the request. A bare `500` with no overload wording stil
 that is an outage, and walking the chain through one adds four more failed requests to a
 service already in trouble.
 
+## What the clip path now survives
+
+`TikTokError` and `InstagramError` have always sorted their failures into "this link will
+never work" and "try again". Only the first half was acted on: the `retryable` flag was
+read once, to decide how to word a note, and nothing ever tried again. Four things changed
+in `web/`, and `Sources/` is frozen rather than owed a backport.
+
+**A transient refusal is no longer the answer.** `web/lib/retry.js` mirrors
+`RetryPolicy.swift` — exponential backoff with full jitter, a per-delay cap, and a budget
+on the whole step — and both platforms' network steps run through it. A `429` from
+Instagram's GraphQL endpoint is its normal response to anonymous datacenter traffic rather
+than an incident, and it was costing the user their reel on first contact. `Retry-After` is
+believed when the server sends one. A *decision* is still never repeated: a private post, a
+photo carousel, a deleted video and a rotated `doc_id` are answers, and asking twice only
+doubles the bill.
+
+**A transfer that stops has a deadline.** `fetchWithTimeout` disarmed at the response
+headers — it cleared its timer and unsubscribed from the caller's signal the moment a
+response object existed — so the part that actually takes time, pulling 40 MB off a CDN,
+ran with no deadline and nothing upstream able to interrupt it. `fetchStream` keeps both
+armed until the body has been read, and `readCapped` additionally gives up on a transfer
+that has gone quiet, which is faster than waiting out the full media timeout to learn the
+same thing.
+
+**An expired URL is repaired rather than reported.** The CDN links both platforms hand back
+are signed and short-lived, and a `403` on one means the clock ran out, not that the link
+is bad — so retrying the same dead URL is the one retry that cannot work. It is classified
+as its own kind, the platform modules skip it, and `resolveClipParts` resolves the post
+again for a freshly signed URL and downloads from that. Once: a second expiry in the same
+breath is not a clock problem.
+
+**A clip that can't be downloaded is described, not dropped.** Resolving a post already
+returns its caption, creator and duration — that *is* what the query returns — so a failed
+download no longer costs the whole link. The model gets the caption and the reason the
+video is missing in one note, which matters most on short-form political content, where the
+caption is frequently the claim and the video is B-roll. Instagram had no fallback at all
+before this; its oEmbed needs a Meta App Review token, so a reel whose download failed was
+simply lost.
+
+## What the clip path no longer re-does
+
+Gemini has no memory between requests, so every turn replays the whole conversation and
+re-attaches each clip at its first mention. That much is unavoidable — the bytes have to be
+in the request body or the model can't see the video it is being asked about. What was
+avoidable is where the bytes came from: a ten-turn thread about one TikTok resolved that
+post and pulled the same MP4 off the CDN ten times, so every follow-up question paid the
+full resolve-and-download wait again before a token could be produced.
+
+`web/lib/gemini.js` now keeps a downloaded clip for ten minutes, bounded by
+`CLIP_CACHE_MAX_BYTES` (one maximum-sized clip's worth by default, which is around ten
+typical ones) and evicted oldest-first. It is process-global and shared across requests on a
+warm instance, so it is off in the library and switched on by `api/chat.js`, where
+deployment decisions are made. Two smaller cuts came with it: the whole clip stage now runs
+under a budget, so one hung platform can't hold a request open, and TikTok's anti-cadence
+jitter is paid once per resolve rather than once per request within it.
+
 ## Two things to action
 
 1. **Rotate the Gemini API key.** It was shared in a chat message during handoff — assume
@@ -179,6 +235,7 @@ web/                       The fact-checker. Static front end, Gemini key server
   lib/gemini-files.js      ⟷ Sources/SeerCore/Gemini/GeminiFilesClient.swift
   lib/gemini.js            ⟷ Sources/SeerCore/Gemini/GeminiVideoClient.swift
   lib/media-fetch.js       ⟷ Sources/SeerCore/Media/MediaDownloader.swift
+  lib/retry.js             ⟷ Sources/SeerCore/Networking/RetryPolicy.swift
   lib/instagram.js         no Swift counterpart — the unported resolver
   lib/search.js            no Swift counterpart — research, citations, verdicts
   lib/verified-chat.js     ⌟
@@ -195,7 +252,7 @@ route that holds the key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 66 tests, no network
+npm test                               # 287 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to
