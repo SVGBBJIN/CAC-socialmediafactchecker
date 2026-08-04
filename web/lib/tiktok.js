@@ -30,11 +30,32 @@
 // returned HTTP 200 to an anonymous request, the blob parsed at the documented path, and
 // the extracted URL served a 3.2 MB `video/mp4` with no credential and no `Referer`.
 
-import { fetchWithTimeout, hostAllowed, readCapped } from "./media-fetch.js";
+import {
+  fetchWithTimeout,
+  fetchStream,
+  hostAllowed,
+  readCapped,
+  downloadImageSet,
+  StalledTransferError,
+} from "./media-fetch.js";
+import { withRetry, retryAfterMs } from "./retry.js";
 
 /** Longest we'll wait for the embed page, and for the CDN to start sending the file. */
 export const EMBED_TIMEOUT_MS = 15_000;
 export const MEDIA_TIMEOUT_MS = 60_000;
+
+/**
+ * The same, per slide of a photo post. Shorter than a clip's, because a slide is a
+ * few hundred KB rather than tens of MB — and a dozen of them are in flight.
+ */
+export const IMAGE_TIMEOUT_MS = 30_000;
+
+/**
+ * Slides retry less hard than a clip does: one repeat, on a short curve, inside a small
+ * budget. A slide that won't come is skipped rather than failing the post, so spending a
+ * clip's patience on each of twelve of them buys a worse trade than giving up early.
+ */
+export const IMAGE_RETRY = { retries: 1, baseMs: 400, maxMs: 2_000, budgetMs: 20_000 };
 
 /**
  * Ceiling on a clip we're willing to hold in memory and forward.
@@ -63,19 +84,6 @@ const EMBED_BASE = "https://www.tiktok.com/embed/v2";
 
 /** TikTok's real oEmbed endpoint — title, author, thumbnail. No video, see below. */
 const OEMBED_ENDPOINT = "https://www.tiktok.com/oembed";
-
-const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * A random pause before a request, so every fetch this module makes doesn't land on the
- * same offset within its second — a fixed cadence is one of the crudest bot signatures.
- * Off by default so tests stay instant; callers that talk to the real TikTok (the API
- * routes, not the test suite) opt in explicitly.
- */
-async function jitterDelay(enabled, { minMs = 150, maxMs = 900, sleepImpl = defaultSleep } = {}) {
-  if (!enabled) return;
-  await sleepImpl(minMs + Math.floor(Math.random() * (maxMs - minMs + 1)));
-}
 
 /**
  * Hosts we'll fetch media bytes from.
@@ -109,13 +117,38 @@ export const ALLOWED_MEDIA_HOSTS = [
  * video and tells the model why either way, but only the latter is worth a retry.
  */
 export class TikTokError extends Error {
-  constructor(message, { kind = "upstream", retryable = false } = {}) {
+  constructor(message, { kind = "upstream", retryable = false, retryAfterMs = null } = {}) {
     super(message);
     this.name = "TikTokError";
     this.kind = kind;
     this.retryable = retryable;
+    // What the server asked us to wait, when it said. `withRetry` prefers this over its
+    // own backoff curve: a host that has published a number knows better than we do.
+    this.retryAfterMs = retryAfterMs;
   }
 }
+
+/**
+ * How hard each step tries again. Both are `withRetry` option bags — see lib/retry.js.
+ *
+ * The metadata steps are cheap and quick, so they retry on a short curve. The download is
+ * neither, so its budget is what actually bounds it: three 60-second attempts would be
+ * three minutes of silence, and `remainingMs` shrinks each attempt's own deadline to fit
+ * what is left.
+ */
+export const RESOLVE_RETRY = { retries: 2, baseMs: 350, maxMs: 3_000, budgetMs: 25_000 };
+export const MEDIA_RETRY = { retries: 2, baseMs: 600, maxMs: 5_000, budgetMs: 75_000 };
+
+/**
+ * Which failures are worth repeating *against the same URL*.
+ *
+ * Narrower than `error.retryable`, and deliberately so. A signed CDN URL that comes back
+ * 403 has expired, and asking the same expired URL again is the one retry that cannot
+ * possibly work — the fix is to resolve the post again for a fresh URL, which is the
+ * caller's job (`resolveClipParts` in lib/gemini.js does it). It stays marked retryable so
+ * that caller knows the link is fine and the URL isn't; it just isn't repeated here.
+ */
+const retryableInPlace = (error) => error?.retryable === true && error?.kind !== "expired";
 
 /* ---------------- URL shapes ---------------- */
 
@@ -141,13 +174,30 @@ function numericID(candidate) {
 }
 
 /**
- * The numeric video ID, when the URL states it outright.
+ * The numeric post ID, when the URL states it outright.
  *
- * Handles `/@user/video/<id>`, `/embed/v2/<id>`, `/embed/<id>`, `/v/<id>.html` and a bare
- * `?item_id=`. Returns null for short links, which have to be followed, and for
- * `/@user/photo/<id>` carousels, which have no video to fetch.
+ * Handles `/@user/video/<id>`, `/@user/photo/<id>`, `/embed/v2/<id>`, `/embed/<id>`,
+ * `/v/<id>.html` and a bare `?item_id=`. Returns null only for short links, which have to
+ * be followed before they name anything.
+ *
+ * ## `/photo/` is not a type signal
+ *
+ * This used to return null for any path containing `photo`, on the reasoning that a
+ * photo-mode post is a slideshow of stills with no video to fetch — so declining early
+ * gave the user "that isn't a video" instead of a confusing empty result.
+ *
+ * Both halves of that turned out to be wrong. The pipeline can read photo posts now (see
+ * `parseEmbedPage`), so there is something to fetch. And the path never distinguished them
+ * in the first place: TikTok serves `/video/<id>` and `/photo/<id>` interchangeably for the
+ * same post, and which one a share sheet produces does not track what the post contains.
+ * Verified on 2026-08-04 — `/@memezar/photo/7449708266168274208` resolves to an ordinary
+ * video, with `imagePostInfo: null` and a populated `itemInfos.video.urls`. So a `/photo/`
+ * URL was costing us real videos, not just slideshows.
+ *
+ * Only the payload says what a post is. This function returns an ID; `parseEmbedPage`
+ * decides what the ID turned out to be.
  */
-export function tikTokVideoID(urlString) {
+export function tikTokPostID(urlString) {
   let url;
   try {
     url = new URL(urlString);
@@ -158,9 +208,11 @@ export function tikTokVideoID(urlString) {
 
   const segments = url.pathname.split("/").filter(Boolean);
 
-  // /@user/photo/<id> — a real post, but a slideshow of stills. Declining here gives the
-  // user "that isn't a video" instead of a confusing empty result.
-  if (segments.includes("photo")) return null;
+  const photoAt = segments.indexOf("photo");
+  if (photoAt !== -1 && photoAt + 1 < segments.length) {
+    const id = numericID(segments[photoAt + 1]);
+    if (id) return id;
+  }
 
   const videoAt = segments.findIndex((s) => s === "video" || s === "v");
   if (videoAt !== -1 && videoAt + 1 < segments.length) {
@@ -199,7 +251,7 @@ export function isTikTokShortLink(urlString) {
 
 /** Whether a URL is a TikTok link this module could do something with. */
 export function isTikTokLink(urlString) {
-  return tikTokVideoID(urlString) !== null || isTikTokShortLink(urlString);
+  return tikTokPostID(urlString) !== null || isTikTokShortLink(urlString);
 }
 
 const URL_PATTERN = /https?:\/\/[^\s<>"]+/g;
@@ -261,11 +313,45 @@ export function extractStateBlob(html) {
 }
 
 /**
- * Embed page HTML → everything we need about the clip.
+ * A photo-mode post's slides, or null if this post isn't one.
+ *
+ * `videoData.imagePostInfo.displayImages[]`, each carrying `{width, height, urlList}` —
+ * captured live on 2026-08-04 from `/embed/v2/7553302113757990166` (2 slides) and
+ * `/embed/v2/7240568259186019630` (16 slides). `urlList` holds the same image on two
+ * mirror hosts (`p16-…` and `p19-common-sign.tiktokcdn-us.com`); the first is taken and
+ * the rest are spares rather than extra slides, which is why they collapse to one URL here.
+ *
+ * Note the field is `imagePostInfo`, hanging off `videoData` beside `itemInfos` — *not*
+ * the `imagePost` key TikTok's own Content Posting API documents. Those are two different
+ * serialisations of the same post, and only this one appears on the embed route.
+ */
+function photoSlides(page) {
+  const displayImages = page?.videoData?.imagePostInfo?.displayImages;
+  if (!Array.isArray(displayImages) || displayImages.length === 0) return null;
+
+  const slides = [];
+  for (const image of displayImages) {
+    const url = (image?.urlList ?? []).find((u) => typeof u === "string" && u.length > 0);
+    if (!url) continue;
+    slides.push({
+      url,
+      width: typeof image?.width === "number" ? image.width : null,
+      height: typeof image?.height === "number" ? image.height : null,
+    });
+  }
+  return slides.length > 0 ? slides : null;
+}
+
+/**
+ * Embed page HTML → everything we need about the post.
  *
  * Split out from the fetch so the parser can be tested against a real captured payload
  * without a network call — which is the only way to know it works, given the payload is
  * undocumented and a fixture invented from the docs would prove nothing.
+ *
+ * Returns either a video post (`kind: "video"`, with `mediaURL`) or a photo-mode post
+ * (`kind: "images"`, with `images[]`). Which one is decided here, by what the payload
+ * actually carries, and never by the URL — see `tikTokPostID`.
  */
 export function parseEmbedPage(html, { videoID, sourceURL }) {
   const blob = extractStateBlob(html);
@@ -293,39 +379,60 @@ export function parseEmbedPage(html, { videoID, sourceURL }) {
 
   const item = page?.videoData?.itemInfos;
   if (!item) {
-    // A valid page that carries no video: private, removed, region-blocked, or a
-    // photo-carousel post rather than a video.
+    // A valid page that carries no post at all: private, removed, or region-blocked.
     throw new TikTokError(
-      "TikTok returned no video for this link — it may be private, removed, or a photo post",
+      "TikTok returned nothing for this link — it may be private, removed, or region-blocked",
       { kind: "unavailable" },
     );
   }
 
+  const author = page?.videoData?.authorInfos;
+  const caption = typeof item?.text === "string" && item.text.trim() ? item.text.trim() : null;
+  const common = {
+    sourceURL,
+    videoID,
+    // Not required today — the CDN served the files without one — but the embed player
+    // sends it, and matching the player is the cheapest insurance against the CDN
+    // tightening up.
+    referer: "https://www.tiktok.com/",
+    authorName: author?.nickName || author?.uniqueId || null,
+    caption,
+  };
+
+  // Checked before the video branch, not after it: a photo post still carries an
+  // `itemInfos.video`, it is just empty (`urls: []`, `duration: 0`). Reading the payload in
+  // this order is what makes the *content* decide, rather than the URL that was pasted.
+  const slides = photoSlides(page);
+  if (slides) {
+    const first = slides[0];
+    return {
+      ...common,
+      kind: "images",
+      mimeType: "image/jpeg",
+      images: slides,
+      slideCount: slides.length,
+      duration: null,
+      width: first.width,
+      height: first.height,
+    };
+  }
+
   const raw = (item?.video?.urls ?? []).find((u) => typeof u === "string" && u.length > 0);
   if (!raw) {
-    throw new TikTokError("TikTok listed no playable source for this video", {
+    throw new TikTokError("TikTok listed no playable source for this post", {
       kind: "unavailable",
     });
   }
 
   const meta = item?.video?.videoMeta;
-  const author = page?.videoData?.authorInfos;
-  const caption = typeof item?.text === "string" && item.text.trim() ? item.text.trim() : null;
-
   return {
-    sourceURL,
-    videoID,
+    ...common,
+    kind: "video",
     mediaURL: raw,
     mimeType: "video/mp4",
-    // Not required today — the CDN served the file without one — but the embed player
-    // sends it, and matching the player is the cheapest insurance against the CDN
-    // tightening up.
-    referer: "https://www.tiktok.com/",
     duration: typeof meta?.duration === "number" ? meta.duration : null,
     width: typeof meta?.width === "number" ? meta.width : null,
     height: typeof meta?.height === "number" ? meta.height : null,
-    authorName: author?.nickName || author?.uniqueId || null,
-    caption,
   };
 }
 
@@ -333,8 +440,7 @@ export function parseEmbedPage(html, { videoID, sourceURL }) {
  * A short link carries no ID at all — only the redirect knows it. Fetch and read where we
  * landed; `fetch` follows redirects, so `response.url` is the canonical URL.
  */
-async function followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter, sleepImpl }) {
-  await jitterDelay(jitter, { sleepImpl });
+async function followShortLink(urlString, { fetchImpl, signal, timeoutMs }) {
   let response;
   try {
     response = await fetchWithTimeout(urlString, {
@@ -359,7 +465,7 @@ async function followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter
   // We only wanted the final URL; don't pull a page down to throw it away.
   await response.body?.cancel?.().catch(() => {});
 
-  const id = tikTokVideoID(response.url);
+  const id = tikTokPostID(response.url);
   if (!id) {
     throw new TikTokError("That TikTok short link doesn't point to a video.", {
       kind: "notAVideo",
@@ -381,19 +487,33 @@ export async function resolveTikTokVideo(
     signal,
     timeoutMs = EMBED_TIMEOUT_MS,
     embedBase = EMBED_BASE,
-    jitter = false,
     sleepImpl,
+    retry = RESOLVE_RETRY,
   } = {},
 ) {
-  let videoID = tikTokVideoID(urlString);
-  if (!videoID) {
-    if (!isTikTokShortLink(urlString)) {
-      throw new TikTokError("That link doesn't point to a TikTok video.", { kind: "notAVideo" });
-    }
-    videoID = await followShortLink(urlString, { fetchImpl, signal, timeoutMs, jitter, sleepImpl });
+  const retryOptions = { ...retry, signal, sleepImpl, isRetryable: retryableInPlace };
+
+  let videoID = tikTokPostID(urlString);
+  if (!videoID && !isTikTokShortLink(urlString)) {
+    throw new TikTokError("That link doesn't point to a TikTok video.", { kind: "notAVideo" });
   }
 
-  await jitterDelay(jitter, { sleepImpl });
+  if (!videoID) {
+    videoID = await withRetry(
+      () => followShortLink(urlString, { fetchImpl, signal, timeoutMs }),
+      retryOptions,
+    );
+  }
+
+  const html = await withRetry(
+    () => fetchEmbedPage(videoID, { fetchImpl, signal, timeoutMs, embedBase }),
+    retryOptions,
+  );
+  return parseEmbedPage(html, { videoID, sourceURL: urlString });
+}
+
+/** One go at the embed page. Everything about *repeating* it lives in the caller. */
+async function fetchEmbedPage(videoID, { fetchImpl, signal, timeoutMs, embedBase }) {
   let response;
   try {
     response = await fetchWithTimeout(`${embedBase}/${encodeURIComponent(videoID)}`, {
@@ -417,12 +537,15 @@ export async function resolveTikTokVideo(
         kind: "unavailable",
       });
     }
+    const throttled = response.status === 429;
     throw new TikTokError(`TikTok embed page failed (HTTP ${response.status}).`, {
-      retryable: response.status >= 500 || response.status === 429,
+      kind: throttled ? "rateLimited" : "upstream",
+      retryable: response.status >= 500 || throttled || response.status === 408,
+      retryAfterMs: throttled ? retryAfterMs(response) : null,
     });
   }
 
-  return parseEmbedPage(await response.text(), { videoID, sourceURL: urlString });
+  return response.text();
 }
 
 /* ---------------- CDN → bytes ---------------- */
@@ -442,8 +565,8 @@ export async function downloadTikTokMedia(
     signal,
     timeoutMs = MEDIA_TIMEOUT_MS,
     maxBytes = MAX_MEDIA_BYTES,
-    jitter = false,
     sleepImpl,
+    retry = MEDIA_RETRY,
   } = {},
 ) {
   let mediaURL;
@@ -465,10 +588,77 @@ export async function downloadTikTokMedia(
     );
   }
 
-  await jitterDelay(jitter, { sleepImpl });
+  return withRetry(
+    ({ remainingMs }) =>
+      fetchMediaOnce(mediaURL, resolved, {
+        fetchImpl,
+        signal,
+        maxBytes,
+        // Never longer than what is left of the retry budget: an attempt allowed to run
+        // its full minute after the budget has all but gone is how "three tries" becomes
+        // three minutes of nothing.
+        timeoutMs: Math.max(1_000, Math.min(timeoutMs, remainingMs || timeoutMs)),
+      }),
+    { ...retry, signal, sleepImpl, isRetryable: retryableInPlace },
+  );
+}
+
+/**
+ * Fetch every slide of a photo-mode post.
+ *
+ * Reuses `fetchMediaOnce` per slide, so an image gets the same deadline-over-the-body,
+ * expiry classification and retry treatment a clip does — a photo post's URLs are signed
+ * and short-lived exactly like a video's. The bounded, allowlisted loop around it is shared
+ * with Instagram; see `downloadImageSet` in media-fetch.js for why a failed slide is
+ * skipped rather than fatal.
+ */
+export async function downloadTikTokImages(
+  resolved,
+  {
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = IMAGE_TIMEOUT_MS,
+    maxSlides,
+    maxBytes,
+    maxSetBytes,
+    sleepImpl,
+    retry = IMAGE_RETRY,
+  } = {},
+) {
+  const images = resolved?.images ?? [];
+  if (images.length === 0) {
+    throw new TikTokError("That TikTok post listed no images.", { kind: "unavailable" });
+  }
+
+  return downloadImageSet(images, {
+    signal,
+    maxSlides,
+    maxBytes,
+    maxSetBytes,
+    allowedHosts: ALLOWED_MEDIA_HOSTS,
+    makeError: (message) => new TikTokError(message, { kind: "unavailable" }),
+    fetchOne: (url, { maxBytes: slideBytes }) =>
+      withRetry(
+        ({ remainingMs }) =>
+          fetchMediaOnce(url, resolved, {
+            fetchImpl,
+            signal,
+            maxBytes: slideBytes,
+            timeoutMs: Math.max(1_000, Math.min(timeoutMs, remainingMs || timeoutMs)),
+          }),
+        { ...retry, signal, sleepImpl, isRetryable: retryableInPlace },
+      ),
+  });
+}
+
+/** One go at the CDN. Everything about *repeating* it lives in the caller. */
+async function fetchMediaOnce(mediaURL, resolved, { fetchImpl, signal, timeoutMs, maxBytes }) {
   let response;
+  let release = () => {};
   try {
-    response = await fetchWithTimeout(mediaURL.toString(), {
+    // `fetchStream` rather than `fetchWithTimeout`: the deadline has to outlive the
+    // headers here, because the headers are the fast part. See lib/media-fetch.js.
+    ({ response, release } = await fetchStream(mediaURL.toString(), {
       fetchImpl,
       signal,
       timeoutMs,
@@ -477,7 +667,7 @@ export async function downloadTikTokMedia(
         ...(resolved.referer ? { referer: resolved.referer } : {}),
       },
       credentials: "omit",
-    });
+    }));
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new TikTokError(`Could not download the TikTok clip: ${error.message}`, {
@@ -485,31 +675,53 @@ export async function downloadTikTokMedia(
     });
   }
 
-  if (!response.ok) {
-    // Signed CDN URLs expire; a 403 here usually means the embed page was read too long
-    // ago rather than that anything is wrong with the link.
-    throw new TikTokError(`TikTok's CDN refused the download (HTTP ${response.status}).`, {
-      retryable: true,
-    });
-  }
-  if (!response.body) {
-    throw new TikTokError("TikTok's CDN returned an empty response.", { retryable: true });
-  }
+  try {
+    if (!response.ok) {
+      // Signed CDN URLs expire; a 403 here usually means the embed page was read too long
+      // ago rather than that anything is wrong with the link. Named as its own kind so the
+      // caller resolves the post again for a fresh URL instead of asking a dead one twice.
+      const expired = response.status === 403 || response.status === 410;
+      const throttled = response.status === 429;
+      throw new TikTokError(`TikTok's CDN refused the download (HTTP ${response.status}).`, {
+        kind: expired ? "expired" : throttled ? "rateLimited" : "upstream",
+        retryable: true,
+        retryAfterMs: throttled ? retryAfterMs(response) : null,
+      });
+    }
+    if (!response.body) {
+      throw new TikTokError("TikTok's CDN returned an empty response.", { retryable: true });
+    }
 
-  const bytes = await readCapped(response, maxBytes, tooLarge);
-  if (bytes.length === 0) {
-    throw new TikTokError("TikTok's CDN returned an empty file.", { retryable: true });
+    let bytes;
+    try {
+      bytes = await readCapped(response, maxBytes, tooLarge);
+    } catch (error) {
+      if (signal?.aborted || error instanceof TikTokError) throw error;
+      // A stalled transfer, or a socket that died partway through the file: the clip is
+      // fine, the connection wasn't.
+      throw new TikTokError(
+        error instanceof StalledTransferError
+          ? `TikTok's CDN stopped sending the clip — ${error.message}.`
+          : `Could not download the TikTok clip: ${error.message}`,
+        { retryable: true },
+      );
+    }
+    if (bytes.length === 0) {
+      throw new TikTokError("TikTok's CDN returned an empty file.", { retryable: true });
+    }
+
+    // Trust the server's type over the resolver's guess when it sends a usable one: the
+    // resolver infers `video/mp4` from context, the CDN knows.
+    const declared = response.headers?.get?.("content-type")?.split(";")[0]?.trim();
+    const mimeType =
+      declared && declared.includes("/") && declared !== "application/octet-stream"
+        ? declared
+        : resolved.mimeType;
+
+    return { bytes, mimeType };
+  } finally {
+    release();
   }
-
-  // Trust the server's type over the resolver's guess when it sends a usable one: the
-  // resolver infers `video/mp4` from context, the CDN knows.
-  const declared = response.headers?.get?.("content-type")?.split(";")[0]?.trim();
-  const mimeType =
-    declared && declared.includes("/") && declared !== "application/octet-stream"
-      ? declared
-      : resolved.mimeType;
-
-  return { bytes, mimeType };
 }
 
 /* ---------------- Metadata-only fallback ---------------- */
@@ -528,9 +740,8 @@ export async function downloadTikTokMedia(
  */
 export async function fetchTikTokOEmbed(
   urlString,
-  { fetchImpl = fetch, signal, timeoutMs = EMBED_TIMEOUT_MS, jitter = false, sleepImpl } = {},
+  { fetchImpl = fetch, signal, timeoutMs = EMBED_TIMEOUT_MS } = {},
 ) {
-  await jitterDelay(jitter, { sleepImpl });
   let response;
   try {
     response = await fetchWithTimeout(`${OEMBED_ENDPOINT}?url=${encodeURIComponent(urlString)}`, {

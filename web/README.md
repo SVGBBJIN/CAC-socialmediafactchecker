@@ -147,11 +147,32 @@ Three shapes, in order of what they cost us:
 | --- | --- | --- |
 | YouTube | the watch URL, as a `file_data` part — Gemini fetches and watches it | none |
 | TikTok | `/embed/v2/<id>` → `__FRONTITY_CONNECT_STATE__` → CDN MP4 → bytes in the request | none |
+| TikTok photo mode | the same page → `imagePostInfo.displayImages[]` → CDN JPEGs → one part per slide | none |
 | Instagram | `/graphql/query` by shortcode → `video_url` → CDN MP4 → bytes in the request | none |
+| Instagram images | the same query → each `XDTGraphImage`'s `display_url` → CDN JPEGs → one part per slide | none |
 
-Only YouTube is fetched by Gemini itself. The other two arrive as bytes: inline base64 up
+Only YouTube is fetched by Gemini itself. The rest arrive as bytes: inline base64 up
 to ~14 MB, and through the Files API past that (`lib/gemini-files.js`), which is also why
-they are the slowest requests the app makes and why the cap is two clips per message.
+they are the slowest requests the app makes and why the cap is two posts per message.
+
+**Photo posts and carousels.** A TikTok `/photo/` link used to not register as a link at
+all, and an Instagram carousel of stills was declined by name. That threw away the most
+claim-dense format either platform has: a screenshot dump or a text-card slideshow puts its
+whole argument in the images, where a video pads it with B-roll. Both resolve now, and the
+slides reach the model as one image part each, in post order, labelled as an ordered set so
+it doesn't read them as unrelated pictures — or as frames of a video it watched.
+
+Three things worth knowing about the shape of that:
+
+- **`/photo/` never told you what a post was.** TikTok serves `/video/<id>` and
+  `/photo/<id>` interchangeably for the same post — `/@memezar/photo/7449708266168274208`
+  is an ordinary video — so the old path check was costing real videos too. Only the
+  payload decides.
+- **Twelve slides, then a note.** Both platforms allow 35. Every slide is an image Gemini is
+  billed to read, so the rest are named in the prompt rather than attached, and the model is
+  told the post continues past what it can see.
+- **A slide that fails is skipped, not fatal.** Eleven of twelve still says most of what a
+  slideshow says; half a video says nothing. Only an empty set is an error.
 
 **Instagram, specifically.** `docs/SPIKE-instagram.md` originally shelved this platform:
 the legacy oEmbed endpoint is dead, the Graph replacement needs an App-Review-gated Meta
@@ -172,12 +193,31 @@ Two things that will eventually break, and what they look like when they do:
   `INSTAGRAM_DOC_ID` — a comma-separated list, tried in order, so a replacement can be
   rolled out without a deploy.
 - **Anonymous traffic is rate-limited**, harder from datacenter IPs than from a laptop. A
-  401 or 429 is reported as "try that link again shortly" rather than as a broken link, and
-  the CSRF token is seeded once per 10 minutes and shared by concurrent resolves rather
-  than fetched per request.
+  401 or 429 is now retried with backoff and a fresh CSRF token before it is reported at
+  all — throttling is Instagram's normal response to a datacenter IP, not an incident, and
+  taking the first refusal as final was costing reels that a second ask would have
+  returned. The token itself is seeded once per 10 minutes and shared by concurrent
+  resolves rather than fetched per request; the seed runs under its own deadline, so one
+  caller hanging up doesn't abort the load every other concurrent resolve is waiting on.
 
-Both failure modes end the same way for the user: the clip is dropped, a bracketed note
-explains why, and the answer proceeds from the link and caption alone.
+Both failure modes end the same way for the user: no video reaches the model, a bracketed
+note explains why, and the answer proceeds from what the post itself said.
+
+**When the download fails but the post resolved.** The resolve step returns the caption,
+the creator and the duration — so a clip whose CDN link expired between resolving and
+downloading is described rather than dropped, and the note carries both the caption and the
+reason the video is missing. On short-form political content the caption is frequently the
+claim and the video is B-roll, which makes this a much better answer than "that link
+couldn't be attached". An expired signed URL (`403` from the CDN) is repaired first, by
+resolving the post again for a freshly signed one and downloading from that; the fallback
+is only reached if that fails too.
+
+**Clips are kept between turns.** Every turn replays the whole conversation, and each clip
+is re-attached at its first mention, so before this a thread about one reel re-resolved and
+re-downloaded it on every follow-up question. A downloaded clip is now held for ten minutes
+in process memory, bounded by `CLIP_CACHE_MAX_BYTES` and evicted oldest-first. The whole
+clip stage also runs under a two-minute budget: past it, the remaining links become notes
+rather than holding the request open.
 
 ## Tests
 

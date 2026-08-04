@@ -165,9 +165,18 @@ message. A private, deleted or region-blocked post renders a valid page with no
 
 - **Short links.** `vm.tiktok.com/…`, `vt.tiktok.com/…` and `/t/…` carry no ID; the
   resolver follows the redirect and reads the canonical URL.
-- **Photo carousels.** `/@user/photo/<id>` is a real post with no video. Declined up front
-  as `notAMediaURL`, so the user is told it isn't a video rather than getting a confusing
-  upstream error.
+- **Photo carousels.** `/@user/photo/<id>` is declined up front as `notAMediaURL`, so the
+  user is told it isn't a video rather than getting a confusing upstream error.
+
+  **This is now a divergence from `web/`, and an accepted one** — `Sources/` is frozen, see
+  the [README](../README.md#web-is-canonical-sources-is-frozen-not-a-second-target).
+  `web/lib/tiktok.js` reads photo posts as of 2026-08-04: the slides are at
+  `videoData.imagePostInfo.displayImages[]` on the same embed page, and they reach the model
+  as one image part each. It also stopped treating the path as a type signal, because it
+  isn't one: TikTok serves `/video/<id>` and `/photo/<id>` interchangeably for the same
+  post, so this rule drops real videos as well as slideshows. Anyone reading the Swift
+  resolver should know both halves are stale rather than assume this is still the platform's
+  shape.
 - **Unknown IDs return HTTP 400 from the embed endpoint, not 404** (verified live).
   Translated to `notAMediaURL`.
 - **Size.** `generateContent` caps a request at 20 MB and base64 costs a third on top, so

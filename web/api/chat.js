@@ -143,10 +143,12 @@ export default async function handler(req, res) {
       // lib/guard.js and DEFAULT_ANSWER_HOLD_MS in lib/gemini.js for the trade it makes.
       answerHoldMs: limits.answerHoldMs,
       signal: controller.signal,
-      // Every TikTok/Instagram fetch this turn makes gets a random pre-request pause —
-      // see `jitterDelay` in lib/tiktok.js. Off by default (the test suite depends on
-      // that); this is the one real request path, so it opts in explicitly.
-      clipOptions: { jitter: true },
+      // Off by default in the library, opted into here: this is process-global state
+      // shared across requests on a warm instance, keeps a downloaded clip for the next
+      // turn of the same conversation instead of pulling the same MP4 off the CDN again on
+      // every follow-up question — see `CLIP_CACHE_TTL_MS` in lib/gemini.js — and switching
+      // it on is a deployment decision made here rather than imposed on every caller.
+      clipOptions: { cache: true },
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);

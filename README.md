@@ -64,7 +64,9 @@ frozen means:
 |---|---|---|---|
 | **YouTube** | Gemini native URL ingestion | Working | Working |
 | **TikTok** | embed page → CDN MP4 → Gemini Flash | Working | Working — Gemini leg needs a key to confirm |
+| **TikTok photo mode** | embed page → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
 | **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
+| **Instagram images/carousels** | post query → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
 
 Only platforms that can actually be served get registered, so an Instagram link shared
 *to the Swift app* gets an honest "not supported yet" rather than an empty result. The web
@@ -119,6 +121,36 @@ way rather than being ported. Verified live on 2026-08-02 against three public r
 6.2 MB and 9.9 MB `video/mp4`, no credential.
 [docs/SPIKE-instagram.md](docs/SPIKE-instagram.md)
 
+### Photo posts are posts too
+
+Both platforms' image formats used to be dropped on the floor. A TikTok `/photo/` URL
+wasn't recognised as a link the app could do anything with, and an Instagram carousel of
+stills was declined by name — *"that's a carousel of stills, there's no video to fetch."*
+
+That threw away the platforms' most claim-dense format. A screenshot dump, a text-card
+slideshow or an infographic carousel carries its whole argument in the images, with none of
+the B-roll padding a video has, and is exactly the thing somebody pastes in to be checked.
+Both now resolve to their stills, which reach the model as one image part per slide, in
+post order, labelled as an ordered set so it doesn't read them as unrelated pictures — or
+as frames of a video it watched.
+
+Verified live on 2026-08-04. TikTok's slides live at `videoData.imagePostInfo.displayImages[]`
+on the same embed route the video path already uses — note that is *not* the `imagePost` key
+TikTok's own Content Posting API documents, which is a different serialisation of the same
+post. Instagram's come from `display_url` on each `XDTGraphImage`, from the query that
+already fetches reels. Neither needs a new endpoint or a credential.
+
+Two things fell out of doing it:
+
+- **A `/photo/` URL was never a type signal.** TikTok serves `/video/<id>` and `/photo/<id>`
+  interchangeably for the same post — `/@memezar/photo/7449708266168274208` is an ordinary
+  video — so reading the path as the content was costing real videos, not just slideshows.
+  Only the payload decides now.
+- **A carousel is capped, and says so.** Both platforms allow 35 slides; twelve are attached
+  and the remainder is named in the prompt, because every slide is an image the model is
+  billed to read. A slide that fails to download is skipped rather than failing the post —
+  eleven of twelve still says most of what a slideshow says, where half a video says nothing.
+
 ## What the media path refuses to do
 
 Three guarantees on the `directMediaFetch` arm, all of which the web app had first and the
@@ -148,6 +180,69 @@ model, and the newest model in the chain is the one most likely to be overloaded
 model instead of failing the request. A bare `500` with no overload wording still doesn't:
 that is an outage, and walking the chain through one adds four more failed requests to a
 service already in trouble.
+
+## What the clip path now survives
+
+`TikTokError` and `InstagramError` have always sorted their failures into "this link will
+never work" and "try again". Only the first half was acted on: the `retryable` flag was
+read once, to decide how to word a note, and nothing ever tried again. Four things changed
+in `web/`, and `Sources/` is frozen rather than owed a backport.
+
+**A transient refusal is no longer the answer.** `web/lib/retry.js` mirrors
+`RetryPolicy.swift` — exponential backoff with full jitter, a per-delay cap, and a budget
+on the whole step — and both platforms' network steps run through it. A `429` from
+Instagram's GraphQL endpoint is its normal response to anonymous datacenter traffic rather
+than an incident, and it was costing the user their reel on first contact. `Retry-After` is
+believed when the server sends one. A *decision* is still never repeated: a private post, a
+photo carousel, a deleted video and a rotated `doc_id` are answers, and asking twice only
+doubles the bill.
+
+**A transfer that stops has a deadline.** `fetchWithTimeout` disarmed at the response
+headers — it cleared its timer and unsubscribed from the caller's signal the moment a
+response object existed — so the part that actually takes time, pulling 40 MB off a CDN,
+ran with no deadline and nothing upstream able to interrupt it. `fetchStream` keeps both
+armed until the body has been read, and `readCapped` additionally gives up on a transfer
+that has gone quiet, which is faster than waiting out the full media timeout to learn the
+same thing.
+
+**An expired URL is repaired rather than reported.** The CDN links both platforms hand back
+are signed and short-lived, and a `403` on one means the clock ran out, not that the link
+is bad — so retrying the same dead URL is the one retry that cannot work. It is classified
+as its own kind, the platform modules skip it, and `resolveClipParts` resolves the post
+again for a freshly signed URL and downloads from that. Once: a second expiry in the same
+breath is not a clock problem.
+
+**A clip that can't be downloaded is described, not dropped.** Resolving a post already
+returns its caption, creator and duration — that *is* what the query returns — so a failed
+download no longer costs the whole link. The model gets the caption and the reason the
+video is missing in one note, which matters most on short-form political content, where the
+caption is frequently the claim and the video is B-roll. Instagram had no fallback at all
+before this; its oEmbed needs a Meta App Review token, so a reel whose download failed was
+simply lost.
+
+## What the clip path no longer re-does
+
+Gemini has no memory between requests, so every turn replays the whole conversation and
+re-attaches each clip at its first mention. That much is unavoidable — the bytes have to be
+in the request body or the model can't see the video it is being asked about. What was
+avoidable is where the bytes came from: a ten-turn thread about one TikTok resolved that
+post and pulled the same MP4 off the CDN ten times, so every follow-up question paid the
+full resolve-and-download wait again before a token could be produced.
+
+`web/lib/gemini.js` now keeps a downloaded clip for ten minutes, bounded by
+`CLIP_CACHE_MAX_BYTES` (one maximum-sized clip's worth by default, which is around ten
+typical ones) and evicted oldest-first. It is process-global and shared across requests on a
+warm instance, so it is off in the library and switched on by `api/chat.js`, where
+deployment decisions are made. A smaller cut came with it: the whole clip stage now runs
+under a budget, so one hung platform can't hold a request open.
+
+**The anti-cadence jitter shipped in the compliance pass has been removed.** TikTok's fetch
+path briefly paused a random amount before every request, on the theory that a fixed cadence
+is a bot signature. It added latency to every real request for a benefit that was never
+measured against how TikTok actually rate-limits, so it's gone — retries still use full
+jitter in their backoff (`web/lib/retry.js`), which is a different, better-justified thing:
+that jitter exists to keep clustered retries from reconverging on the same instant, not to
+disguise request timing.
 
 ## Two things to action
 
@@ -179,6 +274,7 @@ web/                       The fact-checker. Static front end, Gemini key server
   lib/gemini-files.js      ⟷ Sources/SeerCore/Gemini/GeminiFilesClient.swift
   lib/gemini.js            ⟷ Sources/SeerCore/Gemini/GeminiVideoClient.swift
   lib/media-fetch.js       ⟷ Sources/SeerCore/Media/MediaDownloader.swift
+  lib/retry.js             ⟷ Sources/SeerCore/Networking/RetryPolicy.swift
   lib/instagram.js         no Swift counterpart — the unported resolver
   lib/search.js            no Swift counterpart — research, citations, verdicts
   lib/verified-chat.js     ⌟
@@ -195,7 +291,7 @@ route that holds the key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 66 tests, no network
+npm test                               # 303 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to

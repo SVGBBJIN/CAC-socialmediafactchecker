@@ -11,6 +11,7 @@ import {
   isTikTokLink,
   resolveTikTokVideo,
   downloadTikTokMedia,
+  downloadTikTokImages,
   fetchTikTokOEmbed,
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
@@ -19,6 +20,7 @@ import {
   isInstagramLink,
   resolveInstagramVideo,
   downloadInstagramMedia,
+  downloadInstagramImages,
 } from "./instagram.js";
 import { uploadFile, deleteFile } from "./gemini-files.js";
 import {
@@ -537,6 +539,10 @@ export const CLIP_PROVIDERS = [
     matches: isTikTokLink,
     resolve: resolveTikTokVideo,
     download: downloadTikTokMedia,
+    // Photo-mode posts: a slideshow of stills rather than a clip. Which one a link turns
+    // out to be is decided by the payload, not the URL, so both downloaders hang off every
+    // provider and `resolveClipParts` picks between them per post.
+    downloadImages: downloadTikTokImages,
     // TikTok's oEmbed carries no video (see lib/tiktok.js), only a title, author and
     // thumbnail — but that's still worth handing the model when the real download fails.
     // Instagram has no equivalent: its oEmbed needs a Meta App Review token we don't have.
@@ -548,6 +554,7 @@ export const CLIP_PROVIDERS = [
     matches: isInstagramLink,
     resolve: resolveInstagramVideo,
     download: downloadInstagramMedia,
+    downloadImages: downloadInstagramImages,
   },
 ];
 
@@ -605,6 +612,115 @@ export const MAX_CLIP_ATTACHMENTS = 2;
 /** Captions are user-authored and can run long; this is context, not the payload. */
 const MAX_CAPTION_CHARS = 500;
 
+/* ---------------- Clip cache ---------------- */
+
+/**
+ * How long a downloaded clip is kept for the next turn of the same conversation.
+ *
+ * Gemini has no memory between requests, so every turn replays the whole history — and
+ * `toGeminiContents` re-attaches each clip at its first mention, which is a *historical*
+ * message. That is correct and unavoidable: the bytes have to be in the request body every
+ * time, or the model can't see the video it is being asked about. What was avoidable is
+ * where the bytes came from. A ten-turn thread about one TikTok resolved that post and
+ * pulled the same MP4 off the CDN ten times, so every follow-up question — "what did she
+ * say at the end?" — paid the full resolve-and-download wait again before a single token
+ * could be produced, and spent ten downloads of somebody else's bandwidth to do it.
+ *
+ * Ten minutes covers a conversation while it is happening and expires long before the clip
+ * is stale in any way a fact-check would notice.
+ */
+export const CLIP_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Ceiling on everything held at once, in bytes.
+ *
+ * This is a serverless function with a fixed memory allowance, and a download already
+ * costs its own size plus a base64 copy while a request is in flight. So the cache gets
+ * roughly one maximum-sized clip's worth — which is around ten typical ones, since short
+ * form video is a few MB — and the oldest entries are dropped to stay under it rather than
+ * the newest refused. Set `CLIP_CACHE_MAX_BYTES=0` to turn the cache off entirely.
+ */
+export const CLIP_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+
+export function clipCacheLimitFromEnv(env = process.env) {
+  const raw = Number(env?.CLIP_CACHE_MAX_BYTES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : CLIP_CACHE_MAX_BYTES;
+}
+
+/**
+ * Keyed by link text, not by video ID.
+ *
+ * The video ID isn't known until the post has been resolved, and resolving is half of what
+ * the cache exists to skip — a share link costs a redirect plus an embed read before
+ * anything identifies the video. The link text is what the next turn replays verbatim, so
+ * it is the key that is actually available when the question is asked. Two different links
+ * to one video still download once: that dedupe happens by video ID, after resolution,
+ * where it always did.
+ *
+ * Insertion order is the eviction order, and a hit re-inserts, which makes this an LRU
+ * without a second structure to keep in step.
+ */
+const clipCache = new Map();
+let clipCacheBytes = 0;
+
+/** Drops everything cached. Exported for tests, and for a caller that wants a cold read. */
+export function resetClipCache() {
+  clipCache.clear();
+  clipCacheBytes = 0;
+}
+
+/** What a cached entry costs, whichever kind of post it holds. */
+function mediaBytes(media) {
+  return media.kind === "images"
+    ? media.slides.reduce((total, slide) => total + slide.bytes.length, 0)
+    : media.bytes.length;
+}
+
+function clipCacheGet(key) {
+  const hit = clipCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    clipCache.delete(key);
+    clipCacheBytes -= hit.size;
+    return null;
+  }
+  // Re-insert so the most recently used entry is the last to be evicted.
+  clipCache.delete(key);
+  clipCache.set(key, hit);
+  return hit;
+}
+
+function clipCachePut(key, { resolved, media }, maxBytes, ttlMs) {
+  const size = mediaBytes(media);
+  if (maxBytes <= 0 || size > maxBytes) return;
+
+  const existing = clipCache.get(key);
+  if (existing) {
+    clipCache.delete(key);
+    clipCacheBytes -= existing.size;
+  }
+  clipCache.set(key, { resolved, media, size, expiresAt: Date.now() + ttlMs });
+  clipCacheBytes += size;
+
+  for (const [oldest, entry] of clipCache) {
+    if (clipCacheBytes <= maxBytes) break;
+    if (oldest === key) break;
+    clipCache.delete(oldest);
+    clipCacheBytes -= entry.size;
+  }
+}
+
+/**
+ * Longest the whole clip stage may run before the request gives up on it.
+ *
+ * Retrying makes a slow failure slower, which is the trade it exists to make — but not
+ * without a ceiling. Past this the remaining clip work is abandoned and each unfinished
+ * link becomes a note, so the user gets an answer about what they typed rather than a
+ * request that never returns. Generous, because a legitimate 40 MB reel on a bad
+ * connection is allowed to take its time.
+ */
+export const CLIP_BUDGET_MS = 120_000;
+
 /**
  * Resolve every clip link in the conversation to a Gemini part.
  *
@@ -637,14 +753,21 @@ export async function resolveClipParts(
     providers = CLIP_PROVIDERS,
     resolveImpl = null,
     downloadImpl = null,
+    downloadImagesImpl = null,
     uploadImpl = uploadFile,
     deleteImpl = deleteFile,
-    // Off by default so the test suite stays instant; the API routes opt in. See
-    // `jitterDelay` in lib/tiktok.js for why this exists at all.
-    jitter = false,
     sleepImpl,
+    budgetMs = CLIP_BUDGET_MS,
+    // Off by default, and opted into by the API route: this is process-global state shared
+    // by every request a warm instance handles, and a test that stubs the network must not
+    // quietly be answered from a previous test's download. Turning it on is a deployment
+    // decision, so it is made where deployments are configured. See `CLIP_CACHE_TTL_MS`.
+    cache = false,
+    cacheTTLMs = CLIP_CACHE_TTL_MS,
+    cacheMaxBytes = clipCacheLimitFromEnv(),
   } = {},
 ) {
+  const caching = Boolean(cache) && cacheTTLMs > 0 && cacheMaxBytes > 0;
   const attachments = new Map();
   const uploads = [];
   // Together rather than one after another. This is awaited in `streamChat`'s `finally`,
@@ -669,100 +792,233 @@ export async function resolveClipParts(
   }
   if (links.length === 0) return { attachments, cleanup, providers };
 
-  // Resolving is metadata only — following a share link's redirect, reading an embed page
-  // or running Instagram's post query — not the download itself, so every link is resolved
-  // at once rather than one after another. With the usual two-link paste this halves the
-  // wait before either download can even start.
-  const resolutions = await Promise.all(
-    links.map(async ({ link, provider }) => {
-      try {
-        const resolve = resolveImpl ?? provider.resolve;
-        return { link, provider, resolved: await resolve(link, { fetchImpl, signal, jitter, sleepImpl }) };
-      } catch (error) {
-        return { link, provider, error: error?.message || "the video could not be fetched" };
-      }
-    }),
-  );
+  // A deadline of our own, on top of whatever the caller's signal already carries. Linked
+  // rather than replacing it, so a browser that disconnects still stops the work at once
+  // and the two reasons for stopping stay tellable apart below.
+  const budget = new AbortController();
+  const onCallerAbort = () => budget.abort();
+  if (signal?.aborted) budget.abort();
+  else signal?.addEventListener("abort", onCallerAbort, { once: true });
+  const budgetTimer = budgetMs ? setTimeout(() => budget.abort(), budgetMs) : null;
+  const releaseBudget = () => {
+    if (budgetTimer) clearTimeout(budgetTimer);
+    signal?.removeEventListener("abort", onCallerAbort);
+  };
+  // The caller's signal says "nobody is waiting any more"; ours says "this took too long".
+  // Only the second is worth writing into the prompt, and it needs saying in words the
+  // model can use rather than as a raw AbortError.
+  const outOfTime = () => budget.signal.aborted && !signal?.aborted;
+  const describeFailure = (error) =>
+    outOfTime()
+      ? "it took too long to fetch"
+      : error?.message || "the video could not be fetched";
 
-  // Which distinct videos are worth downloading, decided in link order now that every
-  // link's video ID is known. A share link and the canonical URL it redirects to are the
-  // same video — caught here rather than by URL, because that equality is only knowable
-  // after the redirect has been followed — so this is also where the cap is enforced,
-  // against distinct videos rather than distinct links. Keyed by platform as well as ID,
-  // since two platforms' ID spaces are unrelated and only look alike.
-  const byVideoID = new Map();
-  const toDownload = [];
-  for (const { link, provider, resolved, error } of resolutions) {
-    if (error) {
-      attachments.set(link, { platform: provider.platform, error });
-      continue;
+  const clipOptions = { fetchImpl, signal: budget.signal, sleepImpl };
+
+  try {
+    // What we already have from an earlier turn of this conversation. Checked before any
+    // network call: a follow-up question about a clip should not re-resolve and re-download
+    // it just because the history that mentions it is replayed on every request.
+    const cached = new Map();
+    for (const found of links) {
+      const hit = caching ? clipCacheGet(`${found.provider.platform}:${found.link}`) : null;
+      if (hit) cached.set(found.link, hit);
     }
-    const key = `${provider.platform}:${resolved.videoID}`;
-    const existing = byVideoID.get(key);
-    if (existing) {
-      attachments.set(link, existing);
-      continue;
+
+    // Resolving is metadata only — following a share link's redirect, reading an embed page
+    // or running Instagram's post query — not the download itself, so every link is resolved
+    // at once rather than one after another. With the usual two-link paste this halves the
+    // wait before either download can even start.
+    const resolutions = await Promise.all(
+      links.map(async ({ link, provider }) => {
+        const hit = cached.get(link);
+        if (hit) return { link, provider, resolved: hit.resolved, cached: hit };
+        try {
+          const resolve = resolveImpl ?? provider.resolve;
+          return { link, provider, resolved: await resolve(link, clipOptions) };
+        } catch (error) {
+          return { link, provider, error: describeFailure(error) };
+        }
+      }),
+    );
+
+    // Which distinct videos are worth downloading, decided in link order now that every
+    // link's video ID is known. A share link and the canonical URL it redirects to are the
+    // same video — caught here rather than by URL, because that equality is only knowable
+    // after the redirect has been followed — so this is also where the cap is enforced,
+    // against distinct videos rather than distinct links. Keyed by platform as well as ID,
+    // since two platforms' ID spaces are unrelated and only look alike.
+    const byVideoID = new Map();
+    const toDownload = [];
+    for (const { link, provider, resolved, error, cached: hit } of resolutions) {
+      if (error) {
+        attachments.set(link, { platform: provider.platform, error });
+        continue;
+      }
+      const key = `${provider.platform}:${resolved.videoID}`;
+      const existing = byVideoID.get(key);
+      if (existing) {
+        attachments.set(link, existing);
+        continue;
+      }
+      if (byVideoID.size >= maxAttachments) {
+        attachments.set(link, {
+          platform: provider.platform,
+          error: `only the first ${maxAttachments} ${provider.platform} video${
+            maxAttachments === 1 ? "" : "s"
+          } in a message are fetched`,
+        });
+        continue;
+      }
+      const entry = { videoID: key, platform: provider.platform, provider, resolved, link };
+      // A cache hit already has the bytes; it still goes through the download phase, which
+      // is where bytes become parts (inline, or an upload past the ceiling) — it just
+      // doesn't touch the network to get them.
+      if (hit) entry.media = { ...hit.media, fromCache: true };
+      byVideoID.set(key, entry);
+      attachments.set(link, entry);
+      toDownload.push(entry);
     }
-    if (byVideoID.size >= maxAttachments) {
-      attachments.set(link, {
-        platform: provider.platform,
-        error: `only the first ${maxAttachments} ${provider.platform} video${
-          maxAttachments === 1 ? "" : "s"
-        } in a message are fetched`,
-      });
-      continue;
-    }
-    const entry = { videoID: key, platform: provider.platform, provider, resolved };
-    byVideoID.set(key, entry);
-    attachments.set(link, entry);
-    toDownload.push(entry);
+
+    if (signal?.aborted || toDownload.length === 0) return { attachments, cleanup, providers };
+
+    // The downloads (and any upload past the inline limit) run together too — this is the
+    // slow part of attaching a clip, and the part most worth overlapping. A failure is
+    // recorded on the entry itself, which every link sharing that video already points at,
+    // so a duplicate link never re-attempts a download its twin just watched fail.
+    await Promise.all(
+      toDownload.map(async (entry) => {
+        try {
+          const media = entry.media ?? (await fetchClipMedia(entry));
+          delete entry.media;
+          if (!media.fromCache && caching) {
+            clipCachePut(
+              `${entry.platform}:${entry.link}`,
+              { resolved: entry.resolved, media },
+              cacheMaxBytes,
+              cacheTTLMs,
+            );
+          }
+
+          if (media.kind === "images") {
+            // Every slide rides inline. A whole photo post is a few hundred KB to a couple
+            // of MB — nowhere near the ceiling one video hits — so there is no Files API
+            // branch here, and each still is its own part because that is how the model
+            // reads a sequence as a sequence.
+            entry.parts = media.slides.map((slide) => ({
+              inline_data: { mime_type: slide.mimeType, data: slide.bytes.toString("base64") },
+            }));
+            entry.slideCount = media.slides.length;
+            entry.truncated = media.truncated ?? 0;
+          } else if (media.bytes.length <= inlineByteLimit) {
+            entry.part = {
+              inline_data: { mime_type: media.mimeType, data: media.bytes.toString("base64") },
+            };
+          } else {
+            const file = await uploadImpl(media.bytes, media.mimeType, {
+              apiKey,
+              fetchImpl,
+              signal: budget.signal,
+            });
+            uploads.push(file);
+            entry.part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
+          }
+          // Bytes live in `media`, the upload above and — for the next turn of this
+          // conversation — the clip cache, which is bounded and expires. Nothing here writes
+          // them anywhere durable, so the only thing left to clean up is the Files API
+          // upload `cleanup()` already tracks.
+        } catch (error) {
+          if (signal?.aborted) return;
+          delete entry.media;
+          entry.error = describeFailure(error);
+          await fallBackToMetadata(entry);
+        }
+      }),
+    );
+
+    return { attachments, cleanup, providers };
+  } finally {
+    releaseBudget();
   }
 
-  if (signal?.aborted || toDownload.length === 0) return { attachments, cleanup, providers };
-
-  // The downloads (and any upload past the inline limit) run together too — this is the
-  // slow part of attaching a clip, and the part most worth overlapping. A failure is
-  // recorded on the entry itself, which every link sharing that video already points at,
-  // so a duplicate link never re-attempts a download its twin just watched fail.
-  await Promise.all(
-    toDownload.map(async (entry) => {
-      try {
+  /**
+   * The post's bytes — one clip, or a set of stills — with one repair built in.
+   *
+   * A CDN that answers 403 is almost never refusing *us* — it is refusing a signed URL
+   * that has since expired, which is a thing that happens by the clock rather than by
+   * anything about the link. Asking the same dead URL again cannot fix it (which is why
+   * the platform modules don't bother retrying an `expired` in place), but resolving the
+   * post again yields a freshly signed one, and that does. Once only: a second expiry in
+   * the same second is not a clock problem.
+   *
+   * Photo posts sign their slides the same way, so the same repair covers them: the
+   * re-resolve returns a fresh set of URLs and the whole set is fetched again.
+   */
+  async function fetchClipMedia(entry) {
+    const fetchFor = (resolved) => {
+      if (resolved?.kind !== "images") {
         const download = downloadImpl ?? entry.provider.download;
-        const { bytes, mimeType } = await download(entry.resolved, { fetchImpl, signal, jitter, sleepImpl });
-        if (bytes.length <= inlineByteLimit) {
-          entry.part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
-        } else {
-          const file = await uploadImpl(bytes, mimeType, { apiKey, fetchImpl, signal });
-          uploads.push(file);
-          entry.part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
-        }
-        // Bytes live only in `bytes`/the upload above; nothing here writes them anywhere
-        // durable, so once this closure returns there's nothing left to clean up but the
-        // Files API upload `cleanup()` already tracks.
-      } catch (error) {
-        if (signal?.aborted) return;
-        entry.error = error?.message || "the video could not be fetched";
-
-        // The signed CDN URL from the embed page is short-lived and sometimes already
-        // dead by the time we get here, or the CDN host has moved. Rather than lose the
-        // clip entirely, fall back to whatever public metadata the platform's oEmbed
-        // still hands an anonymous request.
-        const oEmbed = entry.provider.oEmbed;
-        if (!oEmbed) return;
-        try {
-          const meta = await oEmbed(entry.resolved.sourceURL, { fetchImpl, signal, jitter, sleepImpl });
-          if (meta) {
-            entry.metadataOnly = meta;
-            delete entry.error;
-          }
-        } catch {
-          // Best-effort: the download error already recorded above stands.
-        }
+        return download(resolved, clipOptions).then((media) => ({ kind: "video", ...media }));
       }
-    }),
-  );
+      const download = downloadImagesImpl ?? entry.provider.downloadImages;
+      if (!download) {
+        throw new Error(`${entry.platform} image posts aren't supported here`);
+      }
+      return download(resolved, clipOptions).then((set) => ({ kind: "images", ...set }));
+    };
 
-  return { attachments, cleanup, providers };
+    try {
+      return await fetchFor(entry.resolved);
+    } catch (error) {
+      if (error?.kind !== "expired" || signal?.aborted || budget.signal.aborted) throw error;
+      const resolve = resolveImpl ?? entry.provider.resolve;
+      // If re-resolving fails, the expiry is the more useful of the two errors to report:
+      // it is the one that says what actually went wrong with the download.
+      let fresh;
+      try {
+        fresh = await resolve(entry.resolved.sourceURL, clipOptions);
+      } catch {
+        throw error;
+      }
+      entry.resolved = fresh;
+      return fetchFor(fresh);
+    }
+  }
+
+  /**
+   * A clip we couldn't download, described rather than dropped.
+   *
+   * Two sources, cheapest first. The resolve step already came back with the caption, the
+   * creator and the duration — that is what the post query *is* — so a failed download
+   * does not mean a failed link, and reaching for that costs nothing and needs no network
+   * call. Instagram has nothing else: its oEmbed needs a Meta App Review token, so before
+   * this a reel whose CDN URL had expired was simply lost. Only when the resolve itself
+   * carried nothing worth saying is the platform's oEmbed asked, which is TikTok's case
+   * and the older path.
+   *
+   * Either way the entry keeps no video part: this is text standing in for a clip the
+   * model can't watch, and `describeOEmbedFallback` says so in as many words.
+   */
+  async function fallBackToMetadata(entry) {
+    const resolved = entry.resolved;
+    if (resolved?.caption || resolved?.authorName) {
+      entry.metadataOnly = {
+        title: resolved.caption ?? null,
+        authorName: resolved.authorName ?? null,
+        thumbnailURL: null,
+      };
+      return;
+    }
+
+    const oEmbed = entry.provider.oEmbed;
+    if (!oEmbed || budget.signal.aborted) return;
+    try {
+      const meta = await oEmbed(resolved?.sourceURL ?? entry.link, clipOptions);
+      if (meta) entry.metadataOnly = meta;
+    } catch {
+      // Best-effort: the download error already recorded above stands.
+    }
+  }
 }
 
 /**
@@ -773,13 +1029,29 @@ export async function resolveClipParts(
  * folded into the user's text, so the model can attribute it — the same distinction
  * `DirectMediaExtractor.mergeOnScreenText` draws on the Swift side.
  */
-function describeClip(resolved, platform) {
+function describeClip(resolved, platform, entry = {}) {
   if (!resolved) return null;
   const facts = [];
+
+  // A photo post's parts are stills in slide order, and saying so is what stops the model
+  // reading them as unrelated pictures — or as frames of a video it watched. The count is
+  // the number actually attached, and a truncated post says so rather than leaving the
+  // model to assume it has seen all of it.
+  const images = resolved.kind === "images";
+  if (images) {
+    const attached = entry.slideCount ?? resolved.slideCount ?? 0;
+    const total = attached + (entry.truncated ?? 0);
+    facts.push(
+      total > attached
+        ? `${attached} of its ${total} images, in order`
+        : `${attached} image${attached === 1 ? "" : "s"}, in order`,
+    );
+  }
   if (resolved.authorName) facts.push(`posted by ${resolved.authorName}`);
   if (resolved.duration) facts.push(`${Math.round(resolved.duration)}s`);
 
-  const header = `[Attached: the ${platform} video from ${resolved.sourceURL}${
+  const what = images ? `${platform} photo post` : `${platform} video`;
+  const header = `[Attached: the ${what} from ${resolved.sourceURL}${
     facts.length ? ` — ${facts.join(", ")}` : ""
   }.]`;
   if (!resolved.caption) return header;
@@ -789,14 +1061,21 @@ function describeClip(resolved, platform) {
 }
 
 /**
- * The note for a clip that couldn't be downloaded but has an oEmbed fallback — see the
- * `oEmbed` catch in `resolveClipParts`. No video part goes with this: it's text standing
- * in for a clip the model can't watch, not a description of one it can.
+ * The note for a clip that couldn't be downloaded but has metadata standing in for it —
+ * see `fallBackToMetadata` in `resolveClipParts`. No video part goes with this: it's text
+ * standing in for a clip the model can't watch, not a description of one it can.
+ *
+ * The download's own error rides along in the header rather than being dropped once a
+ * fallback is found. Both halves are worth having: what the post says is the substance,
+ * and *why* the video is missing is what stops the model from treating a caption as though
+ * it had watched the clip — and what tells the user whether their link is broken or the
+ * platform is simply having a bad minute.
  */
-function describeOEmbedFallback(meta, platform, link) {
+function describeOEmbedFallback(meta, platform, link, reason) {
   const facts = [];
   if (meta.authorName) facts.push(`posted by ${meta.authorName}`);
-  const header = `[The ${platform} video at ${link} could not be downloaded, but its public ` +
+  const why = reason ? ` (${reason.replace(/\.\s*$/, "")})` : "";
+  const header = `[The ${platform} video at ${link} could not be downloaded${why}, but its public ` +
     `listing says${facts.length ? ` (${facts.join(", ")})` : ""}:]`;
   const title = meta.title ? `[Title/caption: ${meta.title.slice(0, MAX_CAPTION_CHARS)}]` : null;
   return title ? `${header}\n${title}` : header;
@@ -871,7 +1150,10 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
         const entry = attachments.get(link);
         if (!entry) continue;
         const platform = entry.platform ?? provider.platform;
-        if (entry.error) {
+        // A failure with metadata behind it is reported as the metadata, not as the
+        // failure: the caption and creator are the part the model can still reason about,
+        // and the reason the video is missing rides in the same note.
+        if (entry.error && !entry.metadataOnly) {
           // Most reasons are already written as sentences; don't punctuate them twice.
           const reason = entry.error.replace(/\.\s*$/, "");
           notes.push(`[The ${platform} video at ${link} could not be attached: ${reason}.]`);
@@ -880,13 +1162,15 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
         if (attachedClips.has(entry.videoID)) continue;
         attachedClips.add(entry.videoID);
         if (entry.metadataOnly) {
-          // The download failed and there's no oEmbed part to attach — the model gets a
-          // caption and creator instead of a video it can watch.
-          notes.push(describeOEmbedFallback(entry.metadataOnly, platform, link));
+          // The download failed and there's no video part to attach — the model gets a
+          // caption and creator instead of a clip it can watch.
+          notes.push(describeOEmbedFallback(entry.metadataOnly, platform, link, entry.error));
           continue;
         }
-        parts.push(entry.part);
-        const context = describeClip(entry.resolved, platform);
+        // One part for a clip, one per slide for a photo post.
+        if (entry.parts) parts.push(...entry.parts);
+        else parts.push(entry.part);
+        const context = describeClip(entry.resolved, platform, entry);
         if (context) notes.push(context);
       }
     }

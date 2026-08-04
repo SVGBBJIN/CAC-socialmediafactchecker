@@ -29,7 +29,16 @@ import {
   DEFAULT_ANSWER_HOLD_MS,
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
+  resetClipCache,
 } from "./lib/gemini.js";
+import {
+  withRetry,
+  backoffDelay,
+  // `retryAfterMs` is also the name of gemini.js's own Gemini-header reader, imported
+  // above. Different header, different layer, same job — aliased rather than renamed.
+  retryAfterMs as clipRetryAfterMs,
+} from "./lib/retry.js";
+import { readCapped, fetchStream, StalledTransferError } from "./lib/media-fetch.js";
 import {
   ModelHealth,
   planChain,
@@ -38,14 +47,16 @@ import {
   OVERLOAD_COOLDOWN_MS,
 } from "./lib/degradation.js";
 import {
-  tikTokVideoID,
+  tikTokPostID,
   isTikTokShortLink,
   findTikTokLinks,
   extractStateBlob,
   parseEmbedPage,
   resolveTikTokVideo,
   downloadTikTokMedia,
+  downloadTikTokImages,
   fetchTikTokOEmbed,
+  isTikTokLink,
   TikTokError,
 } from "./lib/tiktok.js";
 import {
@@ -1514,6 +1525,28 @@ const MEDIA_URL =
   "https://v16m.tiktokcdn-us.com/d838b2be25adb61a68f7fbe5d74e9f63/6a6ab84a/video/tos/" +
   "useast5/tos-useast5-ve-0068c002-tx/15fbafb086324317bf77a649580b1f95/?a=1233&mime_type=video_mp4";
 
+// The same, for a photo-mode post: captured on 2026-08-04 from
+// `https://www.tiktok.com/embed/v2/7553302113757990166`, again with only the signed query
+// strings shortened. Note `imagePostInfo` hangs off `videoData` beside `itemInfos` — it is
+// *not* the `imagePost` key TikTok's own Content Posting API documents, and each slide's
+// `urlList` is the same image on two mirror hosts rather than two slides.
+//
+// `itemInfos.video` is still present and still parses; it is simply empty. That is the
+// whole reason the parser checks for images first — a photo post does not announce itself
+// by the absence of a video field, only by the emptiness of one.
+const LIVE_PHOTO_BLOB =
+  `{"source":{"data":{"/embed/v2/7553302113757990166":{"videoData":{"itemInfos":` +
+  `{"id":"7553302113757990166","text":"","covers":["https://p16-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/76f8ef724f7c4ef1b27bc650393aa23c~tplv-photomode-image.jpeg"],` +
+  `"video":{"urls":[],"videoMeta":{"width":0,"height":0,"ratio":0,"duration":0}}},` +
+  `"authorInfos":{"nickName":"hullcity","uniqueId":"hullcity"},"imagePostInfo":{"displayImages":[` +
+  `{"height":824,"width":1290,"urlList":["https://p16-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/76f8ef724f7c4ef1b27bc650393aa23c~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED",` +
+  `"https://p19-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/76f8ef724f7c4ef1b27bc650393aa23c~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED"]},` +
+  `{"height":2470,"width":1440,"urlList":["https://p16-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/5ed8c94f94864d59a064b996fafe49d8~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED",` +
+  `"https://p19-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/5ed8c94f94864d59a064b996fafe49d8~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED"]}]}}}}}}`;
+
+const PHOTO_ID = "7553302113757990166";
+const PHOTO_SOURCE_URL = `https://www.tiktok.com/@hullcity/photo/${PHOTO_ID}`;
+
 /** The page wraps the blob in the same script tag the live one does. */
 function tikTokPage(blob = LIVE_STATE_BLOB) {
   return (
@@ -1566,21 +1599,30 @@ function resolvedClip(overrides = {}) {
 }
 
 test("recognizes TikTok URLs in every share format", () => {
-  assert.equal(tikTokVideoID(SOURCE_URL), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed/v2/${VIDEO_ID}`), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed/${VIDEO_ID}`), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://m.tiktok.com/v/${VIDEO_ID}.html`), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed?item_id=${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(SOURCE_URL), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/embed/v2/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/embed/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://m.tiktok.com/v/${VIDEO_ID}.html`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/embed?item_id=${VIDEO_ID}`), VIDEO_ID);
 });
 
-test("rejects photo carousels, non-video links and lookalike hosts", () => {
-  // A real post, but a slideshow of stills — there is no video to fetch.
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), null);
-  assert.equal(tikTokVideoID("https://www.tiktok.com/@scout2015"), null);
-  assert.equal(tikTokVideoID("https://www.tiktok.com/video/12"), null, "too short to be an ID");
-  assert.equal(tikTokVideoID(`https://tiktok.com.evil.test/video/${VIDEO_ID}`), null);
-  assert.equal(tikTokVideoID("https://youtube.com/watch?v=dQw4w9WgXcQ"), null);
-  assert.equal(tikTokVideoID("not a url"), null);
+test("a /photo/ URL names a post like any other — the path is not a type signal", () => {
+  // TikTok serves /video/<id> and /photo/<id> interchangeably for the same post, and which
+  // one a share sheet produces doesn't track what the post contains. Verified live on
+  // 2026-08-04: /@memezar/photo/7449708266168274208 is an ordinary video. Reading the path
+  // as a type was costing real videos, not just slideshows.
+  assert.equal(tikTokPostID(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/@memezar/photo/7449708266168274208`), "7449708266168274208");
+  assert.equal(isTikTokLink(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), true);
+});
+
+test("rejects non-post links and lookalike hosts", () => {
+  assert.equal(tikTokPostID("https://www.tiktok.com/@scout2015"), null);
+  assert.equal(tikTokPostID("https://www.tiktok.com/video/12"), null, "too short to be an ID");
+  assert.equal(tikTokPostID(`https://tiktok.com.evil.test/video/${VIDEO_ID}`), null);
+  assert.equal(tikTokPostID(`https://tiktok.com.evil.test/photo/${VIDEO_ID}`), null);
+  assert.equal(tikTokPostID("https://youtube.com/watch?v=dQw4w9WgXcQ"), null);
+  assert.equal(tikTokPostID("not a url"), null);
 });
 
 test("short links are recognised but carry no ID of their own", () => {
@@ -1590,7 +1632,7 @@ test("short links are recognised but carry no ID of their own", () => {
     "https://www.tiktok.com/t/ZTabcdef/",
   ]) {
     assert.equal(isTikTokShortLink(link), true, link);
-    assert.equal(tikTokVideoID(link), null, link);
+    assert.equal(tikTokPostID(link), null, link);
   }
   assert.equal(isTikTokShortLink(SOURCE_URL), false);
   assert.equal(isTikTokShortLink("https://vm.tiktok.com.evil.test/ZM1"), false);
@@ -1611,6 +1653,58 @@ test("parses the real embed payload", () => {
   assert.equal(clip.height, 1024);
   assert.equal(clip.authorName, "Scout, Suki & Stella");
   assert.match(clip.caption, /^Scramble up ur name/);
+  assert.equal(clip.kind, "video");
+});
+
+test("parses the real photo-mode payload", () => {
+  const post = parseEmbedPage(tikTokPage(LIVE_PHOTO_BLOB), {
+    videoID: PHOTO_ID,
+    sourceURL: PHOTO_SOURCE_URL,
+  });
+
+  assert.equal(post.kind, "images");
+  assert.equal(post.slideCount, 2);
+  assert.equal(post.mimeType, "image/jpeg");
+  assert.equal(post.authorName, "hullcity");
+  assert.equal(post.duration, null, "a slideshow has no duration");
+  assert.equal(post.mediaURL, undefined, "and no single media URL");
+
+  // One URL per slide, not one per mirror: `urlList` holds the same image twice, on
+  // p16- and p19-, and taking both would attach the post's first slide twice.
+  assert.equal(post.images.length, 2);
+  assert.match(post.images[0].url, /^https:\/\/p16-common-sign\.tiktokcdn-us\.com\//);
+  assert.match(post.images[1].url, /5ed8c94f94864d59a064b996fafe49d8/);
+  assert.equal(post.images[0].width, 1290);
+  assert.equal(post.images[0].height, 824);
+  // The pane's aspect ratio comes off the first slide.
+  assert.equal(post.width, 1290);
+});
+
+test("an empty itemInfos.video does not read as a broken video post", () => {
+  // A photo post still carries `itemInfos.video`, with `urls: []` and `duration: 0`. Read
+  // in the wrong order that looks exactly like a video whose sources are missing, which is
+  // what the old parser reported it as.
+  const post = parseEmbedPage(tikTokPage(LIVE_PHOTO_BLOB), {
+    videoID: PHOTO_ID,
+    sourceURL: PHOTO_SOURCE_URL,
+  });
+  assert.equal(post.kind, "images");
+});
+
+test("a post with neither a video nor images is unavailable, not a parse bug", () => {
+  const blob = JSON.stringify({
+    source: {
+      data: {
+        [`/embed/v2/${VIDEO_ID}`]: {
+          videoData: { itemInfos: { id: VIDEO_ID, video: { urls: [] } }, imagePostInfo: null },
+        },
+      },
+    },
+  });
+  assert.throws(
+    () => parseEmbedPage(tikTokPage(blob), { videoID: VIDEO_ID, sourceURL: SOURCE_URL }),
+    (error) => error instanceof TikTokError && error.kind === "unavailable",
+  );
 });
 
 test("the state blob is found even when a bootstrap reference comes first", () => {
@@ -1739,7 +1833,7 @@ test("the CDN's content type wins over the resolver's guess", async () => {
   assert.equal((await downloadTikTokMedia(resolvedClip(), { fetchImpl: generic })).mimeType, "video/mp4");
 });
 
-test("jitter is a no-op unless a caller opts in", async () => {
+test("a resolve fires its fetch immediately — no pre-request pause", async () => {
   const calls = [];
   const fetchImpl = async () => {
     calls.push(Date.now());
@@ -1747,18 +1841,7 @@ test("jitter is a no-op unless a caller opts in", async () => {
   };
   const start = Date.now();
   await resolveTikTokVideo(SOURCE_URL, { fetchImpl });
-  assert.ok(Date.now() - start < 100, "no jitter by default — the fetch should fire immediately");
-});
-
-test("jitter delays the request when a caller opts in, through an injected sleep", async () => {
-  const slept = [];
-  const sleepImpl = async (ms) => {
-    slept.push(ms);
-  };
-  const fetchImpl = async () => htmlResponse(tikTokPage());
-  await resolveTikTokVideo(SOURCE_URL, { fetchImpl, jitter: true, sleepImpl });
-  assert.equal(slept.length, 1);
-  assert.ok(slept[0] >= 150 && slept[0] <= 900, `jitter ${slept[0]}ms should land in [150, 900]`);
+  assert.ok(Date.now() - start < 100, "the fetch should fire immediately");
 });
 
 test("oEmbed reads title, author and thumbnail from TikTok's real endpoint", async () => {
@@ -1804,7 +1887,44 @@ test("oEmbed is best-effort — a failure returns null instead of throwing", asy
   );
 });
 
-test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", async () => {
+test("a dead CDN URL falls back to what the resolve already returned, without asking oEmbed", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  let oEmbedCalls = 0;
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        // A resolve that succeeded came back with the caption and the creator — that is
+        // what the embed page *is* — so the cheapest fallback needs no network call.
+        resolve: async () => resolvedClip(),
+        download: async () => {
+          throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", { kind: "expired", retryable: true });
+        },
+        oEmbed: async () => {
+          oEmbedCalls += 1;
+          return { title: "A caption", authorName: "scout2015", thumbnailURL: null };
+        },
+      },
+    ],
+  });
+
+  assert.equal(oEmbedCalls, 0, "the post's own metadata is already in hand");
+  const entry = clips.attachments.get(SOURCE_URL);
+  assert.ok(entry.metadataOnly);
+
+  const contents = toGeminiContents(messages, { clips });
+  assert.equal(contents[0].parts.length, 1, "no video part — only the fallback note");
+  assert.match(contents[0].parts[0].text, /could not be downloaded.*but its public listing says/);
+  assert.match(contents[0].parts[0].text, /Scout, Suki & Stella/);
+  assert.match(contents[0].parts[0].text, /Scramble up ur name/);
+  // Why the clip is missing rides in the same note: a caption is not a substitute for
+  // having watched the video, and the model is owed the difference.
+  assert.match(contents[0].parts[0].text, /CDN refused the download/);
+});
+
+test("a post that carried no metadata of its own falls back to the platform's oEmbed", async () => {
   const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
   const clips = await resolveClipParts(messages, {
     providers: [
@@ -1812,7 +1932,7 @@ test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", 
         platform: "TikTok",
         find: findTikTokLinks,
         matches: () => true,
-        resolve: async () => resolvedClip(),
+        resolve: async () => resolvedClip({ caption: null, authorName: null }),
         download: async () => {
           throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", { retryable: true });
         },
@@ -1821,18 +1941,13 @@ test("a dead CDN URL falls back to oEmbed metadata instead of losing the clip", 
     ],
   });
 
-  const entry = clips.attachments.get(SOURCE_URL);
-  assert.equal(entry.error, undefined, "the oEmbed fallback clears the download error");
-  assert.ok(entry.metadataOnly);
-
   const contents = toGeminiContents(messages, { clips });
   assert.equal(contents[0].parts.length, 1, "no video part — only the fallback note");
-  assert.match(contents[0].parts[0].text, /could not be downloaded, but its public listing says/);
   assert.match(contents[0].parts[0].text, /scout2015/);
   assert.match(contents[0].parts[0].text, /A caption/);
 });
 
-test("when oEmbed also fails, the original download error still surfaces", async () => {
+test("when nothing carries metadata, the original download error still surfaces", async () => {
   const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
   const clips = await resolveClipParts(messages, {
     providers: [
@@ -1840,7 +1955,7 @@ test("when oEmbed also fails, the original download error still surfaces", async
         platform: "TikTok",
         find: findTikTokLinks,
         matches: () => true,
-        resolve: async () => resolvedClip(),
+        resolve: async () => resolvedClip({ caption: null, authorName: null }),
         download: async () => {
           throw new TikTokError("TikTok's CDN refused the download (HTTP 403).");
         },
@@ -1993,7 +2108,7 @@ test("only the first few clips in one message are fetched", async () => {
 
   const clips = await resolveClipParts(messages, {
     maxAttachments: 2,
-    resolveImpl: async (link) => resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link }),
+    resolveImpl: async (link) => resolvedClip({ videoID: tikTokPostID(link), sourceURL: link }),
     downloadImpl: async () => {
       downloads += 1;
       return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
@@ -2021,7 +2136,7 @@ test("resolving and downloading two distinct clips overlaps instead of running i
       maxConcurrentResolves = Math.max(maxConcurrentResolves, resolving);
       await new Promise((resolve) => setTimeout(resolve, 5));
       resolving -= 1;
-      return resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link });
+      return resolvedClip({ videoID: tikTokPostID(link), sourceURL: link });
     },
     downloadImpl: async () => {
       downloading += 1;
@@ -2094,6 +2209,770 @@ test("attachMedia: false leaves a link as plain text and fetches nothing", async
 
   assert.equal(sentBody.contents[0].parts.length, 1);
   assert.equal(sentBody.contents[0].parts[0].text, SOURCE_URL);
+});
+
+/* ---------------- Image posts ---------------- */
+
+/** The shape `parseEmbedPage` hands the image downloader, without doing the fetch. */
+function resolvedPhotoPost(overrides = {}) {
+  return {
+    sourceURL: PHOTO_SOURCE_URL,
+    videoID: PHOTO_ID,
+    kind: "images",
+    mimeType: "image/jpeg",
+    referer: "https://www.tiktok.com/",
+    authorName: "hullcity",
+    caption: null,
+    duration: null,
+    width: 1290,
+    height: 824,
+    slideCount: 2,
+    images: [
+      { url: "https://p16-common-sign.tiktokcdn-us.com/a.jpeg", width: 1290, height: 824 },
+      { url: "https://p16-common-sign.tiktokcdn-us.com/b.jpeg", width: 1440, height: 2470 },
+    ],
+    ...overrides,
+  };
+}
+
+function jpegResponse(bytes, { status = 200 } = {}) {
+  return mediaResponse(bytes, { status, headers: { "content-type": "image/jpeg" } });
+}
+
+test("every slide of a photo post is fetched, in order", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(String(url));
+    return jpegResponse(Buffer.from(`bytes for ${new URL(url).pathname}`));
+  };
+
+  const set = await downloadTikTokImages(resolvedPhotoPost(), { fetchImpl });
+  assert.equal(set.slides.length, 2);
+  assert.equal(set.truncated, 0);
+  assert.equal(set.slides[0].mimeType, "image/jpeg");
+  assert.equal(set.slides[0].bytes.toString(), "bytes for /a.jpeg");
+  // Slide order is the post's order even though the fetches overlap.
+  assert.equal(set.slides[1].bytes.toString(), "bytes for /b.jpeg");
+  assert.deepEqual(seen.sort(), [
+    "https://p16-common-sign.tiktokcdn-us.com/a.jpeg",
+    "https://p16-common-sign.tiktokcdn-us.com/b.jpeg",
+  ]);
+  // The platform's own dimensions ride along, for the pane's aspect ratio.
+  assert.equal(set.slides[0].width, 1290);
+});
+
+test("slides are fetched only from the platform's own CDNs", async () => {
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    return jpegResponse(Buffer.from("nope"));
+  };
+
+  await assert.rejects(
+    downloadTikTokImages(
+      resolvedPhotoPost({ images: [{ url: "https://evil.test/payload.jpg" }] }),
+      { fetchImpl },
+    ),
+    (error) => error instanceof TikTokError && /None of that post's images/.test(error.message),
+  );
+  assert.equal(called, false, "no request should leave the process");
+
+  // Suffix-matched at a dot boundary, same as the video path.
+  await assert.rejects(
+    downloadTikTokImages(
+      resolvedPhotoPost({ images: [{ url: "https://tiktokcdn-us.com.evil.test/x.jpg" }] }),
+      { fetchImpl },
+    ),
+    /None of that post's images/,
+  );
+  assert.equal(called, false);
+});
+
+test("one slide short is a worse post, not a failed one", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith("a.jpeg")) throw new Error("socket hang up");
+    return jpegResponse(Buffer.from("second slide"));
+  };
+
+  const set = await downloadTikTokImages(resolvedPhotoPost(), {
+    fetchImpl,
+    sleepImpl: async () => {},
+  });
+  assert.equal(set.slides.length, 1, "the one that came through is still worth attaching");
+  assert.equal(set.slides[0].bytes.toString(), "second slide");
+  assert.equal(set.truncated, 1);
+});
+
+test("a carousel past the slide cap attaches its first slides and says how many it skipped", async () => {
+  const images = Array.from({ length: 20 }, (_, n) => ({
+    url: `https://p16-common-sign.tiktokcdn-us.com/slide${n}.jpeg`,
+    width: 1080,
+    height: 1080,
+  }));
+  const fetchImpl = async (url) => jpegResponse(Buffer.from(new URL(url).pathname));
+
+  const set = await downloadTikTokImages(resolvedPhotoPost({ images }), { fetchImpl, maxSlides: 5 });
+  assert.equal(set.slides.length, 5);
+  assert.equal(set.truncated, 15);
+  assert.equal(set.slides[0].bytes.toString(), "/slide0.jpeg", "the first slides, not a sample");
+  assert.equal(set.slides[4].bytes.toString(), "/slide4.jpeg");
+});
+
+test("a set stops once it has filled its byte budget", async () => {
+  const images = Array.from({ length: 10 }, (_, n) => ({
+    url: `https://p16-common-sign.tiktokcdn-us.com/slide${n}.jpeg`,
+  }));
+  const fetchImpl = async () => jpegResponse(Buffer.alloc(400));
+
+  const set = await downloadTikTokImages(resolvedPhotoPost({ images }), {
+    fetchImpl,
+    maxSetBytes: 1000,
+    // One at a time, so the running total is what stops it rather than a race.
+    maxSlides: 10,
+  });
+  const total = set.slides.reduce((sum, s) => sum + s.bytes.length, 0);
+  assert.ok(total <= 1000, `held to the budget, got ${total}`);
+  assert.ok(set.slides.length >= 2 && set.slides.length < 10, `stopped early: ${set.slides.length}`);
+});
+
+test("an oversized slide is refused without failing the whole post", async () => {
+  const fetchImpl = async (url) =>
+    String(url).endsWith("a.jpeg")
+      ? {
+          ok: true,
+          status: 200,
+          headers: { get: (n) => (n === "content-length" ? String(50 * 1024 * 1024) : null) },
+          body: (async function* () {
+            yield Buffer.alloc(10);
+          })(),
+        }
+      : jpegResponse(Buffer.from("fine"));
+
+  const set = await downloadTikTokImages(resolvedPhotoPost(), { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(set.slides.length, 1);
+  assert.equal(set.slides[0].bytes.toString(), "fine");
+});
+
+test("an Instagram carousel of stills reaches the model as one part per slide", async () => {
+  const messages = [{ role: "user", content: `check ${IG_SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "Instagram",
+        find: findInstagramLinks,
+        matches: () => true,
+        resolve: async () => ({
+          sourceURL: IG_SOURCE_URL,
+          videoID: IG_SHORTCODE,
+          kind: "images",
+          mimeType: "image/jpeg",
+          slideCount: 3,
+          authorName: "instagram",
+          caption: "Photos by @sarahyltonphoto",
+          images: [1, 2, 3].map((n) => ({ url: `https://scontent.cdninstagram.com/s${n}.jpg` })),
+        }),
+        downloadImages: async () => ({
+          slides: [1, 2, 3].map((n) => ({
+            bytes: Buffer.from(`slide ${n}`),
+            mimeType: "image/jpeg",
+          })),
+          truncated: 0,
+        }),
+      },
+    ],
+  });
+
+  const parts = toGeminiContents(messages, { clips })[0].parts;
+  const inline = parts.filter((p) => p.inline_data);
+  assert.equal(inline.length, 3, "one part per slide");
+  assert.deepEqual(
+    inline.map((p) => Buffer.from(p.inline_data.data, "base64").toString()),
+    ["slide 1", "slide 2", "slide 3"],
+  );
+  assert.ok(inline.every((p) => p.inline_data.mime_type === "image/jpeg"));
+
+  // The note has to say these are ordered stills, or the model reads them as unrelated
+  // pictures — or worse, as frames of a video it watched.
+  const text = parts.at(-1).text;
+  assert.match(text, /Instagram photo post/);
+  assert.match(text, /3 images, in order/);
+  assert.match(text, /posted by instagram/);
+  assert.match(text, /Photos by @sarahyltonphoto/);
+});
+
+test("a truncated carousel tells the model the post continues past what it can see", async () => {
+  const messages = [{ role: "user", content: `check ${PHOTO_SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => resolvedPhotoPost({ slideCount: 16 }),
+        downloadImages: async () => ({
+          slides: Array.from({ length: 12 }, (_, n) => ({
+            bytes: Buffer.from(`s${n}`),
+            mimeType: "image/jpeg",
+          })),
+          truncated: 4,
+        }),
+      },
+    ],
+  });
+
+  const text = toGeminiContents(messages, { clips })[0].parts.at(-1).text;
+  assert.match(text, /12 of its 16 images, in order/);
+});
+
+test("a photo post is cached across turns like a clip is", async () => {
+  resetClipCache();
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => resolvedPhotoPost(),
+      downloadImages: async () => {
+        downloads += 1;
+        return {
+          slides: [
+            { bytes: Buffer.from("one"), mimeType: "image/jpeg" },
+            { bytes: Buffer.from("two"), mimeType: "image/jpeg" },
+          ],
+          truncated: 0,
+        };
+      },
+    },
+  ];
+
+  const first = [{ role: "user", content: `check ${PHOTO_SOURCE_URL}` }];
+  await resolveClipParts(first, { providers, cache: true });
+  assert.equal(downloads, 1);
+
+  const second = [...first, { role: "assistant", content: "ok" }, { role: "user", content: "slide 2?" }];
+  const clips = await resolveClipParts(second, { providers, cache: true });
+  assert.equal(downloads, 1, "the slides were already in hand");
+  assert.equal(clips.attachments.get(PHOTO_SOURCE_URL).parts.length, 2);
+  resetClipCache();
+});
+
+test("a photo post whose slide URLs expired is re-resolved once, like a clip", async () => {
+  const messages = [{ role: "user", content: `check ${PHOTO_SOURCE_URL}` }];
+  let resolves = 0;
+  let attempts = 0;
+
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => {
+          resolves += 1;
+          return resolvedPhotoPost({
+            images: [{ url: `https://p16-common-sign.tiktokcdn-us.com/a.jpeg?sig=${resolves}` }],
+          });
+        },
+        downloadImages: async (resolved) => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", {
+              kind: "expired",
+              retryable: true,
+            });
+          }
+          assert.match(resolved.images[0].url, /sig=2/);
+          return { slides: [{ bytes: Buffer.from("fresh"), mimeType: "image/jpeg" }], truncated: 0 };
+        },
+      },
+    ],
+  });
+
+  assert.equal(resolves, 2);
+  const entry = clips.attachments.get(PHOTO_SOURCE_URL);
+  assert.equal(entry.error, undefined);
+  assert.equal(entry.parts.length, 1);
+});
+
+/* ---------------- Retry policy ---------------- */
+
+// The `retryable` flag on TikTokError/InstagramError was set carefully from the start and
+// then read by nothing. These cover the layer that finally acts on it — and, just as
+// importantly, the failures it must *not* act on.
+
+test("backoff doubles per attempt, is capped, and is drawn from zero", () => {
+  // Full jitter: the schedule below is the ceiling, and the draw lands anywhere under it.
+  assert.equal(backoffDelay(1, { baseMs: 400, maxMs: 4000, randomness: 1 }), 400);
+  assert.equal(backoffDelay(2, { baseMs: 400, maxMs: 4000, randomness: 1 }), 800);
+  assert.equal(backoffDelay(3, { baseMs: 400, maxMs: 4000, randomness: 1 }), 1600);
+  assert.equal(backoffDelay(9, { baseMs: 400, maxMs: 4000, randomness: 1 }), 4000, "capped");
+
+  assert.equal(backoffDelay(3, { baseMs: 400, maxMs: 4000, randomness: 0 }), 0);
+  assert.equal(backoffDelay(3, { baseMs: 400, maxMs: 4000, randomness: 0.5 }), 800);
+  assert.equal(backoffDelay(0, {}), 0, "there is no backoff before the first attempt");
+});
+
+test("Retry-After is read in both spellings the header allows", () => {
+  const header = (value) => ({ headers: { get: () => value } });
+  assert.equal(clipRetryAfterMs(header("12")), 12_000);
+  assert.equal(clipRetryAfterMs(header("0")), 0);
+  assert.equal(clipRetryAfterMs(header(null)), null);
+  assert.equal(clipRetryAfterMs(header("soon")), null);
+  assert.equal(clipRetryAfterMs({}), null);
+
+  const inTwoMinutes = new Date(Date.now() + 120_000).toUTCString();
+  const parsed = clipRetryAfterMs(header(inTwoMinutes));
+  assert.ok(parsed > 110_000 && parsed <= 120_000, `HTTP-date form read as ${parsed}ms`);
+});
+
+test("only a failure that says it is transient is repeated", async () => {
+  let calls = 0;
+  const slept = [];
+  const sleepImpl = async (ms) => slept.push(ms);
+
+  const value = await withRetry(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw new TikTokError("upstream is having a moment", { retryable: true });
+      return "got it";
+    },
+    { sleepImpl, randomness: 1, baseMs: 100 },
+  );
+  assert.equal(value, "got it");
+  assert.deepEqual(slept, [100, 200], "doubling, and only between attempts");
+
+  // A decision — a private post, a photo carousel — is an answer. Asking again changes
+  // nothing but the bill.
+  let decided = 0;
+  await assert.rejects(
+    withRetry(
+      async () => {
+        decided += 1;
+        throw new TikTokError("that post is private", { kind: "unavailable" });
+      },
+      { sleepImpl },
+    ),
+    /that post is private/,
+  );
+  assert.equal(decided, 1);
+});
+
+test("a server that says how long to wait is believed over the backoff curve", async () => {
+  const slept = [];
+  let calls = 0;
+  await withRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new TikTokError("slow down", { retryable: true, retryAfterMs: 2_500 });
+      }
+      return "ok";
+    },
+    { sleepImpl: async (ms) => slept.push(ms), baseMs: 100, randomness: 1 },
+  );
+  assert.deepEqual(slept, [2_500]);
+});
+
+test("retrying stops at the budget rather than sleeping past it", async () => {
+  let calls = 0;
+  const slept = [];
+  await assert.rejects(
+    withRetry(
+      async () => {
+        calls += 1;
+        throw new TikTokError("still down", { retryable: true, retryAfterMs: 30_000 });
+      },
+      { sleepImpl: async (ms) => slept.push(ms), budgetMs: 5_000, retries: 5 },
+    ),
+    /still down/,
+  );
+  assert.equal(calls, 1, "a 30s wait inside a 5s budget is a reason to stop, not to wait");
+  assert.deepEqual(slept, [], "and stopping means not sleeping first");
+});
+
+test("an abort ends the retries instead of being waited out", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  await assert.rejects(
+    withRetry(
+      async () => {
+        calls += 1;
+        controller.abort();
+        throw new TikTokError("gone", { retryable: true });
+      },
+      { signal: controller.signal, sleepImpl: async () => {}, retries: 3 },
+    ),
+    /gone/,
+  );
+  assert.equal(calls, 1, "nobody is waiting for a better answer");
+});
+
+test("each attempt is handed what is left of the budget, so three tries can't run three times as long", async () => {
+  const seen = [];
+  await assert.rejects(
+    withRetry(
+      async ({ remainingMs }) => {
+        seen.push(remainingMs);
+        await new Promise((r) => setTimeout(r, 30));
+        throw new TikTokError("timed out", { retryable: true });
+      },
+      { sleepImpl: async () => {}, budgetMs: 1_000, retries: 2 },
+    ),
+    /timed out/,
+  );
+  assert.equal(seen.length, 3);
+  assert.equal(seen[0], 1_000);
+  assert.ok(seen[1] < seen[0] && seen[2] < seen[1], `budget should shrink: ${seen.join(", ")}`);
+});
+
+/* ---------------- Transfer deadlines ---------------- */
+
+test("a transfer that goes quiet is abandoned rather than waited on forever", async () => {
+  // The case this exists for: a CDN answers 200 and then stops sending. Before the stall
+  // guard the read had no deadline at all — `fetchWithTimeout` disarms at the headers —
+  // so the request hung until the platform killed the function.
+  const response = {
+    headers: { get: () => null },
+    body: (async function* () {
+      yield Buffer.alloc(8);
+      await new Promise(() => {}); // never resolves
+    })(),
+  };
+
+  await assert.rejects(
+    readCapped(response, 1024, (m) => new Error(m), { stallTimeoutMs: 20 }),
+    (error) => error instanceof StalledTransferError && /no data for/.test(error.message),
+  );
+});
+
+test("a healthy transfer is not cut off by the stall guard, however many chunks it takes", async () => {
+  const response = {
+    headers: { get: () => null },
+    body: (async function* () {
+      for (let i = 0; i < 5; i += 1) {
+        await new Promise((r) => setTimeout(r, 5));
+        yield Buffer.alloc(4);
+      }
+    })(),
+  };
+  const bytes = await readCapped(response, 1024, (m) => new Error(m), { stallTimeoutMs: 60 });
+  assert.equal(bytes.length, 20);
+});
+
+test("the fetch deadline stays armed until the body has been read", async () => {
+  let sawSignal;
+  const { response, release } = await fetchStream("https://example.test/clip.mp4", {
+    fetchImpl: async (_url, init) => {
+      sawSignal = init.signal;
+      return { ok: true, status: 200 };
+    },
+    timeoutMs: 15,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(sawSignal.aborted, false, "headers arrived in time");
+
+  // The old `fetchWithTimeout` cleared its timer here. This one is still counting, which
+  // is the whole point: the transfer is the part that takes time.
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(sawSignal.aborted, true, "the transfer ran past the deadline and was cut off");
+  release();
+});
+
+test("releasing the deadline stops it from firing at a request that is already done", async () => {
+  let sawSignal;
+  const { release } = await fetchStream("https://example.test/clip.mp4", {
+    fetchImpl: async (_url, init) => {
+      sawSignal = init.signal;
+      return { ok: true, status: 200 };
+    },
+    timeoutMs: 15,
+  });
+  release();
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(sawSignal.aborted, false);
+});
+
+/* ---------------- Retrying the platforms ---------------- */
+
+test("a 503 from TikTok's embed host is tried again, not reported as a broken link", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return calls < 3 ? htmlResponse("", { status: 503 }) : htmlResponse(tikTokPage());
+  };
+
+  const clip = await resolveTikTokVideo(SOURCE_URL, { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(clip.videoID, VIDEO_ID);
+  assert.equal(calls, 3);
+});
+
+test("a removed video is not tried again — a 400 from the embed endpoint is an answer", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return htmlResponse("", { status: 400 });
+  };
+
+  await assert.rejects(
+    resolveTikTokVideo(SOURCE_URL, { fetchImpl, sleepImpl: async () => {} }),
+    (error) => error.kind === "unavailable",
+  );
+  assert.equal(calls, 1);
+});
+
+test("a throttled embed page waits as long as TikTok asked", async () => {
+  const slept = [];
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        ok: false,
+        status: 429,
+        url: SOURCE_URL,
+        headers: { get: (n) => (String(n).toLowerCase() === "retry-after" ? "3" : null) },
+        text: async () => "",
+        body: null,
+      };
+    }
+    return htmlResponse(tikTokPage());
+  };
+
+  await resolveTikTokVideo(SOURCE_URL, { fetchImpl, sleepImpl: async (ms) => slept.push(ms) });
+  assert.deepEqual(slept, [3_000]);
+});
+
+test("a dropped connection mid-download is tried again", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("socket hang up");
+    return mediaResponse(Buffer.from("clip bytes"));
+  };
+
+  const media = await downloadTikTokMedia(resolvedClip(), { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(media.bytes.toString(), "clip bytes");
+  assert.equal(calls, 2);
+});
+
+test("an expired signed CDN URL is not asked twice — the same dead URL cannot come back", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return mediaResponse(Buffer.alloc(0), { status: 403 });
+  };
+
+  await assert.rejects(
+    downloadTikTokMedia(resolvedClip(), { fetchImpl, sleepImpl: async () => {} }),
+    (error) => error.kind === "expired" && error.retryable,
+  );
+  assert.equal(calls, 1, "the repair is a fresh URL, which is the caller's to fetch");
+});
+
+test("a clip whose CDN URL expired is re-resolved once and downloaded from the new one", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  let resolves = 0;
+  let downloads = 0;
+
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => {
+          resolves += 1;
+          return resolvedClip({ mediaURL: `${MEDIA_URL}?sig=${resolves}` });
+        },
+        download: async (resolved) => {
+          downloads += 1;
+          if (downloads === 1) {
+            throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", {
+              kind: "expired",
+              retryable: true,
+            });
+          }
+          assert.match(resolved.mediaURL, /sig=2/, "the second attempt uses the fresh URL");
+          return { bytes: Buffer.from("clip"), mimeType: "video/mp4" };
+        },
+      },
+    ],
+  });
+
+  assert.equal(resolves, 2);
+  assert.equal(downloads, 2);
+  const entry = clips.attachments.get(SOURCE_URL);
+  assert.equal(entry.error, undefined);
+  assert.ok(entry.part.inline_data, "the clip is attached, not described");
+});
+
+test("a second expiry in the same breath is not a clock problem — it stops there", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  let downloads = 0;
+
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => resolvedClip({ caption: null, authorName: null }),
+        download: async () => {
+          downloads += 1;
+          throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", {
+            kind: "expired",
+            retryable: true,
+          });
+        },
+      },
+    ],
+  });
+
+  assert.equal(downloads, 2, "one repair, not a loop");
+  assert.match(clips.attachments.get(SOURCE_URL).error, /CDN refused/);
+});
+
+/* ---------------- The clip cache ---------------- */
+
+test("a follow-up turn about the same clip reuses it instead of downloading it again", async () => {
+  resetClipCache();
+  let resolves = 0;
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => {
+        resolves += 1;
+        return resolvedClip();
+      },
+      download: async () => {
+        downloads += 1;
+        return { bytes: Buffer.from("clip bytes"), mimeType: "video/mp4" };
+      },
+    },
+  ];
+
+  const first = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  await resolveClipParts(first, { providers, cache: true });
+  assert.equal(resolves, 1);
+  assert.equal(downloads, 1);
+
+  // The next turn replays the same history — that is how the model keeps seeing the video
+  // — and before the cache that meant resolving and downloading it all over again.
+  const second = [...first, { role: "assistant", content: "It claims..." }, { role: "user", content: "what about the end?" }];
+  const clips = await resolveClipParts(second, { providers, cache: true });
+  assert.equal(resolves, 1, "no second resolve");
+  assert.equal(downloads, 1, "no second download");
+
+  const parts = toGeminiContents(second, { clips })[0].parts;
+  assert.equal(parts.filter((p) => p.inline_data).length, 1, "the clip is still attached");
+  assert.equal(
+    parts.find((p) => p.inline_data).inline_data.data,
+    Buffer.from("clip bytes").toString("base64"),
+  );
+  resetClipCache();
+});
+
+test("the cache is off unless a caller asks for it", async () => {
+  resetClipCache();
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => resolvedClip(),
+      download: async () => {
+        downloads += 1;
+        return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+      },
+    },
+  ];
+
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  await resolveClipParts(messages, { providers });
+  await resolveClipParts(messages, { providers });
+  assert.equal(downloads, 2);
+});
+
+test("a cached clip is dropped once it has gone stale", async () => {
+  resetClipCache();
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => resolvedClip(),
+      download: async () => {
+        downloads += 1;
+        return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
+      },
+    },
+  ];
+
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  await resolveClipParts(messages, { providers, cache: true, cacheTTLMs: 1 });
+  await new Promise((r) => setTimeout(r, 5));
+  await resolveClipParts(messages, { providers, cache: true, cacheTTLMs: 1 });
+  assert.equal(downloads, 2);
+  resetClipCache();
+});
+
+test("the cache stays under its byte ceiling, dropping the oldest clip first", async () => {
+  resetClipCache();
+  const downloaded = [];
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async (link) => resolvedClip({ videoID: tikTokPostID(link), sourceURL: link }),
+      download: async (resolved) => {
+        downloaded.push(resolved.videoID);
+        return { bytes: Buffer.alloc(600), mimeType: "video/mp4" };
+      },
+    },
+  ];
+  const link = (n) => `https://www.tiktok.com/@u/video/671833539084509517${n}`;
+  const options = { providers, cache: true, cacheMaxBytes: 1000 };
+
+  await resolveClipParts([{ role: "user", content: link(1) }], options);
+  await resolveClipParts([{ role: "user", content: link(2) }], options);
+  assert.equal(downloaded.length, 2);
+
+  // Two 600-byte clips don't fit in 1000 bytes, so the first one is gone and the second
+  // is still there.
+  await resolveClipParts([{ role: "user", content: link(2) }], options);
+  assert.equal(downloaded.length, 2, "the newest clip is still cached");
+  await resolveClipParts([{ role: "user", content: link(1) }], options);
+  assert.equal(downloaded.length, 3, "the oldest was evicted to stay under the ceiling");
+  resetClipCache();
+});
+
+test("the clip stage gives up on its budget and says so, rather than holding the request", async () => {
+  const messages = [{ role: "user", content: `check ${SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    budgetMs: 10,
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async (_link, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          }),
+        download: async () => ({ bytes: Buffer.from("x"), mimeType: "video/mp4" }),
+      },
+    ],
+  });
+
+  const note = toGeminiContents(messages, { clips })[0].parts[0].text;
+  assert.match(note, /could not be attached: it took too long to fetch/);
 });
 
 /* ---------------- Instagram ---------------- */
@@ -2265,27 +3144,97 @@ test("a carousel is searched for its video slide, and photo posts are declined b
     },
   });
   const clip = parseMediaResponse(carousel, { shortcode: "DbYaLffE2DD", sourceURL: IG_SOURCE_URL });
+  assert.equal(clip.kind, "video");
   assert.equal(clip.mediaURL, IG_MEDIA_URL);
   assert.equal(clip.height, 1350, "the slide's own dimensions, not the post's");
+});
 
-  // A post with nothing playable in it is a "that isn't a video" answer, not a parse bug.
-  for (const [payload, expected] of [
-    [igPayload({ __typename: "XDTGraphImage", is_video: false, video_url: null }), /photo post/],
-    [
-      igPayload({
-        __typename: "XDTGraphSidecar",
-        is_video: false,
-        video_url: null,
-        edge_sidecar_to_children: { edges: [{ node: { __typename: "XDTGraphImage" } }] },
-      }),
-      /carousel of stills/,
-    ],
-  ]) {
-    assert.throws(
-      () => parseMediaResponse(payload, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL }),
-      (error) => error instanceof InstagramError && error.kind === "notAVideo" && expected.test(error.message),
-    );
-  }
+// The shapes below are the live ones, captured on 2026-08-04: BoHk1haB5tM is a sidecar of
+// five XDTGraphImage children, BqvsDleB3lV a lone XDTGraphImage.
+
+test("a carousel of stills resolves to its images instead of being declined", () => {
+  const carousel = igPayload({
+    __typename: "XDTGraphSidecar",
+    is_video: false,
+    video_url: null,
+    edge_sidecar_to_children: {
+      edges: [1, 2, 3].map((n) => ({
+        node: {
+          __typename: "XDTGraphImage",
+          display_url: `https://scontent.cdninstagram.com/slide${n}.jpg`,
+          dimensions: { width: 1080, height: 1080 },
+        },
+      })),
+    },
+  });
+
+  const post = parseMediaResponse(carousel, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(post.kind, "images");
+  assert.equal(post.slideCount, 3);
+  assert.deepEqual(
+    post.images.map((i) => i.url),
+    [1, 2, 3].map((n) => `https://scontent.cdninstagram.com/slide${n}.jpg`),
+    "slide order is the post's order",
+  );
+  assert.equal(post.images[0].width, 1080);
+  assert.equal(post.mediaURL, undefined, "there is no single media URL for a set of stills");
+});
+
+test("a single photo post resolves to its one image", () => {
+  const photo = igPayload({
+    __typename: "XDTGraphImage",
+    is_video: false,
+    video_url: null,
+    display_url: "https://scontent.cdninstagram.com/only.jpg",
+    dimensions: { width: 1080, height: 1350 },
+  });
+
+  const post = parseMediaResponse(photo, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(post.kind, "images");
+  assert.equal(post.slideCount, 1);
+  assert.equal(post.images[0].url, "https://scontent.cdninstagram.com/only.jpg");
+  assert.equal(post.height, 1350);
+});
+
+test("a video slide's poster frame is not passed off as one of the stills", () => {
+  // A still standing in for a clip, unlabelled, is the kind of thing a model describes as
+  // though it had watched the video.
+  const mixed = igPayload({
+    __typename: "XDTGraphSidecar",
+    is_video: false,
+    video_url: null,
+    edge_sidecar_to_children: {
+      edges: [
+        { node: { __typename: "XDTGraphImage", display_url: "https://scontent.cdninstagram.com/still.jpg" } },
+        {
+          node: {
+            __typename: "XDTGraphVideo",
+            video_url: IG_MEDIA_URL,
+            display_url: "https://scontent.cdninstagram.com/poster.jpg",
+          },
+        },
+      ],
+    },
+  });
+  // This one still resolves as its video — a clip is the richer source.
+  const post = parseMediaResponse(mixed, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(post.kind, "video");
+
+  // ...but with no video anywhere, the poster frame of a video slide is still skipped.
+  const stillsOnly = igPayload({
+    __typename: "XDTGraphSidecar",
+    is_video: false,
+    video_url: null,
+    edge_sidecar_to_children: {
+      edges: [
+        { node: { __typename: "XDTGraphImage", display_url: "https://scontent.cdninstagram.com/still.jpg" } },
+        { node: { __typename: "XDTGraphVideo", video_url: "", display_url: "https://scontent.cdninstagram.com/poster.jpg" } },
+      ],
+    },
+  });
+  const images = parseMediaResponse(stillsOnly, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(images.kind, "images");
+  assert.deepEqual(images.images.map((i) => i.url), ["https://scontent.cdninstagram.com/still.jpg"]);
 });
 
 test("a missing post reads as unavailable; a rejected query names the doc_id to rotate", () => {
@@ -2344,14 +3293,57 @@ test("concurrent resolves share one homepage seed", async () => {
   assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 1);
 });
 
-test("a throttled query is reported as try-again, not as a broken link", async () => {
+test("a throttled query is retried, then reported as try-again rather than a broken link", async () => {
   resetInstagramSession();
-  const { fetchImpl } = igFetch(() => igQueryResponse({}, { status: 429 }));
+  let queries = 0;
+  const { fetchImpl } = igFetch(() => {
+    queries += 1;
+    return igQueryResponse({}, { status: 429 });
+  });
 
   await assert.rejects(
-    resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl }),
+    resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async () => {} }),
     (error) => error.kind === "rateLimited" && error.retryable && /rate-limiting/.test(error.message),
   );
+  // Throttling anonymous datacenter traffic is Instagram's normal state, not an incident,
+  // so the first refusal is not the answer — but the third is.
+  assert.equal(queries, 3);
+});
+
+test("a throttle that comes back clears on the retry, and the reel is not lost", async () => {
+  resetInstagramSession();
+  let queries = 0;
+  const { fetchImpl, calls } = igFetch(() => {
+    queries += 1;
+    return queries === 1 ? igQueryResponse({}, { status: 429 }) : igQueryResponse(igPayload());
+  });
+
+  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(clip.videoID, IG_SHORTCODE);
+  // A 429 and a spent session look alike from here, so the retry gets a fresh token.
+  assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 2);
+});
+
+test("Instagram's own Retry-After is waited out rather than second-guessed", async () => {
+  resetInstagramSession();
+  const slept = [];
+  let queries = 0;
+  const { fetchImpl } = igFetch(() => {
+    queries += 1;
+    if (queries === 1) {
+      return {
+        ok: false,
+        status: 429,
+        url: "https://www.instagram.com/graphql/query",
+        headers: { get: (n) => (String(n).toLowerCase() === "retry-after" ? "2" : null) },
+        json: async () => ({}),
+      };
+    }
+    return igQueryResponse(igPayload());
+  });
+
+  await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async (ms) => slept.push(ms) });
+  assert.deepEqual(slept, [2_000]);
 });
 
 test("a 403 re-seeds the session once before giving up", async () => {
@@ -2363,9 +3355,53 @@ test("a 403 re-seeds the session once before giving up", async () => {
     return queries === 1 ? igQueryResponse({}, { status: 403 }) : igQueryResponse(igPayload());
   });
 
-  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl });
+  const clip = await resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, sleepImpl: async () => {} });
   assert.equal(clip.videoID, IG_SHORTCODE);
   assert.equal(calls.filter((c) => c.url === "https://www.instagram.com/").length, 2);
+});
+
+test("one caller giving up on the shared seed doesn't take the others down with it", async () => {
+  resetInstagramSession();
+  // The seed used to run under whichever caller arrived first, signal and all. On a warm
+  // instance those callers are unrelated requests, so the first one hanging up aborted the
+  // homepage load every other concurrent resolve was waiting on.
+  const controller = new AbortController();
+  let seeds = 0;
+  let releaseSeed;
+  const seeded = new Promise((resolve) => {
+    releaseSeed = resolve;
+  });
+
+  const fetchImpl = async (url) => {
+    if (String(url) === "https://www.instagram.com/") {
+      seeds += 1;
+      await seeded;
+      return {
+        ok: true,
+        status: 200,
+        url: String(url),
+        headers: {
+          get: (name) =>
+            String(name).toLowerCase() === "set-cookie" ? "csrftoken=tok123; Path=/" : null,
+        },
+        body: null,
+      };
+    }
+    return igQueryResponse(igPayload());
+  };
+
+  const abandoned = resolveInstagramVideo(IG_SOURCE_URL, { fetchImpl, signal: controller.signal });
+  const patient = resolveInstagramVideo(`https://www.instagram.com/p/${IG_SHORTCODE}/`, { fetchImpl });
+
+  // Let both reach the shared seed before the first one walks away.
+  await new Promise((r) => setTimeout(r, 5));
+  controller.abort();
+  await assert.rejects(abandoned, (error) => error.name === "AbortError");
+
+  releaseSeed();
+  const clip = await patient;
+  assert.equal(clip.videoID, IG_SHORTCODE, "the caller still waiting got its reel");
+  assert.equal(seeds, 1, "and still only one homepage load between them");
 });
 
 test("a share link is followed, and the shortcode read off where it landed", async () => {

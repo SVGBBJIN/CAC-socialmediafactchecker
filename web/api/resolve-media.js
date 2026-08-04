@@ -101,23 +101,47 @@ export default async function handler(req, res) {
   // "will not [point at] a host the platform doesn't serve from" — doesn't actually hold.
   const allowedHosts = isTikTok ? TIKTOK_MEDIA_HOSTS : INSTAGRAM_MEDIA_HOSTS;
 
-  try {
-    // Same reasoning as /api/chat's clipOptions.jitter: a random pre-request pause so this
-    // route's requests don't land on a uniform cadence either.
-    const resolved = await resolve(url, { jitter: true });
-    let mediaHost;
+  // Every URL handed back goes through this, whether it names a clip or a slide. The check
+  // is the same one the downloaders make and it is applied here for the same reason.
+  const vetted = (candidate) => {
     try {
-      mediaHost = new URL(resolved.mediaURL).hostname;
+      return hostAllowed(new URL(candidate).hostname, allowedHosts) ? candidate : null;
     } catch {
-      console.error(`[resolve-media] resolver returned a media URL that isn't a URL: ${resolved.mediaURL}`);
-      return sendJSON(res, 502, { error: "Could not resolve that video." });
+      return null;
     }
-    if (!hostAllowed(mediaHost, allowedHosts)) {
-      console.error(`[resolve-media] refusing to hand back an unexpected media host: ${mediaHost}`);
+  };
+
+  try {
+    const resolved = await resolve(url);
+
+    // A photo-mode TikTok or an Instagram carousel of stills. There is no single URL a
+    // `<video>` can play, so the slides are handed back as a list and the pane renders them
+    // as images — see `showImageSet` in public/app.js.
+    if (resolved.kind === "images") {
+      const images = (resolved.images ?? [])
+        .filter((image) => vetted(image.url))
+        .map((image) => ({ url: image.url, width: image.width, height: image.height }));
+      if (images.length === 0) {
+        console.error("[resolve-media] every image in that post was on an unexpected host");
+        return sendJSON(res, 502, { error: "Could not resolve that post." });
+      }
+      return sendJSON(res, 200, {
+        kind: "images",
+        images,
+        mimeType: resolved.mimeType,
+        width: resolved.width,
+        height: resolved.height,
+      });
+    }
+
+    const mediaURL = vetted(resolved.mediaURL);
+    if (!mediaURL) {
+      console.error(`[resolve-media] refusing to hand back an unexpected media URL: ${resolved.mediaURL}`);
       return sendJSON(res, 502, { error: "Could not resolve that video." });
     }
     return sendJSON(res, 200, {
-      mediaURL: resolved.mediaURL,
+      kind: "video",
+      mediaURL,
       mimeType: resolved.mimeType,
       width: resolved.width,
       height: resolved.height,
