@@ -166,6 +166,102 @@ export class StalledTransferError extends Error {
   }
 }
 
+/* ---------------- Image posts ---------------- */
+
+/**
+ * How many slides of a carousel are fetched, however many it has.
+ *
+ * Both platforms allow up to 35. Every slide is a separate download *and* a separate image
+ * the model has to read — Gemini bills each one, and a 35-slide post would cost more input
+ * than the video posts this pipeline was built for. Twelve is past where a claim-carrying
+ * slideshow has usually made its point, and the ones past it are named in the prompt rather
+ * than silently dropped, so the model knows the post continues.
+ */
+export const MAX_IMAGE_SLIDES = 12;
+
+/** Ceiling on a single slide. A photo-mode JPEG is 100-300 KB; past a few MB it isn't one. */
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** Ceiling on the whole set, which is what actually has to fit in the request. */
+export const MAX_IMAGE_SET_BYTES = 20 * 1024 * 1024;
+
+/** How many slides are in flight at once. Enough to overlap, not enough to look like a scrape. */
+const IMAGE_CONCURRENCY = 4;
+
+/**
+ * Fetch a post's image slides.
+ *
+ * Shared by both platforms because, unlike the video paths, there is nothing
+ * platform-specific left once the URLs have been found: same allowlist check, same caps,
+ * same "a slide that fails is one slide, not the post". Which URLs, which hosts are
+ * allowed and which error type gets thrown are passed in, exactly as `readCapped` takes a
+ * `tooLarge` factory.
+ *
+ * A failed slide is skipped rather than fatal. A carousel is a sequence of stills, and
+ * eleven of twelve still says most of what the post says — where a video that half
+ * downloads says nothing at all. Only an empty result is an error.
+ *
+ * @param images `[{url, width, height}]`, in slide order.
+ * @param fetchOne runs one request and returns `{bytes, mimeType}` — the platform's own
+ *   retrying, deadline-carrying fetch, so slides get the same treatment a clip does.
+ */
+export async function downloadImageSet(
+  images,
+  {
+    fetchOne,
+    allowedHosts,
+    makeError,
+    maxSlides = MAX_IMAGE_SLIDES,
+    maxBytes = MAX_IMAGE_BYTES,
+    maxSetBytes = MAX_IMAGE_SET_BYTES,
+    concurrency = IMAGE_CONCURRENCY,
+    signal,
+  },
+) {
+  const wanted = images.slice(0, maxSlides);
+  const results = new Array(wanted.length).fill(null);
+  let setBytes = 0;
+
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= wanted.length || signal?.aborted) return;
+      const slide = wanted[index];
+
+      let url;
+      try {
+        url = new URL(slide.url);
+      } catch {
+        continue;
+      }
+      // The same check the video path makes, for the same reason: these URLs come out of a
+      // third party's JSON, so without it this would fetch whatever that JSON named.
+      if (url.protocol !== "https:" || !hostAllowed(url.hostname, allowedHosts)) continue;
+      // Already full. Stop paying for slides that can't be attached anyway.
+      if (setBytes >= maxSetBytes) return;
+
+      try {
+        const { bytes, mimeType } = await fetchOne(url, { maxBytes });
+        if (!bytes?.length) continue;
+        if (setBytes + bytes.length > maxSetBytes) return;
+        setBytes += bytes.length;
+        results[index] = { bytes, mimeType, width: slide.width ?? null, height: slide.height ?? null };
+      } catch {
+        // One slide short is a worse post, not a failed one.
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, wanted.length) }, worker));
+
+  const slides = results.filter(Boolean);
+  if (slides.length === 0) {
+    throw makeError("None of that post's images could be downloaded.");
+  }
+  return { slides, truncated: Math.max(0, images.length - slides.length) };
+}
+
 async function withStallGuard(pending, stallTimeoutMs, onStall) {
   let timer;
   try {

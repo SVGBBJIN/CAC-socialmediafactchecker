@@ -46,6 +46,7 @@ import {
   fetchStream,
   hostAllowed,
   readCapped,
+  downloadImageSet,
   StalledTransferError,
 } from "./media-fetch.js";
 import { withRetry, retryAfterMs } from "./retry.js";
@@ -53,6 +54,12 @@ import { withRetry, retryAfterMs } from "./retry.js";
 /** Longest we'll wait for the query, and for the CDN to start sending the file. */
 export const QUERY_TIMEOUT_MS = 15_000;
 export const MEDIA_TIMEOUT_MS = 60_000;
+
+/** The same, per slide of an image post. Same reasoning as TikTok's — a slide is small. */
+export const IMAGE_TIMEOUT_MS = 30_000;
+
+/** Slides retry less hard than a reel does; a slide that won't come is skipped, not fatal. */
+export const IMAGE_RETRY = { retries: 1, baseMs: 400, maxMs: 2_000, budgetMs: 20_000 };
 
 /**
  * Ceiling on a clip we're willing to hold in memory and forward.
@@ -414,11 +421,64 @@ function videoChild(media) {
 }
 
 /**
- * The GraphQL response → everything we need about the clip.
+ * A post with no video in it: its stills, in slide order.
+ *
+ * A carousel of images and a single photo post are the same thing at different lengths, so
+ * they resolve through one path — a sidecar contributes each `XDTGraphImage` child's
+ * `display_url`, a single post contributes its own.
+ *
+ * These used to be declined outright ("that's a carousel of stills — there's no video to
+ * fetch"), which is the platform's most claim-dense format thrown away: a screenshot dump
+ * or a text-card slideshow carries its argument *in the images*, with no B-roll to pad it,
+ * and is exactly the thing somebody pastes in to be checked.
+ *
+ * Verified live on 2026-08-04: `BoHk1haB5tM` is an `XDTGraphSidecar` of five
+ * `XDTGraphImage` children, and `BqvsDleB3lV` a lone `XDTGraphImage`.
+ */
+function imageSlides(media) {
+  const edges = media?.edge_sidecar_to_children?.edges ?? [];
+  const slides = [];
+
+  const push = (node) => {
+    const url = node?.display_url;
+    if (typeof url !== "string" || !url) return;
+    const dimensions = node?.dimensions ?? {};
+    slides.push({
+      url,
+      width: typeof dimensions.width === "number" ? dimensions.width : null,
+      height: typeof dimensions.height === "number" ? dimensions.height : null,
+    });
+  };
+
+  // A slide that *is* a video is skipped rather than represented by its poster frame: a
+  // still standing in for a clip, unlabelled, is the kind of thing a model will describe as
+  // though it had watched the video. Tested three ways rather than on `video_url` alone,
+  // because a video slide whose URL is missing is still a video slide — and its
+  // `display_url` is still a poster frame.
+  const isVideoSlide = (node) =>
+    Boolean(node?.video_url) ||
+    node?.is_video === true ||
+    String(node?.__typename ?? "").includes("Video");
+
+  if (edges.length > 0) {
+    for (const edge of edges) if (!isVideoSlide(edge?.node)) push(edge?.node);
+  } else {
+    push(media);
+  }
+
+  return slides.length > 0 ? slides : null;
+}
+
+/**
+ * The GraphQL response → everything we need about the post.
  *
  * Split out from the fetch so the parser can be tested against a real captured payload
  * without a network call — the payload is undocumented, and a fixture invented from
  * documentation would prove nothing.
+ *
+ * Returns either a video post (`kind: "video"`, with `mediaURL`) or an image post
+ * (`kind: "images"`, with `images[]`). A carousel that mixes the two still resolves as its
+ * video, unchanged: a clip is the richer source, and the caption covers the rest.
  */
 export function parseMediaResponse(payload, { shortcode, sourceURL }) {
   if (!payload || typeof payload !== "object") {
@@ -448,35 +508,51 @@ export function parseMediaResponse(payload, { shortcode, sourceURL }) {
     );
   }
 
-  const source = typeof media.video_url === "string" && media.video_url ? media : videoChild(media);
-  if (!source) {
-    throw new InstagramError(
-      media?.__typename === "XDTGraphSidecar"
-        ? "That Instagram post is a carousel of stills — there's no video to fetch."
-        : "That Instagram link is a photo post, not a video.",
-      { kind: "notAVideo" },
-    );
-  }
-
-  const duration = Number(source.video_duration ?? media.video_duration);
-  const dimensions = source.dimensions ?? media.dimensions ?? {};
   const owner = media.owner ?? {};
-
-  return {
+  const common = {
     sourceURL,
     // The shortcode is the post's identity, and what the dedupe in gemini.js keys on: two
     // links to the same reel — share link and canonical — must not download twice.
     videoID: media.shortcode || shortcode,
-    mediaURL: source.video_url,
-    mimeType: "video/mp4",
-    // Not required today — the CDN served the file without one — but instagram.com sends
+    // Not required today — the CDN served the files without one — but instagram.com sends
     // it, and matching the player is the cheapest insurance against the CDN tightening up.
     referer: HOME_URL,
+    authorName: owner.username || owner.full_name || null,
+    caption: captionOf(media),
+  };
+
+  const source = typeof media.video_url === "string" && media.video_url ? media : videoChild(media);
+  if (!source) {
+    const slides = imageSlides(media);
+    if (!slides) {
+      throw new InstagramError("That Instagram post carries no image or video we can fetch.", {
+        kind: "unavailable",
+      });
+    }
+    const first = slides[0];
+    return {
+      ...common,
+      kind: "images",
+      mimeType: "image/jpeg",
+      images: slides,
+      slideCount: slides.length,
+      duration: null,
+      width: first.width,
+      height: first.height,
+    };
+  }
+
+  const duration = Number(source.video_duration ?? media.video_duration);
+  const dimensions = source.dimensions ?? media.dimensions ?? {};
+
+  return {
+    ...common,
+    kind: "video",
+    mediaURL: source.video_url,
+    mimeType: "video/mp4",
     duration: Number.isFinite(duration) && duration > 0 ? duration : null,
     width: typeof dimensions.width === "number" ? dimensions.width : null,
     height: typeof dimensions.height === "number" ? dimensions.height : null,
-    authorName: owner.username || owner.full_name || null,
-    caption: captionOf(media),
   };
 }
 
@@ -703,6 +779,53 @@ export async function downloadInstagramMedia(
       }),
     { ...retry, signal, sleepImpl, isRetryable: retryableInPlace },
   );
+}
+
+/**
+ * Fetch every still of an image post or carousel.
+ *
+ * Same shape as TikTok's, down to the shared loop — see `downloadImageSet` in
+ * media-fetch.js. Each slide goes through `fetchMediaOnce`, so it gets the same
+ * deadline-over-the-body, expiry classification and retry treatment a reel does; Instagram
+ * signs image URLs exactly as it signs video ones.
+ */
+export async function downloadInstagramImages(
+  resolved,
+  {
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = IMAGE_TIMEOUT_MS,
+    maxSlides,
+    maxBytes,
+    maxSetBytes,
+    sleepImpl,
+    retry = IMAGE_RETRY,
+  } = {},
+) {
+  const images = resolved?.images ?? [];
+  if (images.length === 0) {
+    throw new InstagramError("That Instagram post listed no images.", { kind: "unavailable" });
+  }
+
+  return downloadImageSet(images, {
+    signal,
+    maxSlides,
+    maxBytes,
+    maxSetBytes,
+    allowedHosts: ALLOWED_MEDIA_HOSTS,
+    makeError: (message) => new InstagramError(message, { kind: "unavailable" }),
+    fetchOne: (url, { maxBytes: slideBytes }) =>
+      withRetry(
+        ({ remainingMs }) =>
+          fetchMediaOnce(url, resolved, {
+            fetchImpl,
+            signal,
+            maxBytes: slideBytes,
+            timeoutMs: Math.max(1_000, Math.min(timeoutMs, remainingMs || timeoutMs)),
+          }),
+        { ...retry, signal, sleepImpl, isRetryable: retryableInPlace },
+      ),
+  });
 }
 
 /** One go at the CDN. Everything about *repeating* it lives in the caller. */

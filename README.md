@@ -64,7 +64,9 @@ frozen means:
 |---|---|---|---|
 | **YouTube** | Gemini native URL ingestion | Working | Working |
 | **TikTok** | embed page → CDN MP4 → Gemini Flash | Working | Working — Gemini leg needs a key to confirm |
+| **TikTok photo mode** | embed page → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
 | **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
+| **Instagram images/carousels** | post query → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
 
 Only platforms that can actually be served get registered, so an Instagram link shared
 *to the Swift app* gets an honest "not supported yet" rather than an empty result. The web
@@ -118,6 +120,36 @@ capture one, unregistered, and — now that `Sources/` is frozen (see above) —
 way rather than being ported. Verified live on 2026-08-02 against three public reels:
 6.2 MB and 9.9 MB `video/mp4`, no credential.
 [docs/SPIKE-instagram.md](docs/SPIKE-instagram.md)
+
+### Photo posts are posts too
+
+Both platforms' image formats used to be dropped on the floor. A TikTok `/photo/` URL
+wasn't recognised as a link the app could do anything with, and an Instagram carousel of
+stills was declined by name — *"that's a carousel of stills, there's no video to fetch."*
+
+That threw away the platforms' most claim-dense format. A screenshot dump, a text-card
+slideshow or an infographic carousel carries its whole argument in the images, with none of
+the B-roll padding a video has, and is exactly the thing somebody pastes in to be checked.
+Both now resolve to their stills, which reach the model as one image part per slide, in
+post order, labelled as an ordered set so it doesn't read them as unrelated pictures — or
+as frames of a video it watched.
+
+Verified live on 2026-08-04. TikTok's slides live at `videoData.imagePostInfo.displayImages[]`
+on the same embed route the video path already uses — note that is *not* the `imagePost` key
+TikTok's own Content Posting API documents, which is a different serialisation of the same
+post. Instagram's come from `display_url` on each `XDTGraphImage`, from the query that
+already fetches reels. Neither needs a new endpoint or a credential.
+
+Two things fell out of doing it:
+
+- **A `/photo/` URL was never a type signal.** TikTok serves `/video/<id>` and `/photo/<id>`
+  interchangeably for the same post — `/@memezar/photo/7449708266168274208` is an ordinary
+  video — so reading the path as the content was costing real videos, not just slideshows.
+  Only the payload decides now.
+- **A carousel is capped, and says so.** Both platforms allow 35 slides; twelve are attached
+  and the remainder is named in the prompt, because every slide is an image the model is
+  billed to read. A slide that fails to download is skipped rather than failing the post —
+  eleven of twelve still says most of what a slideshow says, where half a video says nothing.
 
 ## What the media path refuses to do
 
@@ -259,7 +291,7 @@ route that holds the key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 287 tests, no network
+npm test                               # 303 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to

@@ -78,6 +78,7 @@ const el = {
   videoPlaceholder: document.getElementById("videoPlaceholder"),
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
+  videoImages: document.getElementById("videoImages"),
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
@@ -395,13 +396,17 @@ async function verifyLinkViewable(url) {
           reason: `Couldn't confirm this is a playable ${platform} video (it may still work).`,
         };
       }
-      const { mediaURL } = await response.json();
-      return mediaURL
+      // A photo-mode TikTok or an Instagram carousel resolves to images rather than a
+      // playable URL. That is a post the fact-check handles fine — the stills go to the
+      // model the same way a clip does — so warning that it isn't "a playable video" would
+      // be talking the user out of a link that works.
+      const { mediaURL, images } = await response.json();
+      return mediaURL || images?.length
         ? { ok: true, platform }
         : {
             ok: false,
             platform,
-            reason: `Couldn't confirm this is a playable ${platform} video (it may still work).`,
+            reason: `Couldn't confirm this is a playable ${platform} post (it may still work).`,
           };
     } catch {
       return { ok: false, platform, reason: "Couldn't reach the server to confirm this link." };
@@ -699,8 +704,52 @@ function clearVideoMedia() {
   el.videoPlayer.hidden = true;
   el.videoEmbed.src = "";
   el.videoEmbed.hidden = true;
+  el.videoImages.replaceChildren();
+  el.videoImages.hidden = true;
+  el.videoThumb.querySelector(".image-count")?.remove();
   el.videoPlaceholder.hidden = false;
   setVideoAspect(DEFAULT_VIDEO_ASPECT);
+}
+
+/**
+ * A photo-mode TikTok or an Instagram carousel: the slides, in post order.
+ *
+ * Built with `createElement` rather than an HTML string. Every other list in this file goes
+ * through `escapeHTML`, and these URLs come from a third party's JSON — setting `.src` on a
+ * real element can't be talked into being markup no matter what the URL contains, which is
+ * one less thing to have got right.
+ */
+function showImageSet(media) {
+  el.videoPlaceholder.hidden = true;
+  const first = media.images[0];
+  if (first?.width && first?.height) setVideoAspect(`${first.width} / ${first.height}`);
+
+  el.videoImages.replaceChildren(
+    ...media.images.map((image, index) => {
+      const img = document.createElement("img");
+      img.src = image.url;
+      img.alt = `Slide ${index + 1} of ${media.images.length}`;
+      img.loading = index === 0 ? "eager" : "lazy";
+      // A CDN that refuses one slide shouldn't leave a broken-image icon in the strip.
+      img.addEventListener("error", () => img.remove(), { once: true });
+      return img;
+    }),
+  );
+  el.videoImages.classList.toggle("single", media.images.length === 1);
+  el.videoImages.hidden = false;
+
+  if (media.images.length > 1) {
+    const count = document.createElement("span");
+    count.className = "image-count";
+    count.textContent = `${media.images.length} images`;
+    el.videoThumb.appendChild(count);
+  }
+}
+
+/** One pane, two kinds of post. Which one is decided by what the resolver came back with. */
+function showResolvedMedia(media) {
+  if (media.kind === "images") showImageSet(media);
+  else showVideoElement(media);
 }
 
 function showVideoElement(media) {
@@ -741,8 +790,8 @@ function showYouTubeEmbed(videoID, aspect) {
  */
 async function loadDirectMedia(entry, token) {
   const cached = mediaCache.get(entry.id);
-  if (cached?.kind === "direct") {
-    if (token === videoPaneToken) showVideoElement(cached);
+  if (cached?.kind === "direct" || cached?.kind === "images") {
+    if (token === videoPaneToken) showResolvedMedia(cached);
     return;
   }
   try {
@@ -752,11 +801,17 @@ async function loadDirectMedia(entry, token) {
       body: JSON.stringify({ url: entry.url }),
     });
     if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
-    const { mediaURL, width, height } = await response.json();
-    if (!mediaURL) return;
-    const media = { kind: "direct", mediaURL, width, height };
+    const { mediaURL, images, width, height } = await response.json();
+    // A photo post has no single URL to play; it has a list of stills. Either way the
+    // fact-check itself already has what it needs — this pane is only the picture of it.
+    const media = images?.length
+      ? { kind: "images", images, width, height }
+      : mediaURL
+        ? { kind: "direct", mediaURL, width, height }
+        : null;
+    if (!media) return;
     mediaCache.set(entry.id, media);
-    if (token === videoPaneToken) showVideoElement(media);
+    if (token === videoPaneToken) showResolvedMedia(media);
   } catch {
     // Network hiccup or the passphrase dialog intercepting — the rest of the pane (title,
     // link, and the fact-check itself) doesn't depend on this succeeding.

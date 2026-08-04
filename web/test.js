@@ -47,14 +47,16 @@ import {
   OVERLOAD_COOLDOWN_MS,
 } from "./lib/degradation.js";
 import {
-  tikTokVideoID,
+  tikTokPostID,
   isTikTokShortLink,
   findTikTokLinks,
   extractStateBlob,
   parseEmbedPage,
   resolveTikTokVideo,
   downloadTikTokMedia,
+  downloadTikTokImages,
   fetchTikTokOEmbed,
+  isTikTokLink,
   TikTokError,
 } from "./lib/tiktok.js";
 import {
@@ -1523,6 +1525,28 @@ const MEDIA_URL =
   "https://v16m.tiktokcdn-us.com/d838b2be25adb61a68f7fbe5d74e9f63/6a6ab84a/video/tos/" +
   "useast5/tos-useast5-ve-0068c002-tx/15fbafb086324317bf77a649580b1f95/?a=1233&mime_type=video_mp4";
 
+// The same, for a photo-mode post: captured on 2026-08-04 from
+// `https://www.tiktok.com/embed/v2/7553302113757990166`, again with only the signed query
+// strings shortened. Note `imagePostInfo` hangs off `videoData` beside `itemInfos` — it is
+// *not* the `imagePost` key TikTok's own Content Posting API documents, and each slide's
+// `urlList` is the same image on two mirror hosts rather than two slides.
+//
+// `itemInfos.video` is still present and still parses; it is simply empty. That is the
+// whole reason the parser checks for images first — a photo post does not announce itself
+// by the absence of a video field, only by the emptiness of one.
+const LIVE_PHOTO_BLOB =
+  `{"source":{"data":{"/embed/v2/7553302113757990166":{"videoData":{"itemInfos":` +
+  `{"id":"7553302113757990166","text":"","covers":["https://p16-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/76f8ef724f7c4ef1b27bc650393aa23c~tplv-photomode-image.jpeg"],` +
+  `"video":{"urls":[],"videoMeta":{"width":0,"height":0,"ratio":0,"duration":0}}},` +
+  `"authorInfos":{"nickName":"hullcity","uniqueId":"hullcity"},"imagePostInfo":{"displayImages":[` +
+  `{"height":824,"width":1290,"urlList":["https://p16-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/76f8ef724f7c4ef1b27bc650393aa23c~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED",` +
+  `"https://p19-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/76f8ef724f7c4ef1b27bc650393aa23c~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED"]},` +
+  `{"height":2470,"width":1440,"urlList":["https://p16-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/5ed8c94f94864d59a064b996fafe49d8~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED",` +
+  `"https://p19-common-sign.tiktokcdn-us.com/tos-no1a-i-photomode-no/5ed8c94f94864d59a064b996fafe49d8~tplv-photomode-image.jpeg?x-expires=1786050000&x-signature=REDACTED"]}]}}}}}}`;
+
+const PHOTO_ID = "7553302113757990166";
+const PHOTO_SOURCE_URL = `https://www.tiktok.com/@hullcity/photo/${PHOTO_ID}`;
+
 /** The page wraps the blob in the same script tag the live one does. */
 function tikTokPage(blob = LIVE_STATE_BLOB) {
   return (
@@ -1575,21 +1599,30 @@ function resolvedClip(overrides = {}) {
 }
 
 test("recognizes TikTok URLs in every share format", () => {
-  assert.equal(tikTokVideoID(SOURCE_URL), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed/v2/${VIDEO_ID}`), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed/${VIDEO_ID}`), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://m.tiktok.com/v/${VIDEO_ID}.html`), VIDEO_ID);
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/embed?item_id=${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(SOURCE_URL), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/embed/v2/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/embed/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://m.tiktok.com/v/${VIDEO_ID}.html`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/embed?item_id=${VIDEO_ID}`), VIDEO_ID);
 });
 
-test("rejects photo carousels, non-video links and lookalike hosts", () => {
-  // A real post, but a slideshow of stills — there is no video to fetch.
-  assert.equal(tikTokVideoID(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), null);
-  assert.equal(tikTokVideoID("https://www.tiktok.com/@scout2015"), null);
-  assert.equal(tikTokVideoID("https://www.tiktok.com/video/12"), null, "too short to be an ID");
-  assert.equal(tikTokVideoID(`https://tiktok.com.evil.test/video/${VIDEO_ID}`), null);
-  assert.equal(tikTokVideoID("https://youtube.com/watch?v=dQw4w9WgXcQ"), null);
-  assert.equal(tikTokVideoID("not a url"), null);
+test("a /photo/ URL names a post like any other — the path is not a type signal", () => {
+  // TikTok serves /video/<id> and /photo/<id> interchangeably for the same post, and which
+  // one a share sheet produces doesn't track what the post contains. Verified live on
+  // 2026-08-04: /@memezar/photo/7449708266168274208 is an ordinary video. Reading the path
+  // as a type was costing real videos, not just slideshows.
+  assert.equal(tikTokPostID(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), VIDEO_ID);
+  assert.equal(tikTokPostID(`https://www.tiktok.com/@memezar/photo/7449708266168274208`), "7449708266168274208");
+  assert.equal(isTikTokLink(`https://www.tiktok.com/@user/photo/${VIDEO_ID}`), true);
+});
+
+test("rejects non-post links and lookalike hosts", () => {
+  assert.equal(tikTokPostID("https://www.tiktok.com/@scout2015"), null);
+  assert.equal(tikTokPostID("https://www.tiktok.com/video/12"), null, "too short to be an ID");
+  assert.equal(tikTokPostID(`https://tiktok.com.evil.test/video/${VIDEO_ID}`), null);
+  assert.equal(tikTokPostID(`https://tiktok.com.evil.test/photo/${VIDEO_ID}`), null);
+  assert.equal(tikTokPostID("https://youtube.com/watch?v=dQw4w9WgXcQ"), null);
+  assert.equal(tikTokPostID("not a url"), null);
 });
 
 test("short links are recognised but carry no ID of their own", () => {
@@ -1599,7 +1632,7 @@ test("short links are recognised but carry no ID of their own", () => {
     "https://www.tiktok.com/t/ZTabcdef/",
   ]) {
     assert.equal(isTikTokShortLink(link), true, link);
-    assert.equal(tikTokVideoID(link), null, link);
+    assert.equal(tikTokPostID(link), null, link);
   }
   assert.equal(isTikTokShortLink(SOURCE_URL), false);
   assert.equal(isTikTokShortLink("https://vm.tiktok.com.evil.test/ZM1"), false);
@@ -1620,6 +1653,58 @@ test("parses the real embed payload", () => {
   assert.equal(clip.height, 1024);
   assert.equal(clip.authorName, "Scout, Suki & Stella");
   assert.match(clip.caption, /^Scramble up ur name/);
+  assert.equal(clip.kind, "video");
+});
+
+test("parses the real photo-mode payload", () => {
+  const post = parseEmbedPage(tikTokPage(LIVE_PHOTO_BLOB), {
+    videoID: PHOTO_ID,
+    sourceURL: PHOTO_SOURCE_URL,
+  });
+
+  assert.equal(post.kind, "images");
+  assert.equal(post.slideCount, 2);
+  assert.equal(post.mimeType, "image/jpeg");
+  assert.equal(post.authorName, "hullcity");
+  assert.equal(post.duration, null, "a slideshow has no duration");
+  assert.equal(post.mediaURL, undefined, "and no single media URL");
+
+  // One URL per slide, not one per mirror: `urlList` holds the same image twice, on
+  // p16- and p19-, and taking both would attach the post's first slide twice.
+  assert.equal(post.images.length, 2);
+  assert.match(post.images[0].url, /^https:\/\/p16-common-sign\.tiktokcdn-us\.com\//);
+  assert.match(post.images[1].url, /5ed8c94f94864d59a064b996fafe49d8/);
+  assert.equal(post.images[0].width, 1290);
+  assert.equal(post.images[0].height, 824);
+  // The pane's aspect ratio comes off the first slide.
+  assert.equal(post.width, 1290);
+});
+
+test("an empty itemInfos.video does not read as a broken video post", () => {
+  // A photo post still carries `itemInfos.video`, with `urls: []` and `duration: 0`. Read
+  // in the wrong order that looks exactly like a video whose sources are missing, which is
+  // what the old parser reported it as.
+  const post = parseEmbedPage(tikTokPage(LIVE_PHOTO_BLOB), {
+    videoID: PHOTO_ID,
+    sourceURL: PHOTO_SOURCE_URL,
+  });
+  assert.equal(post.kind, "images");
+});
+
+test("a post with neither a video nor images is unavailable, not a parse bug", () => {
+  const blob = JSON.stringify({
+    source: {
+      data: {
+        [`/embed/v2/${VIDEO_ID}`]: {
+          videoData: { itemInfos: { id: VIDEO_ID, video: { urls: [] } }, imagePostInfo: null },
+        },
+      },
+    },
+  });
+  assert.throws(
+    () => parseEmbedPage(tikTokPage(blob), { videoID: VIDEO_ID, sourceURL: SOURCE_URL }),
+    (error) => error instanceof TikTokError && error.kind === "unavailable",
+  );
 });
 
 test("the state blob is found even when a bootstrap reference comes first", () => {
@@ -2023,7 +2108,7 @@ test("only the first few clips in one message are fetched", async () => {
 
   const clips = await resolveClipParts(messages, {
     maxAttachments: 2,
-    resolveImpl: async (link) => resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link }),
+    resolveImpl: async (link) => resolvedClip({ videoID: tikTokPostID(link), sourceURL: link }),
     downloadImpl: async () => {
       downloads += 1;
       return { bytes: Buffer.from("x"), mimeType: "video/mp4" };
@@ -2051,7 +2136,7 @@ test("resolving and downloading two distinct clips overlaps instead of running i
       maxConcurrentResolves = Math.max(maxConcurrentResolves, resolving);
       await new Promise((resolve) => setTimeout(resolve, 5));
       resolving -= 1;
-      return resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link });
+      return resolvedClip({ videoID: tikTokPostID(link), sourceURL: link });
     },
     downloadImpl: async () => {
       downloading += 1;
@@ -2124,6 +2209,290 @@ test("attachMedia: false leaves a link as plain text and fetches nothing", async
 
   assert.equal(sentBody.contents[0].parts.length, 1);
   assert.equal(sentBody.contents[0].parts[0].text, SOURCE_URL);
+});
+
+/* ---------------- Image posts ---------------- */
+
+/** The shape `parseEmbedPage` hands the image downloader, without doing the fetch. */
+function resolvedPhotoPost(overrides = {}) {
+  return {
+    sourceURL: PHOTO_SOURCE_URL,
+    videoID: PHOTO_ID,
+    kind: "images",
+    mimeType: "image/jpeg",
+    referer: "https://www.tiktok.com/",
+    authorName: "hullcity",
+    caption: null,
+    duration: null,
+    width: 1290,
+    height: 824,
+    slideCount: 2,
+    images: [
+      { url: "https://p16-common-sign.tiktokcdn-us.com/a.jpeg", width: 1290, height: 824 },
+      { url: "https://p16-common-sign.tiktokcdn-us.com/b.jpeg", width: 1440, height: 2470 },
+    ],
+    ...overrides,
+  };
+}
+
+function jpegResponse(bytes, { status = 200 } = {}) {
+  return mediaResponse(bytes, { status, headers: { "content-type": "image/jpeg" } });
+}
+
+test("every slide of a photo post is fetched, in order", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(String(url));
+    return jpegResponse(Buffer.from(`bytes for ${new URL(url).pathname}`));
+  };
+
+  const set = await downloadTikTokImages(resolvedPhotoPost(), { fetchImpl });
+  assert.equal(set.slides.length, 2);
+  assert.equal(set.truncated, 0);
+  assert.equal(set.slides[0].mimeType, "image/jpeg");
+  assert.equal(set.slides[0].bytes.toString(), "bytes for /a.jpeg");
+  // Slide order is the post's order even though the fetches overlap.
+  assert.equal(set.slides[1].bytes.toString(), "bytes for /b.jpeg");
+  assert.deepEqual(seen.sort(), [
+    "https://p16-common-sign.tiktokcdn-us.com/a.jpeg",
+    "https://p16-common-sign.tiktokcdn-us.com/b.jpeg",
+  ]);
+  // The platform's own dimensions ride along, for the pane's aspect ratio.
+  assert.equal(set.slides[0].width, 1290);
+});
+
+test("slides are fetched only from the platform's own CDNs", async () => {
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    return jpegResponse(Buffer.from("nope"));
+  };
+
+  await assert.rejects(
+    downloadTikTokImages(
+      resolvedPhotoPost({ images: [{ url: "https://evil.test/payload.jpg" }] }),
+      { fetchImpl },
+    ),
+    (error) => error instanceof TikTokError && /None of that post's images/.test(error.message),
+  );
+  assert.equal(called, false, "no request should leave the process");
+
+  // Suffix-matched at a dot boundary, same as the video path.
+  await assert.rejects(
+    downloadTikTokImages(
+      resolvedPhotoPost({ images: [{ url: "https://tiktokcdn-us.com.evil.test/x.jpg" }] }),
+      { fetchImpl },
+    ),
+    /None of that post's images/,
+  );
+  assert.equal(called, false);
+});
+
+test("one slide short is a worse post, not a failed one", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith("a.jpeg")) throw new Error("socket hang up");
+    return jpegResponse(Buffer.from("second slide"));
+  };
+
+  const set = await downloadTikTokImages(resolvedPhotoPost(), {
+    fetchImpl,
+    sleepImpl: async () => {},
+  });
+  assert.equal(set.slides.length, 1, "the one that came through is still worth attaching");
+  assert.equal(set.slides[0].bytes.toString(), "second slide");
+  assert.equal(set.truncated, 1);
+});
+
+test("a carousel past the slide cap attaches its first slides and says how many it skipped", async () => {
+  const images = Array.from({ length: 20 }, (_, n) => ({
+    url: `https://p16-common-sign.tiktokcdn-us.com/slide${n}.jpeg`,
+    width: 1080,
+    height: 1080,
+  }));
+  const fetchImpl = async (url) => jpegResponse(Buffer.from(new URL(url).pathname));
+
+  const set = await downloadTikTokImages(resolvedPhotoPost({ images }), { fetchImpl, maxSlides: 5 });
+  assert.equal(set.slides.length, 5);
+  assert.equal(set.truncated, 15);
+  assert.equal(set.slides[0].bytes.toString(), "/slide0.jpeg", "the first slides, not a sample");
+  assert.equal(set.slides[4].bytes.toString(), "/slide4.jpeg");
+});
+
+test("a set stops once it has filled its byte budget", async () => {
+  const images = Array.from({ length: 10 }, (_, n) => ({
+    url: `https://p16-common-sign.tiktokcdn-us.com/slide${n}.jpeg`,
+  }));
+  const fetchImpl = async () => jpegResponse(Buffer.alloc(400));
+
+  const set = await downloadTikTokImages(resolvedPhotoPost({ images }), {
+    fetchImpl,
+    maxSetBytes: 1000,
+    // One at a time, so the running total is what stops it rather than a race.
+    maxSlides: 10,
+  });
+  const total = set.slides.reduce((sum, s) => sum + s.bytes.length, 0);
+  assert.ok(total <= 1000, `held to the budget, got ${total}`);
+  assert.ok(set.slides.length >= 2 && set.slides.length < 10, `stopped early: ${set.slides.length}`);
+});
+
+test("an oversized slide is refused without failing the whole post", async () => {
+  const fetchImpl = async (url) =>
+    String(url).endsWith("a.jpeg")
+      ? {
+          ok: true,
+          status: 200,
+          headers: { get: (n) => (n === "content-length" ? String(50 * 1024 * 1024) : null) },
+          body: (async function* () {
+            yield Buffer.alloc(10);
+          })(),
+        }
+      : jpegResponse(Buffer.from("fine"));
+
+  const set = await downloadTikTokImages(resolvedPhotoPost(), { fetchImpl, sleepImpl: async () => {} });
+  assert.equal(set.slides.length, 1);
+  assert.equal(set.slides[0].bytes.toString(), "fine");
+});
+
+test("an Instagram carousel of stills reaches the model as one part per slide", async () => {
+  const messages = [{ role: "user", content: `check ${IG_SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "Instagram",
+        find: findInstagramLinks,
+        matches: () => true,
+        resolve: async () => ({
+          sourceURL: IG_SOURCE_URL,
+          videoID: IG_SHORTCODE,
+          kind: "images",
+          mimeType: "image/jpeg",
+          slideCount: 3,
+          authorName: "instagram",
+          caption: "Photos by @sarahyltonphoto",
+          images: [1, 2, 3].map((n) => ({ url: `https://scontent.cdninstagram.com/s${n}.jpg` })),
+        }),
+        downloadImages: async () => ({
+          slides: [1, 2, 3].map((n) => ({
+            bytes: Buffer.from(`slide ${n}`),
+            mimeType: "image/jpeg",
+          })),
+          truncated: 0,
+        }),
+      },
+    ],
+  });
+
+  const parts = toGeminiContents(messages, { clips })[0].parts;
+  const inline = parts.filter((p) => p.inline_data);
+  assert.equal(inline.length, 3, "one part per slide");
+  assert.deepEqual(
+    inline.map((p) => Buffer.from(p.inline_data.data, "base64").toString()),
+    ["slide 1", "slide 2", "slide 3"],
+  );
+  assert.ok(inline.every((p) => p.inline_data.mime_type === "image/jpeg"));
+
+  // The note has to say these are ordered stills, or the model reads them as unrelated
+  // pictures — or worse, as frames of a video it watched.
+  const text = parts.at(-1).text;
+  assert.match(text, /Instagram photo post/);
+  assert.match(text, /3 images, in order/);
+  assert.match(text, /posted by instagram/);
+  assert.match(text, /Photos by @sarahyltonphoto/);
+});
+
+test("a truncated carousel tells the model the post continues past what it can see", async () => {
+  const messages = [{ role: "user", content: `check ${PHOTO_SOURCE_URL}` }];
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => resolvedPhotoPost({ slideCount: 16 }),
+        downloadImages: async () => ({
+          slides: Array.from({ length: 12 }, (_, n) => ({
+            bytes: Buffer.from(`s${n}`),
+            mimeType: "image/jpeg",
+          })),
+          truncated: 4,
+        }),
+      },
+    ],
+  });
+
+  const text = toGeminiContents(messages, { clips })[0].parts.at(-1).text;
+  assert.match(text, /12 of its 16 images, in order/);
+});
+
+test("a photo post is cached across turns like a clip is", async () => {
+  resetClipCache();
+  let downloads = 0;
+  const providers = [
+    {
+      platform: "TikTok",
+      find: findTikTokLinks,
+      matches: () => true,
+      resolve: async () => resolvedPhotoPost(),
+      downloadImages: async () => {
+        downloads += 1;
+        return {
+          slides: [
+            { bytes: Buffer.from("one"), mimeType: "image/jpeg" },
+            { bytes: Buffer.from("two"), mimeType: "image/jpeg" },
+          ],
+          truncated: 0,
+        };
+      },
+    },
+  ];
+
+  const first = [{ role: "user", content: `check ${PHOTO_SOURCE_URL}` }];
+  await resolveClipParts(first, { providers, cache: true });
+  assert.equal(downloads, 1);
+
+  const second = [...first, { role: "assistant", content: "ok" }, { role: "user", content: "slide 2?" }];
+  const clips = await resolveClipParts(second, { providers, cache: true });
+  assert.equal(downloads, 1, "the slides were already in hand");
+  assert.equal(clips.attachments.get(PHOTO_SOURCE_URL).parts.length, 2);
+  resetClipCache();
+});
+
+test("a photo post whose slide URLs expired is re-resolved once, like a clip", async () => {
+  const messages = [{ role: "user", content: `check ${PHOTO_SOURCE_URL}` }];
+  let resolves = 0;
+  let attempts = 0;
+
+  const clips = await resolveClipParts(messages, {
+    providers: [
+      {
+        platform: "TikTok",
+        find: findTikTokLinks,
+        matches: () => true,
+        resolve: async () => {
+          resolves += 1;
+          return resolvedPhotoPost({
+            images: [{ url: `https://p16-common-sign.tiktokcdn-us.com/a.jpeg?sig=${resolves}` }],
+          });
+        },
+        downloadImages: async (resolved) => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new TikTokError("TikTok's CDN refused the download (HTTP 403).", {
+              kind: "expired",
+              retryable: true,
+            });
+          }
+          assert.match(resolved.images[0].url, /sig=2/);
+          return { slides: [{ bytes: Buffer.from("fresh"), mimeType: "image/jpeg" }], truncated: 0 };
+        },
+      },
+    ],
+  });
+
+  assert.equal(resolves, 2);
+  const entry = clips.attachments.get(PHOTO_SOURCE_URL);
+  assert.equal(entry.error, undefined);
+  assert.equal(entry.parts.length, 1);
 });
 
 /* ---------------- Retry policy ---------------- */
@@ -2561,7 +2930,7 @@ test("the cache stays under its byte ceiling, dropping the oldest clip first", a
       platform: "TikTok",
       find: findTikTokLinks,
       matches: () => true,
-      resolve: async (link) => resolvedClip({ videoID: tikTokVideoID(link), sourceURL: link }),
+      resolve: async (link) => resolvedClip({ videoID: tikTokPostID(link), sourceURL: link }),
       download: async (resolved) => {
         downloaded.push(resolved.videoID);
         return { bytes: Buffer.alloc(600), mimeType: "video/mp4" };
@@ -2775,27 +3144,97 @@ test("a carousel is searched for its video slide, and photo posts are declined b
     },
   });
   const clip = parseMediaResponse(carousel, { shortcode: "DbYaLffE2DD", sourceURL: IG_SOURCE_URL });
+  assert.equal(clip.kind, "video");
   assert.equal(clip.mediaURL, IG_MEDIA_URL);
   assert.equal(clip.height, 1350, "the slide's own dimensions, not the post's");
+});
 
-  // A post with nothing playable in it is a "that isn't a video" answer, not a parse bug.
-  for (const [payload, expected] of [
-    [igPayload({ __typename: "XDTGraphImage", is_video: false, video_url: null }), /photo post/],
-    [
-      igPayload({
-        __typename: "XDTGraphSidecar",
-        is_video: false,
-        video_url: null,
-        edge_sidecar_to_children: { edges: [{ node: { __typename: "XDTGraphImage" } }] },
-      }),
-      /carousel of stills/,
-    ],
-  ]) {
-    assert.throws(
-      () => parseMediaResponse(payload, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL }),
-      (error) => error instanceof InstagramError && error.kind === "notAVideo" && expected.test(error.message),
-    );
-  }
+// The shapes below are the live ones, captured on 2026-08-04: BoHk1haB5tM is a sidecar of
+// five XDTGraphImage children, BqvsDleB3lV a lone XDTGraphImage.
+
+test("a carousel of stills resolves to its images instead of being declined", () => {
+  const carousel = igPayload({
+    __typename: "XDTGraphSidecar",
+    is_video: false,
+    video_url: null,
+    edge_sidecar_to_children: {
+      edges: [1, 2, 3].map((n) => ({
+        node: {
+          __typename: "XDTGraphImage",
+          display_url: `https://scontent.cdninstagram.com/slide${n}.jpg`,
+          dimensions: { width: 1080, height: 1080 },
+        },
+      })),
+    },
+  });
+
+  const post = parseMediaResponse(carousel, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(post.kind, "images");
+  assert.equal(post.slideCount, 3);
+  assert.deepEqual(
+    post.images.map((i) => i.url),
+    [1, 2, 3].map((n) => `https://scontent.cdninstagram.com/slide${n}.jpg`),
+    "slide order is the post's order",
+  );
+  assert.equal(post.images[0].width, 1080);
+  assert.equal(post.mediaURL, undefined, "there is no single media URL for a set of stills");
+});
+
+test("a single photo post resolves to its one image", () => {
+  const photo = igPayload({
+    __typename: "XDTGraphImage",
+    is_video: false,
+    video_url: null,
+    display_url: "https://scontent.cdninstagram.com/only.jpg",
+    dimensions: { width: 1080, height: 1350 },
+  });
+
+  const post = parseMediaResponse(photo, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(post.kind, "images");
+  assert.equal(post.slideCount, 1);
+  assert.equal(post.images[0].url, "https://scontent.cdninstagram.com/only.jpg");
+  assert.equal(post.height, 1350);
+});
+
+test("a video slide's poster frame is not passed off as one of the stills", () => {
+  // A still standing in for a clip, unlabelled, is the kind of thing a model describes as
+  // though it had watched the video.
+  const mixed = igPayload({
+    __typename: "XDTGraphSidecar",
+    is_video: false,
+    video_url: null,
+    edge_sidecar_to_children: {
+      edges: [
+        { node: { __typename: "XDTGraphImage", display_url: "https://scontent.cdninstagram.com/still.jpg" } },
+        {
+          node: {
+            __typename: "XDTGraphVideo",
+            video_url: IG_MEDIA_URL,
+            display_url: "https://scontent.cdninstagram.com/poster.jpg",
+          },
+        },
+      ],
+    },
+  });
+  // This one still resolves as its video — a clip is the richer source.
+  const post = parseMediaResponse(mixed, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(post.kind, "video");
+
+  // ...but with no video anywhere, the poster frame of a video slide is still skipped.
+  const stillsOnly = igPayload({
+    __typename: "XDTGraphSidecar",
+    is_video: false,
+    video_url: null,
+    edge_sidecar_to_children: {
+      edges: [
+        { node: { __typename: "XDTGraphImage", display_url: "https://scontent.cdninstagram.com/still.jpg" } },
+        { node: { __typename: "XDTGraphVideo", video_url: "", display_url: "https://scontent.cdninstagram.com/poster.jpg" } },
+      ],
+    },
+  });
+  const images = parseMediaResponse(stillsOnly, { shortcode: IG_SHORTCODE, sourceURL: IG_SOURCE_URL });
+  assert.equal(images.kind, "images");
+  assert.deepEqual(images.images.map((i) => i.url), ["https://scontent.cdninstagram.com/still.jpg"]);
 });
 
 test("a missing post reads as unavailable; a rejected query names the doc_id to rotate", () => {

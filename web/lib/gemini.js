@@ -11,6 +11,7 @@ import {
   isTikTokLink,
   resolveTikTokVideo,
   downloadTikTokMedia,
+  downloadTikTokImages,
   fetchTikTokOEmbed,
   INLINE_BYTE_LIMIT,
 } from "./tiktok.js";
@@ -19,6 +20,7 @@ import {
   isInstagramLink,
   resolveInstagramVideo,
   downloadInstagramMedia,
+  downloadInstagramImages,
 } from "./instagram.js";
 import { uploadFile, deleteFile } from "./gemini-files.js";
 import {
@@ -537,6 +539,10 @@ export const CLIP_PROVIDERS = [
     matches: isTikTokLink,
     resolve: resolveTikTokVideo,
     download: downloadTikTokMedia,
+    // Photo-mode posts: a slideshow of stills rather than a clip. Which one a link turns
+    // out to be is decided by the payload, not the URL, so both downloaders hang off every
+    // provider and `resolveClipParts` picks between them per post.
+    downloadImages: downloadTikTokImages,
     // TikTok's oEmbed carries no video (see lib/tiktok.js), only a title, author and
     // thumbnail — but that's still worth handing the model when the real download fails.
     // Instagram has no equivalent: its oEmbed needs a Meta App Review token we don't have.
@@ -548,6 +554,7 @@ export const CLIP_PROVIDERS = [
     matches: isInstagramLink,
     resolve: resolveInstagramVideo,
     download: downloadInstagramMedia,
+    downloadImages: downloadInstagramImages,
   },
 ];
 
@@ -662,12 +669,19 @@ export function resetClipCache() {
   clipCacheBytes = 0;
 }
 
+/** What a cached entry costs, whichever kind of post it holds. */
+function mediaBytes(media) {
+  return media.kind === "images"
+    ? media.slides.reduce((total, slide) => total + slide.bytes.length, 0)
+    : media.bytes.length;
+}
+
 function clipCacheGet(key) {
   const hit = clipCache.get(key);
   if (!hit) return null;
   if (hit.expiresAt <= Date.now()) {
     clipCache.delete(key);
-    clipCacheBytes -= hit.bytes.length;
+    clipCacheBytes -= hit.size;
     return null;
   }
   // Re-insert so the most recently used entry is the last to be evicted.
@@ -676,22 +690,23 @@ function clipCacheGet(key) {
   return hit;
 }
 
-function clipCachePut(key, { resolved, bytes, mimeType }, maxBytes, ttlMs) {
-  if (maxBytes <= 0 || bytes.length > maxBytes) return;
+function clipCachePut(key, { resolved, media }, maxBytes, ttlMs) {
+  const size = mediaBytes(media);
+  if (maxBytes <= 0 || size > maxBytes) return;
 
   const existing = clipCache.get(key);
   if (existing) {
     clipCache.delete(key);
-    clipCacheBytes -= existing.bytes.length;
+    clipCacheBytes -= existing.size;
   }
-  clipCache.set(key, { resolved, bytes, mimeType, expiresAt: Date.now() + ttlMs });
-  clipCacheBytes += bytes.length;
+  clipCache.set(key, { resolved, media, size, expiresAt: Date.now() + ttlMs });
+  clipCacheBytes += size;
 
   for (const [oldest, entry] of clipCache) {
     if (clipCacheBytes <= maxBytes) break;
     if (oldest === key) break;
     clipCache.delete(oldest);
-    clipCacheBytes -= entry.bytes.length;
+    clipCacheBytes -= entry.size;
   }
 }
 
@@ -738,6 +753,7 @@ export async function resolveClipParts(
     providers = CLIP_PROVIDERS,
     resolveImpl = null,
     downloadImpl = null,
+    downloadImagesImpl = null,
     uploadImpl = uploadFile,
     deleteImpl = deleteFile,
     sleepImpl,
@@ -856,9 +872,9 @@ export async function resolveClipParts(
       }
       const entry = { videoID: key, platform: provider.platform, provider, resolved, link };
       // A cache hit already has the bytes; it still goes through the download phase, which
-      // is where bytes become a part (inline, or an upload past the ceiling) — it just
+      // is where bytes become parts (inline, or an upload past the ceiling) — it just
       // doesn't touch the network to get them.
-      if (hit) entry.bytes = { bytes: hit.bytes, mimeType: hit.mimeType, fromCache: true };
+      if (hit) entry.media = { ...hit.media, fromCache: true };
       byVideoID.set(key, entry);
       attachments.set(link, entry);
       toDownload.push(entry);
@@ -873,30 +889,47 @@ export async function resolveClipParts(
     await Promise.all(
       toDownload.map(async (entry) => {
         try {
-          const { bytes, mimeType, fromCache } = entry.bytes ?? (await fetchClipBytes(entry));
-          delete entry.bytes;
-          if (!fromCache && caching) {
+          const media = entry.media ?? (await fetchClipMedia(entry));
+          delete entry.media;
+          if (!media.fromCache && caching) {
             clipCachePut(
               `${entry.platform}:${entry.link}`,
-              { resolved: entry.resolved, bytes, mimeType },
+              { resolved: entry.resolved, media },
               cacheMaxBytes,
               cacheTTLMs,
             );
           }
-          if (bytes.length <= inlineByteLimit) {
-            entry.part = { inline_data: { mime_type: mimeType, data: bytes.toString("base64") } };
+
+          if (media.kind === "images") {
+            // Every slide rides inline. A whole photo post is a few hundred KB to a couple
+            // of MB — nowhere near the ceiling one video hits — so there is no Files API
+            // branch here, and each still is its own part because that is how the model
+            // reads a sequence as a sequence.
+            entry.parts = media.slides.map((slide) => ({
+              inline_data: { mime_type: slide.mimeType, data: slide.bytes.toString("base64") },
+            }));
+            entry.slideCount = media.slides.length;
+            entry.truncated = media.truncated ?? 0;
+          } else if (media.bytes.length <= inlineByteLimit) {
+            entry.part = {
+              inline_data: { mime_type: media.mimeType, data: media.bytes.toString("base64") },
+            };
           } else {
-            const file = await uploadImpl(bytes, mimeType, { apiKey, fetchImpl, signal: budget.signal });
+            const file = await uploadImpl(media.bytes, media.mimeType, {
+              apiKey,
+              fetchImpl,
+              signal: budget.signal,
+            });
             uploads.push(file);
             entry.part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
           }
-          // Bytes live in `bytes`, the upload above and — for the next turn of this
+          // Bytes live in `media`, the upload above and — for the next turn of this
           // conversation — the clip cache, which is bounded and expires. Nothing here writes
           // them anywhere durable, so the only thing left to clean up is the Files API
           // upload `cleanup()` already tracks.
         } catch (error) {
           if (signal?.aborted) return;
-          delete entry.bytes;
+          delete entry.media;
           entry.error = describeFailure(error);
           await fallBackToMetadata(entry);
         }
@@ -909,7 +942,7 @@ export async function resolveClipParts(
   }
 
   /**
-   * The clip's bytes, with one repair built in.
+   * The post's bytes — one clip, or a set of stills — with one repair built in.
    *
    * A CDN that answers 403 is almost never refusing *us* — it is refusing a signed URL
    * that has since expired, which is a thing that happens by the clock rather than by
@@ -917,11 +950,25 @@ export async function resolveClipParts(
    * the platform modules don't bother retrying an `expired` in place), but resolving the
    * post again yields a freshly signed one, and that does. Once only: a second expiry in
    * the same second is not a clock problem.
+   *
+   * Photo posts sign their slides the same way, so the same repair covers them: the
+   * re-resolve returns a fresh set of URLs and the whole set is fetched again.
    */
-  async function fetchClipBytes(entry) {
-    const download = downloadImpl ?? entry.provider.download;
+  async function fetchClipMedia(entry) {
+    const fetchFor = (resolved) => {
+      if (resolved?.kind !== "images") {
+        const download = downloadImpl ?? entry.provider.download;
+        return download(resolved, clipOptions).then((media) => ({ kind: "video", ...media }));
+      }
+      const download = downloadImagesImpl ?? entry.provider.downloadImages;
+      if (!download) {
+        throw new Error(`${entry.platform} image posts aren't supported here`);
+      }
+      return download(resolved, clipOptions).then((set) => ({ kind: "images", ...set }));
+    };
+
     try {
-      return await download(entry.resolved, clipOptions);
+      return await fetchFor(entry.resolved);
     } catch (error) {
       if (error?.kind !== "expired" || signal?.aborted || budget.signal.aborted) throw error;
       const resolve = resolveImpl ?? entry.provider.resolve;
@@ -934,7 +981,7 @@ export async function resolveClipParts(
         throw error;
       }
       entry.resolved = fresh;
-      return download(fresh, clipOptions);
+      return fetchFor(fresh);
     }
   }
 
@@ -982,13 +1029,29 @@ export async function resolveClipParts(
  * folded into the user's text, so the model can attribute it — the same distinction
  * `DirectMediaExtractor.mergeOnScreenText` draws on the Swift side.
  */
-function describeClip(resolved, platform) {
+function describeClip(resolved, platform, entry = {}) {
   if (!resolved) return null;
   const facts = [];
+
+  // A photo post's parts are stills in slide order, and saying so is what stops the model
+  // reading them as unrelated pictures — or as frames of a video it watched. The count is
+  // the number actually attached, and a truncated post says so rather than leaving the
+  // model to assume it has seen all of it.
+  const images = resolved.kind === "images";
+  if (images) {
+    const attached = entry.slideCount ?? resolved.slideCount ?? 0;
+    const total = attached + (entry.truncated ?? 0);
+    facts.push(
+      total > attached
+        ? `${attached} of its ${total} images, in order`
+        : `${attached} image${attached === 1 ? "" : "s"}, in order`,
+    );
+  }
   if (resolved.authorName) facts.push(`posted by ${resolved.authorName}`);
   if (resolved.duration) facts.push(`${Math.round(resolved.duration)}s`);
 
-  const header = `[Attached: the ${platform} video from ${resolved.sourceURL}${
+  const what = images ? `${platform} photo post` : `${platform} video`;
+  const header = `[Attached: the ${what} from ${resolved.sourceURL}${
     facts.length ? ` — ${facts.join(", ")}` : ""
   }.]`;
   if (!resolved.caption) return header;
@@ -1104,8 +1167,10 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
           notes.push(describeOEmbedFallback(entry.metadataOnly, platform, link, entry.error));
           continue;
         }
-        parts.push(entry.part);
-        const context = describeClip(entry.resolved, platform);
+        // One part for a clip, one per slide for a photo post.
+        if (entry.parts) parts.push(...entry.parts);
+        else parts.push(entry.part);
+        const context = describeClip(entry.resolved, platform, entry);
         if (context) notes.push(context);
       }
     }
