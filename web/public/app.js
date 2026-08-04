@@ -354,6 +354,17 @@ function normalizeLink(raw) {
 }
 
 /**
+ * Whether the user typed a scheme, rather than us inferring one.
+ *
+ * This is the difference between evidence and a guess. "https://…" is someone saying
+ * "this is a link"; a bare "hi.there" is only the regex saying so, and when the probe
+ * finds nothing at that name, the regex is what should give way.
+ */
+function hasExplicitScheme(raw) {
+  return /^https?:\/\//i.test(raw.trim());
+}
+
+/**
  * Anything that isn't a recognizable link is a follow-up question — "hi", "what about the
  * second claim?", etc. Pasting an actual URL always starts a new check even while a result
  * is on screen — the one case that must never be ambiguous.
@@ -363,23 +374,78 @@ function looksLikeFollowup(raw) {
 }
 
 /**
+ * Ping the link through the server and report what's really there.
+ *
+ * Returns `null` — meaning "no answer, fall back to the URL's shape" — for any failure of
+ * the probe itself: an old deployment without the route, a rate limit, a network blip.
+ * A link that genuinely doesn't work comes back as a 200 with `reachable: false`, so the
+ * two cases never get confused.
+ */
+async function pingLink(url) {
+  try {
+    const response = await fetch("/api/probe-link", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    if (!response.ok) return null;
+    const probe = await response.json();
+    return typeof probe?.reachable === "boolean" ? probe : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Best-effort check that a link is something this app can actually pull video from,
  * before spending a full (expensive) fact-check run on it.
  *
- * Verification only ever calls infrastructure that's already safe to hit: YouTube's URL
- * shape needs no network call, and /api/resolve-media is host-allowlisted to TikTok/
- * Instagram's CDNs (see api/resolve-media.js) — there is no generic "fetch whatever host
- * the user pasted" path here, since that would hand the server an open SSRF-shaped proxy.
- * An unsupported platform, or a supported one that fails to confirm, falls back to asking
- * the user rather than either silently blocking them or guessing it'll work.
+ * Verification only ever calls infrastructure that's already safe to hit: /api/probe-link
+ * reads headers and never a body, and /api/resolve-media is host-allowlisted to TikTok/
+ * Instagram's CDNs (see api/resolve-media.js and lib/link-probe.js) — neither is a
+ * "fetch whatever host the user pasted and hand back what it said" path, which is what
+ * would make this an SSRF-shaped proxy. An unsupported platform, or a supported one that
+ * fails to confirm, falls back to asking the user rather than either silently blocking
+ * them or guessing it'll work.
  */
 async function verifyLinkViewable(url) {
-  const platform = platformFor(url);
+  const probe = await pingLink(url);
 
+  // No probe: the URL's shape is all we have, which is where intake used to start.
+  if (!probe) return verifyByShape(url, platformFor(url));
+
+  if (!probe.reachable) {
+    return {
+      ok: false,
+      url,
+      platform: probe.platform ?? platformFor(url),
+      reason: probe.reason ?? "Couldn't reach that link.",
+      // Only a name that doesn't resolve means "this was never a link". A 404 or a
+      // timeout is a real host, so the user still gets asked rather than having their
+      // paste quietly rewritten into a chat message.
+      notALink: probe.kind === "dns",
+    };
+  }
+
+  // Everything downstream works from where the link *landed*, not what was pasted. This
+  // is what makes share wrappers and shorteners work: `vm.tiktok.com/ZM…` and
+  // `instagram.com/share/…` only name their platform after they've been followed.
+  const resolved = probe.canonicalURL || probe.finalURL || url;
+  return { ...(await verifyByShape(resolved, probe.platform ?? platformFor(resolved))), url: resolved };
+}
+
+/**
+ * The URL-shape half of verification: given a platform, confirm the link is one this app
+ * can pull media from.
+ *
+ * Secondary by design. It runs on the probe's resolved URL when there is one, and on the
+ * raw paste when the probe couldn't answer.
+ */
+async function verifyByShape(url, platform) {
   if (platform === "YouTube") {
     return youTubeVideoID(url)
-      ? { ok: true, platform }
-      : { ok: false, platform, reason: "That doesn't look like a valid YouTube video link." };
+      ? { ok: true, url, platform }
+      : { ok: false, url, platform, reason: "That doesn't look like a valid YouTube video link." };
   }
 
   if (platform === "TikTok" || platform === "Instagram") {
@@ -392,6 +458,7 @@ async function verifyLinkViewable(url) {
       if (!response.ok) {
         return {
           ok: false,
+          url,
           platform,
           reason: `Couldn't confirm this is a playable ${platform} video (it may still work).`,
         };
@@ -402,19 +469,21 @@ async function verifyLinkViewable(url) {
       // be talking the user out of a link that works.
       const { mediaURL, images } = await response.json();
       return mediaURL || images?.length
-        ? { ok: true, platform }
+        ? { ok: true, url, platform }
         : {
             ok: false,
+            url,
             platform,
             reason: `Couldn't confirm this is a playable ${platform} post (it may still work).`,
           };
     } catch {
-      return { ok: false, platform, reason: "Couldn't reach the server to confirm this link." };
+      return { ok: false, url, platform, reason: "Couldn't reach the server to confirm this link." };
     }
   }
 
   return {
     ok: false,
+    url,
     platform,
     reason: "This isn't a TikTok, YouTube, or Instagram link, so the video may not come through.",
   };
@@ -429,15 +498,30 @@ function showLinkConfirm(url, result) {
   el.linkConfirmDialog.showModal();
 }
 
-/** Verifies the link is actually viewable before committing to a run; if it isn't
- * (or can't be confirmed), asks first instead of burning a check on a dead link. */
-async function confirmAndRunCheck(url) {
+/**
+ * Verifies the link is actually viewable before committing to a run; if it isn't (or
+ * can't be confirmed), asks first instead of burning a check on a dead link.
+ *
+ * `entry` and `raw` are what let a failed ping undo the regex's guess. If the URL regex
+ * was the only reason this string was treated as a link — no scheme typed — and the ping
+ * found no such name, then it was a sentence, and it goes to the open chat instead of
+ * putting a dialog in front of someone who was only asking a question.
+ */
+async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
   const result = await verifyLinkViewable(url);
+  const target = result.url ?? url;
   if (result.ok) {
-    runCheck(url);
+    runCheck(target);
     return;
   }
-  showLinkConfirm(url, result);
+  if (result.notALink && !hasExplicitScheme(raw)) {
+    const question = raw.trim();
+    if (entry && question) {
+      runFollowup(entry, question);
+      return;
+    }
+  }
+  showLinkConfirm(target, result);
 }
 
 function truncate(text, max) {
@@ -1530,7 +1614,7 @@ el.checkBtn.addEventListener("click", () => {
     return;
   }
   const url = normalizeLink(raw);
-  if (url) confirmAndRunCheck(url);
+  if (url) confirmAndRunCheck(url, { entry, raw });
 });
 
 el.linkConfirmForm.addEventListener("submit", () => {
