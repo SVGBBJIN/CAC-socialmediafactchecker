@@ -87,11 +87,27 @@ struct GeminiRequest: Encodable {
         var responseMimeType: String?
         var temperature: Double?
         var maxOutputTokens: Int?
+        var thinkingConfig: ThinkingConfig?
+
+        /// How many of ``maxOutputTokens`` the model may spend on internal reasoning.
+        ///
+        /// Sent only to models ``supportsThinkingBudget(_:)`` accepts; the field does not
+        /// exist on `gemini-2.0-flash`, and Gemini rejects an unrecognised name outright
+        /// rather than ignoring it (``isUnsupportedThinkingConfig(status:message:)`` is
+        /// the net for a wrong guess).
+        struct ThinkingConfig: Encodable {
+            var thinkingBudget: Int
+
+            enum CodingKeys: String, CodingKey {
+                case thinkingBudget = "thinking_budget"
+            }
+        }
 
         enum CodingKeys: String, CodingKey {
             case responseMimeType = "response_mime_type"
             case temperature
             case maxOutputTokens = "max_output_tokens"
+            case thinkingConfig = "thinking_config"
         }
     }
 }
@@ -112,10 +128,18 @@ struct GeminiResponse: Decodable {
     }
 
     /// Parts may carry fields other than `text` — reasoning models return a
-    /// `thoughtSignature`, and some parts carry no text at all. Only `text` is decoded;
-    /// everything else is ignored rather than treated as a parse failure.
+    /// `thoughtSignature`, and some parts carry no text at all. Only `text` and `thought`
+    /// are decoded; everything else is ignored rather than treated as a parse failure.
+    ///
+    /// `thought: true` marks a part as a *thinking summary* rather than the answer. It is
+    /// decoded solely so ``GeminiResponse/text`` can leave it out: the head of
+    /// ``GeminiModelChain/flashPreferred`` is thinking models, and the whole joined string
+    /// is handed to ``GeminiVideoAnalysis/decode(from:mayBeTruncated:)``, so a summary
+    /// concatenated in front of the JSON fails the parse. `web/lib/gemini.js` filters the
+    /// same flag on the streaming path for the same reason.
     struct Part: Decodable {
         var text: String?
+        var thought: Bool?
     }
 
     struct PromptFeedback: Decodable {
@@ -128,10 +152,14 @@ struct GeminiResponse: Decodable {
         var totalTokenCount: Int?
     }
 
-    /// All text parts of the first candidate, concatenated.
+    /// All *answer* text parts of the first candidate, concatenated.
+    ///
+    /// Thinking summaries (`thought: true`) are dropped rather than joined in — see
+    /// ``Part``. A response that is nothing but summaries reads as no text at all, which
+    /// is the right answer: there is no analysis in it to decode.
     var text: String? {
         guard let parts = candidates?.first?.content?.parts else { return nil }
-        let joined = parts.compactMap(\.text).joined()
+        let joined = parts.filter { $0.thought != true }.compactMap(\.text).joined()
         return joined.isEmpty ? nil : joined
     }
 

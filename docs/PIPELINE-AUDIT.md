@@ -4,9 +4,13 @@ A read of both pipelines for correctness bugs: `web/` (the fact-checker that shi
 `Sources/SeerCore/` (the Swift extraction pipeline). No code was changed.
 
 **Baseline.** `cd web && npm test` → 243 pass, 0 fail (245 after the fixes below).
-`swift build` was not run: no Swift toolchain in this environment, so everything below
-about `Sources/` is from reading, and `SeerCapture`/`SeerUI` are unverified for the reason
-[EXTRACTION_PIPELINE.md](EXTRACTION_PIPELINE.md#status) already gives.
+`swift build` was not run *for the original pass*: no Swift toolchain in this environment,
+so everything below about `Sources/` was from reading. **Updated 2026-08-04:** a toolchain
+was installed (Swift 6.1.2, Ubuntu 24.04 tarball, a few minutes) and the Swift findings
+were fixed and verified — `swift build` clean, `swift test` 141 → 152, 0 failures.
+`SeerCapture`/`SeerUI` remain unverified for the reason
+[EXTRACTION_PIPELINE.md](EXTRACTION_PIPELINE.md#status) already gives: they are behind
+`#if os(iOS)` and compile to nothing on Linux.
 
 **On checking the browser fixes.** `npm test` covers `lib/` and `api/`; `public/app.js` has
 no test at all, and two of the three bugs below are in it — both of them cases where the
@@ -22,9 +26,11 @@ Findings are ordered by what they cost a reader, not by how hard they are to fix
 first three are all on the same seam — the server does careful work to salvage a damaged
 turn, and the browser throws the result away.
 
-**1–5 and 7 are fixed; 6 was resolved by decision rather than by patch** (see the status
-line under each). Everything under "Smaller things" and "What looked wrong and isn't" is
-still open or, respectively, already known-fine.
+**1–7 are all fixed** (see the status line under each). 6 was first resolved by decision
+rather than by patch — the `Sources/` freeze — and then fixed on 2026-08-04 when that
+decision was reversed; its status line has the history. Under "Smaller things", the two
+Swift Gemini findings and the Swift half of "Dead branches" were fixed in the same pass;
+the rest are still open. "What looked wrong and isn't" is unchanged and still known-fine.
 
 ---
 
@@ -179,14 +185,21 @@ match index rather than by provider.
 
 ## 6. Swift `TikTokURL` does no host check; its JS counterpart does — `Sources/SeerCore/Media/TikTokMediaResolver.swift:214, 241`
 
-> **Not fixed — left as documented, intentional drift.** This finding is the fourth
-> instance of the same pattern (host allowlist, download cap, `503` handling, and now
-> this), and it's what tipped "decide which surface is canonical" from an open question in
-> the README into an actual decision: `web/` is canonical, `Sources/` is frozen, and a
-> backport here would be exactly the incremental parity-patch this repo has now stopped
-> doing. See the README's *"`web/` is canonical. `Sources/` is frozen"* section and
-> `docs/EXTRACTION_PIPELINE.md#sources-is-frozen`. The gap below is real and stays exactly
-> as found.
+> **Fixed on 2026-08-04**, having first been closed as intentional drift on 2026-08-02.
+> The original resolution deferred to the freeze: this was the fourth instance of the same
+> pattern (host allowlist, download cap, `503` handling, and now this), and it was what
+> turned "decide which surface is canonical" into a decision to stop backporting at all.
+> That decision was reversed — this finding is most of why. Writing down a ten-line
+> security gap as permanent costs more over time than closing it, because the explanation
+> has to be maintained and re-read where the fix would have been done with.
+>
+> `TikTokURL.isTikTokHost(_:)` now exists as the Swift counterpart of `isTikTokHost` in
+> `web/lib/tiktok.js`, matched on a dot boundary, and both `videoID(from:)` and the `/t/`
+> branch of `isShortLink(_:)` gate on it. Regression tests in `TikTokDirectFetchTests.swift`:
+> *"rejects lookalike and foreign hosts"* covers each ID-bearing path shape on `evil.test`
+> plus `tiktok.com.evil.test`, and *"host predicate matches on domain boundary"* pins the
+> predicate itself. See the README's *"`web/` is canonical. `Sources/` follows it"* section
+> and `docs/EXTRACTION_PIPELINE.md#keeping-the-pairs-in-step` for the standing rule.
 
 `web/lib/tiktok.js` opens both URL predicates with a host check
 (`if (!isTikTokHost(url.hostname)) return null`, line 141; `isTikTokHost(host) && …`,
@@ -242,18 +255,23 @@ setting an operator explicitly configured. `isUnsupportedMediaResolution` +
 as well as wrong.
 
 **Swift concatenates thinking summaries into the JSON it parses** —
-`Sources/SeerCore/Gemini/GeminiWire.swift:132`. `GeminiResponse.text` joins every part's
-`text`, and `Part` doesn't decode `thought`. Harmless today because nothing sets
-`includeThoughts`, but the chain's head models are thinking models and the web side filters
-`thought` parts explicitly (`gemini.js:914`). A summary part would land inside the string
-handed to `GeminiVideoAnalysis.decode` and fail it.
+`Sources/SeerCore/Gemini/GeminiWire.swift:132`. *Fixed 2026-08-04.* `Part` now decodes
+`thought` and `GeminiResponse.text` filters on it, matching what the web side does at
+`gemini.js:914`. Was harmless only because nothing sets `includeThoughts`; the chain's head
+models are thinking models, and a summary part would have landed inside the string handed
+to `GeminiVideoAnalysis.decode` and failed it. Three tests cover it, including the case
+where filtering leaves nothing — that reads as an empty result, not a decode failure.
 
 **Swift reserves no output budget on a thinking model** —
-`Sources/SeerCore/Gemini/GeminiVideoClient.swift:46`. `GenerationConfig` has a
-`maxOutputTokens` field (`GeminiWire.swift:89`) that no call site sets, and there is no
-`thinkingConfig` at all. `DEFAULT_THINKING_BUDGET_TOKENS` in `gemini.js` documents at length
-why the visible answer needs a floor reserved for it; on the Swift side the `MAX_TOKENS`
-salvage path is absorbing a failure a budget cap would prevent.
+`Sources/SeerCore/Gemini/GeminiVideoClient.swift:46`. *Fixed 2026-08-04.*
+`GeminiVideoClient` now sends `maxOutputTokens` (16384) and, to models
+`supportsThinkingBudget` accepts, `thinkingConfig.thinkingBudget` (4096) — the same split
+and the same reasoning as `DEFAULT_MAX_OUTPUT_TOKENS`/`DEFAULT_THINKING_BUDGET_TOKENS` in
+`gemini.js`. Two knock-ons: the request body is now encoded per model inside the chain walk
+rather than once up front, since support for the field varies across the chain; and
+`shouldFallThrough` gained `isUnsupportedThinkingConfig` (a 400 naming the field, which
+matches neither of the "unsupported"/"not supported" strings the plain 400 branch looks
+for) plus `isContextLimitFailure`, which `web/lib/gemini.js` had and Swift didn't.
 
 **Instagram's shared session carries the first caller's abort signal** —
 `web/lib/instagram.js:300`. `session()` deduplicates the homepage seed across concurrent
@@ -272,9 +290,12 @@ with a worked example. `renderMarkdown` handles fenced code, inline code, `**bol
 newlines only, so those bullets render with a literal `-`/`*`/`•` and no indentation.
 
 **Dead branches.** `app.js:546` still handles a `"rewriting"` stage; the repair round it
-described was removed and nothing emits it. `ProgressSink.rebound(to:)`
-(`ExtractionProgress.swift:213`) has no caller — `ExtractionPipeline` builds the sink with
-the extractor's platform already resolved.
+described was removed and nothing emits it — still open. `ProgressSink.rebound(to:)`
+(`ExtractionProgress.swift:213`) had no caller — `ExtractionPipeline` builds the sink with
+the extractor's platform already resolved — and was *removed 2026-08-04*, along with the
+private counter-sharing initialiser that existed only to serve it. Its one test covered a
+guarantee worth keeping (all copies of a run's sink share a counter), so that test now
+makes an ordinary struct copy instead of a rebind.
 
 ---
 

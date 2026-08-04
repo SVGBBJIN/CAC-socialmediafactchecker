@@ -11,6 +11,34 @@ public struct GeminiVideoClient: Sendable {
     private let policy: RetryPolicy
     private let sleeper: any Sleeper
     private let baseURL: URL
+    private let maxOutputTokens: Int
+    private let thinkingBudgetTokens: Int
+
+    /// Ceiling on a single response, in tokens, thinking included.
+    ///
+    /// Applied even though no caller asked for one — a spend cap that has to be opted into
+    /// is a spend cap nobody sets. `GenerationConfig.maxOutputTokens` existed on the wire
+    /// type here with no call site setting it, which meant this path ran against Gemini's
+    /// own default and the ``GeminiVideoAnalysis`` salvage path absorbed the result.
+    ///
+    /// Sized like `DEFAULT_MAX_OUTPUT_TOKENS` in `web/lib/gemini.js`: a verbatim transcript
+    /// of a short-form clip plus its claims is not ten paragraphs of prose, but on a
+    /// thinking model this cap covers the reasoning too, and the head of the chain thinks
+    /// before it answers. Raising this alone would only raise the pool both draw from —
+    /// ``defaultThinkingBudgetTokens`` is what actually reserves room for the JSON.
+    public static let defaultMaxOutputTokens = 16384
+
+    /// How much of ``defaultMaxOutputTokens`` a thinking model may spend on reasoning.
+    ///
+    /// This is the half that matters for truncation. Without it the visible output and the
+    /// invisible reasoning draw from one pool, so a model that thinks longer simply leaves
+    /// less for the answer — and on this path the answer is a JSON object, where running
+    /// out mid-write means a `MAX_TOKENS` finish and a salvaged parse rather than a
+    /// slightly short paragraph. Capping the reasoning reserves
+    /// `maxOutputTokens - thinkingBudgetTokens` as a floor for the object itself.
+    ///
+    /// Set to 0 to send no `thinkingConfig` at all.
+    public static let defaultThinkingBudgetTokens = 4096
 
     public init(
         transport: any HTTPTransport = URLSessionTransport.videoUnderstanding(),
@@ -18,7 +46,9 @@ public struct GeminiVideoClient: Sendable {
         chain: GeminiModelChain = .flashPreferred,
         policy: RetryPolicy = .videoUnderstanding,
         sleeper: any Sleeper = TaskSleeper(),
-        baseURL: URL = URL(string: "https://generativelanguage.googleapis.com/v1beta")!
+        baseURL: URL = URL(string: "https://generativelanguage.googleapis.com/v1beta")!,
+        maxOutputTokens: Int = GeminiVideoClient.defaultMaxOutputTokens,
+        thinkingBudgetTokens: Int = GeminiVideoClient.defaultThinkingBudgetTokens
     ) {
         self.transport = transport
         self.secrets = secrets
@@ -26,6 +56,8 @@ public struct GeminiVideoClient: Sendable {
         self.policy = policy
         self.sleeper = sleeper
         self.baseURL = baseURL
+        self.maxOutputTokens = maxOutputTokens
+        self.thinkingBudgetTokens = thinkingBudgetTokens
     }
 
     /// Result of one successful call, with the model that produced it.
@@ -89,13 +121,18 @@ public struct GeminiVideoClient: Sendable {
 
     private func send(_ body: GeminiRequest) async throws -> Result {
         let apiKey = try secrets.requireSecret(named: .geminiAPIKey)
-        let payload = try JSONEncoder().encode(body)
 
         var attempted: [String] = []
         var lastError: Error?
 
         for model in chain.models {
             try Task.checkCancellation()
+            // Support for `thinkingConfig` varies per model in the chain, so the body is
+            // encoded freshly for whichever model this attempt is about to call rather
+            // than once up front. A model that doesn't take the field gets a request
+            // without it; one that refuses it anyway falls through to the next model —
+            // see `isUnsupportedThinkingConfig`.
+            let payload = try JSONEncoder().encode(configured(body, for: model))
             do {
                 let data = try await call(model: model, apiKey: apiKey, payload: payload)
                 let analysis = try Self.parse(data)
@@ -111,6 +148,25 @@ public struct GeminiVideoClient: Sendable {
 
         if let lastError, chain.models.count == 1 { throw lastError }
         throw ExtractionError.allCandidatesFailed(attempts: attempted)
+    }
+
+    /// `body` with the output ceiling applied, and a thinking budget if `model` takes one.
+    ///
+    /// The caller's `responseMimeType`/`temperature` are preserved — only the two budget
+    /// fields are filled in, and only where they were left unset.
+    func configured(_ body: GeminiRequest, for model: GeminiModel) -> GeminiRequest {
+        var body = body
+        var config = body.generationConfig ?? GeminiRequest.GenerationConfig()
+        if config.maxOutputTokens == nil, maxOutputTokens > 0 {
+            config.maxOutputTokens = maxOutputTokens
+        }
+        if thinkingBudgetTokens > 0, supportsThinkingBudget(model) {
+            config.thinkingConfig = .init(thinkingBudget: thinkingBudgetTokens)
+        } else {
+            config.thinkingConfig = nil
+        }
+        body.generationConfig = config
+        return body
     }
 
     private func call(model: GeminiModel, apiKey: String, payload: Data) async throws -> Data {

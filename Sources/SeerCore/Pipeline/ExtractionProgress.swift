@@ -182,13 +182,6 @@ public struct ProgressSink: Sendable {
         self.counter = Counter()
     }
 
-    private init(platform: Platform, startedAt: Date, handler: Handler?, counter: Counter) {
-        self.platform = platform
-        self.startedAt = startedAt
-        self.handler = handler
-        self.counter = counter
-    }
-
     /// A sink that drops everything. The default, so progress reporting is opt-in for
     /// callers and free for the ones that don't want it.
     public static let ignored = ProgressSink(platform: .unknown, handler: nil)
@@ -204,15 +197,6 @@ public struct ProgressSink: Sendable {
                 startedAt: startedAt,
                 sequence: counter.next()
             )
-        )
-    }
-
-    /// The same sink reporting a different platform, for when the pipeline builds it
-    /// before knowing which extractor will answer. Shares the counter, so numbering
-    /// stays continuous across the swap.
-    public func rebound(to platform: Platform) -> ProgressSink {
-        ProgressSink(
-            platform: platform, startedAt: startedAt, handler: handler, counter: counter
         )
     }
 }

@@ -186,6 +186,43 @@ final class TikTokURLTests: XCTestCase {
         }
     }
 
+    /// Both predicates are `public static` and documented for standalone use, so neither
+    /// can rely on `DirectMediaExtractor.canHandle` having run `Platform.detect` first.
+    /// Without a host check, `isShortLink` answers `true` for any site's `/t/<code>` and
+    /// `resolveVideoID` then issues a redirect-following GET to it.
+    func testRejectsLookalikeAndForeignHosts() {
+        let foreign = [
+            // A path that would parse as a video ID on a host that isn't TikTok's.
+            "https://evil.test/@user/video/7300000000000000000",
+            "https://evil.test/embed/v2/6718335390845095173",
+            "https://evil.test/v/6718335390845095173.html",
+            "https://evil.test/?item_id=6718335390845095173",
+            // Suffix matching must be on a dot boundary, not a substring.
+            "https://tiktok.com.evil.test/@user/video/7300000000000000000",
+            "https://nottiktok.com/@user/video/7300000000000000000",
+        ]
+        for string in foreign {
+            XCTAssertNil(TikTokURL.videoID(from: URL(string: string)!), "for \(string)")
+        }
+
+        let foreignShort = [
+            "https://evil.test/t/ZTabcdef/",
+            "https://tiktok.com.evil.test/t/ZTabcdef/",
+        ]
+        for string in foreignShort {
+            XCTAssertFalse(TikTokURL.isShortLink(URL(string: string)!), "for \(string)")
+        }
+    }
+
+    func testHostPredicateMatchesOnDomainBoundary() {
+        for host in ["tiktok.com", "www.tiktok.com", "uk.tiktok.com", "vm.tiktok.com"] {
+            XCTAssertTrue(TikTokURL.isTikTokHost(host), "for \(host)")
+        }
+        for host in ["tiktok.com.evil.test", "nottiktok.com", "evil.test", "", nil] {
+            XCTAssertFalse(TikTokURL.isTikTokHost(host), "for \(host ?? "nil")")
+        }
+    }
+
     /// Platform routing has to accept the short-link hosts, or the resolver never runs.
     func testShortLinkHostsRouteToTikTok() {
         for string in ["https://vm.tiktok.com/ZMabcdef/", "https://vt.tiktok.com/ZSabcdef/"] {

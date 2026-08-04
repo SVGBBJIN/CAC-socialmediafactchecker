@@ -276,20 +276,21 @@ final class ExtractionProgressTests: XCTestCase {
         XCTAssertEqual(sequences, sequences.sorted(), "sequence numbers must increase")
     }
 
-    /// Numbering has to survive the sink being copied into nested `async` calls and
-    /// rebound to a platform — all copies share one counter, or the numbers repeat.
+    /// Numbering has to survive the sink being copied into nested `async` calls — it is a
+    /// struct, so every hop takes a copy, and all copies of one run's sink have to share
+    /// the counter or the numbers repeat.
     func testSequenceIsSharedAcrossSinkCopies() {
         let recorder = Recorder()
-        let sink = ProgressSink(platform: .unknown, handler: recorder.handler)
+        let sink = ProgressSink(platform: .tikTok, handler: recorder.handler)
 
         sink.send(.resolving)
-        let rebound = sink.rebound(to: .tikTok)
-        rebound.send(.fetchingMedia)
-        // A copy taken before the rebind must not restart the count.
+        let copy = sink
+        copy.send(.fetchingMedia)
+        // The original must not restart the count after the copy has advanced it.
         sink.send(.analysing)
 
         XCTAssertEqual(recorder.events.map(\.sequence), [1, 2, 3])
-        XCTAssertEqual(recorder.events.map(\.platform), [.unknown, .tikTok, .unknown])
+        XCTAssertEqual(recorder.events.map(\.platform), [.tikTok, .tikTok, .tikTok])
     }
 
     /// An `AsyncStream` is the ordering-safe bridge, and this is the pattern `SeerUI`

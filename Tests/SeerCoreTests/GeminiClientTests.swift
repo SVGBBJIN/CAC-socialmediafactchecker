@@ -53,6 +53,45 @@ final class GeminiResponseParsingTests: XCTestCase {
         XCTAssertEqual(analysis.transcript, "hello")
     }
 
+    /// A thinking summary is a text part like any other on the wire, distinguished only
+    /// by `thought: true`. The whole joined string is handed to the JSON decoder, so a
+    /// summary concatenated in front of the object fails the parse outright.
+    func testDropsThinkingSummaryParts() throws {
+        let json = """
+        {"candidates":[{"content":{"parts":[
+          {"text":"Let me watch the clip and enumerate the claims.","thought":true},
+          {"text":"{\\"transcript\\":\\"hello\\"}","thoughtSignature":"abc"}
+        ]},"finishReason":"STOP"}]}
+        """
+        let analysis = try GeminiVideoClient.parse(Data(json.utf8))
+        XCTAssertEqual(analysis.transcript, "hello")
+    }
+
+    /// `thought: false` is the answer, not a summary — it must not be filtered too.
+    func testKeepsPartsExplicitlyMarkedNotThought() throws {
+        let json = """
+        {"candidates":[{"content":{"parts":[
+          {"text":"{\\"transcript\\":\\"hello\\"}","thought":false}
+        ]},"finishReason":"STOP"}]}
+        """
+        XCTAssertEqual(try GeminiVideoClient.parse(Data(json.utf8)).transcript, "hello")
+    }
+
+    /// Nothing but summaries is no analysis at all, and reads as an empty result rather
+    /// than as a decode failure.
+    func testAResponseOfNothingButThoughtsIsEmpty() {
+        let json = """
+        {"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]},
+        "finishReason":"STOP"}]}
+        """
+        XCTAssertThrowsError(try GeminiVideoClient.parse(Data(json.utf8))) { error in
+            guard case ExtractionError.emptyResult(let reason) = error else {
+                return XCTFail("expected emptyResult, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("no text"), "got \(reason)")
+        }
+    }
+
     func testFlagsTruncatedOutputButKeepsIt() throws {
         let json = """
         {"candidates":[{"content":{"parts":[{"text":"{\\"transcript\\":\\"partial\\"}"}]},
@@ -244,6 +283,51 @@ final class GeminiModelChainTests: XCTestCase {
         XCTAssertFalse(isInvalidKeyFailure(status: 429, message: "quota exceeded"))
         XCTAssertFalse(isInvalidKeyFailure(status: 500, message: "internal error"))
     }
+
+    /// `supportsThinkingBudget` is a guess from the version number. Gemini rejects an
+    /// unknown field name outright rather than ignoring it, so a wrong guess has to cost
+    /// one model rather than the whole chain — and the message carries neither "not
+    /// supported" nor "unsupported", so the plain 400 branch would not catch it.
+    func testFallsThroughWhenAModelRefusesThinkingConfig() {
+        let live = #"Invalid JSON payload received. Unknown name "thinkingConfig": Cannot find field."#
+        XCTAssertTrue(isUnsupportedThinkingConfig(status: 400, message: live))
+        XCTAssertTrue(isUnsupportedThinkingConfig(status: 400, message: #"Unknown name "thinking_config""#))
+        XCTAssertFalse(isUnsupportedThinkingConfig(status: 400, message: "request payload is malformed"))
+        XCTAssertFalse(isUnsupportedThinkingConfig(status: 500, message: "thinkingConfig"))
+        XCTAssertTrue(shouldFallThrough(on: ExtractionError.upstreamFailure(
+            service: "Gemini", status: 400, message: live
+        )))
+    }
+
+    /// The models in the chain do not all have the same context window, so the next one
+    /// down genuinely might accept what this one refused.
+    func testFallsThroughWhenTheRequestIsTooBigForThisModel() {
+        for message in [
+            "The input token count (2097152) exceeds the maximum number of tokens allowed",
+            "Request payload size exceeds the limit",
+            "input is too long",
+        ] {
+            XCTAssertTrue(isContextLimitFailure(status: 400, message: message), "for \(message)")
+            XCTAssertTrue(shouldFallThrough(on: ExtractionError.upstreamFailure(
+                service: "Gemini", status: 400, message: message
+            )), "for \(message)")
+        }
+        XCTAssertTrue(isContextLimitFailure(status: 413, message: "request entity too large"))
+        XCTAssertFalse(isContextLimitFailure(status: 400, message: "request payload is malformed"))
+        XCTAssertFalse(isContextLimitFailure(status: 500, message: "token count"))
+    }
+
+    /// "2.0" predates extended thinking and has no budget to cap; everything above it in
+    /// the chain does. Matched on the version rather than by name so a new preview ID
+    /// needs no code change.
+    func testOnlyThinkingModelsGetABudget() {
+        for model in [GeminiModel.flash3_6, .flash3_5, .flash3, .flash2_5] {
+            XCTAssertTrue(supportsThinkingBudget(model), "for \(model)")
+        }
+        XCTAssertFalse(supportsThinkingBudget(.flash2))
+        // The version, not a stray "2.0" elsewhere in the ID.
+        XCTAssertTrue(supportsThinkingBudget("gemini-3.5-flash-20260201"))
+    }
 }
 
 final class GeminiChainWalkTests: XCTestCase {
@@ -365,6 +449,76 @@ final class GeminiChainWalkTests: XCTestCase {
 
         XCTAssertEqual(videoMetadata["start_offset"] as? String, "0s")
         XCTAssertEqual(videoMetadata["end_offset"] as? String, "600s")
+    }
+
+    /// Without a ceiling this path ran on Gemini's own default and let the `MAX_TOKENS`
+    /// salvage absorb the result; without a thinking budget the reasoning and the JSON
+    /// draw from one pool, so a model that thinks longer just leaves less of the object.
+    func testSendsAnOutputCeilingAndAThinkingBudget() async throws {
+        let transport = StubTransport([.ok(Self.successBody)])
+        _ = try await makeClient(transport: transport)
+            .analyzeVideo(at: URL(string: "https://www.youtube.com/watch?v=jNQXAC9IVRw")!)
+
+        let requests = await transport.requests
+        let body = try XCTUnwrap(requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let config = try XCTUnwrap(json["generationConfig"] as? [String: Any])
+
+        XCTAssertEqual(config["max_output_tokens"] as? Int, GeminiVideoClient.defaultMaxOutputTokens)
+        let thinking = try XCTUnwrap(config["thinking_config"] as? [String: Any])
+        XCTAssertEqual(
+            thinking["thinking_budget"] as? Int, GeminiVideoClient.defaultThinkingBudgetTokens
+        )
+        // The caller's own settings survive being budgeted.
+        XCTAssertEqual(config["response_mime_type"] as? String, "application/json")
+    }
+
+    /// The field does not exist on `gemini-2.0-flash`, and Gemini rejects an unknown name
+    /// outright — so the body has to be encoded per model, not once for the whole walk.
+    func testDropsTheThinkingBudgetForAModelThatHasNone() async throws {
+        // 3.6 out of quota, so the walk lands on 2.0 with a single-model tail.
+        let transport = StubTransport([
+            .error(429, message: "quota exceeded"),
+            .ok(Self.successBody),
+        ])
+        let client = makeClient(transport: transport, chain: GeminiModelChain([.flash3_6, .flash2]))
+        let result = try await client
+            .analyzeVideo(at: URL(string: "https://www.youtube.com/watch?v=jNQXAC9IVRw")!)
+        XCTAssertEqual(result.model, .flash2)
+
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
+
+        func config(_ index: Int) throws -> [String: Any] {
+            let body = try XCTUnwrap(requests[index].httpBody)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            return try XCTUnwrap(json["generationConfig"] as? [String: Any])
+        }
+
+        XCTAssertNotNil(try config(0)["thinking_config"], "3.6 thinks and takes a budget")
+        XCTAssertNil(try config(1)["thinking_config"], "2.0 has no budget to cap")
+        // The ceiling is not a thinking-model field and applies either way.
+        XCTAssertEqual(try config(1)["max_output_tokens"] as? Int,
+                       GeminiVideoClient.defaultMaxOutputTokens)
+    }
+
+    /// A budget of 0 means "send no `thinkingConfig` at all".
+    func testAZeroBudgetSendsNoThinkingConfig() async throws {
+        let transport = StubTransport([.ok(Self.successBody)])
+        let client = GeminiVideoClient(
+            transport: transport,
+            secrets: InMemorySecretStore([.geminiAPIKey: "test-key"]),
+            policy: RetryPolicy(maxRetries: 0),
+            sleeper: ImmediateSleeper(),
+            thinkingBudgetTokens: 0
+        )
+        _ = try await client.analyzeVideo(at: URL(string: "https://www.youtube.com/watch?v=jNQXAC9IVRw")!)
+
+        let requests = await transport.requests
+        let body = try XCTUnwrap(requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let config = try XCTUnwrap(json["generationConfig"] as? [String: Any])
+        XCTAssertNil(config["thinking_config"])
     }
 }
 

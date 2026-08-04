@@ -66,6 +66,14 @@ public struct GeminiModelChain: Sendable, Equatable {
 ///   transient upstream failure, and treating it as terminal killed requests outright
 ///   while four models that would have answered went untried. See
 ///   ``isOverloadedFailure(status:message:)``.
+/// - A request too large for this model's context window: fall through. The models in the
+///   chain do not all have the same window, so the next one down genuinely might accept
+///   what this one refused. See ``isContextLimitFailure(status:message:)``.
+/// - A 400 naming `thinkingConfig` as a field it doesn't know: fall through.
+///   ``supportsThinkingBudget(_:)`` is a guess about which models accept the field, made
+///   from the version number rather than from a live response — this is what a wrong guess
+///   costs instead of costing the whole chain. See
+///   ``isUnsupportedThinkingConfig(status:message:)``.
 /// - Everything else (a plain 5xx, policy refusals, a bad key) is terminal; falling
 ///   through would hammer an outage or re-spend a credential that cannot work.
 func shouldFallThrough(on error: Error) -> Bool {
@@ -75,6 +83,8 @@ func shouldFallThrough(on error: Error) -> Bool {
     if isInvalidKeyFailure(status: status, message: message) { return false }
     if isQuotaFailure(status: status, message: message) { return true }
     if isOverloadedFailure(status: status, message: message) { return true }
+    if isContextLimitFailure(status: status, message: message) { return true }
+    if isUnsupportedThinkingConfig(status: status, message: message) { return true }
     switch status {
     case 404, 403:
         return true
@@ -130,6 +140,56 @@ func isOverloadedFailure(status: Int?, message: String) -> Bool {
         || lowered.contains("try again")
         || lowered.contains("capacity")
         || lowered.contains("busy")
+}
+
+/// Whether a 400 is Gemini refusing `thinkingConfig` as a field it doesn't recognise.
+///
+/// The safety net for ``supportsThinkingBudget(_:)`` guessing wrong. Gemini's
+/// protobuf-JSON parser rejects an unknown field name outright (`Unknown name
+/// "thinkingConfig"`) rather than ignoring it, so a model this package believes thinks but
+/// doesn't would otherwise fail the whole chain over one optional tuning parameter. Note
+/// that neither wording matches the `not supported`/`unsupported` strings the plain 400
+/// branch looks for, which is why this needs naming separately.
+///
+/// Matched loosely on the field name so both spellings are caught — the request is encoded
+/// with `thinking_config`, and Gemini echoes back whichever form it was sent.
+func isUnsupportedThinkingConfig(status: Int?, message: String) -> Bool {
+    guard status == 400 else { return false }
+    let lowered = message.lowercased()
+    return lowered.contains("thinkingconfig")
+        || lowered.contains("thinking_config")
+        || lowered.contains("thinking config")
+}
+
+/// Whether a failure means "this request is too big for this model".
+///
+/// Worth separating from an ordinary 400 for the reason `web/lib/gemini.js` gives: the
+/// models in the chain do not all have the same context window, so the next one down
+/// genuinely might accept what this one refused — that is a real fall-through rather than
+/// a hopeful one. On the video path the oversized thing is usually the inline media, which
+/// is why ``GeminiFilesClient`` exists for anything past 20 MB.
+func isContextLimitFailure(status: Int?, message: String) -> Bool {
+    guard status == 400 || status == 413 else { return false }
+    let lowered = message.lowercased()
+    return lowered.contains("token count")
+        || lowered.contains("too many tokens")
+        || lowered.contains("context length")
+        || lowered.contains("input is too long")
+        || lowered.contains("exceeds the maximum")
+        || lowered.contains("exceed the maximum")
+        || lowered.contains("request payload size")
+        || lowered.contains("request entity too large")
+}
+
+/// Whether `model` is expected to accept `thinkingConfig.thinkingBudget`.
+///
+/// The chain's thinking models are the "3" series and 2.5; "2.0" predates extended
+/// thinking and has no budget to cap. Matched on the version number rather than listed by
+/// name so a new preview ID slots in without a code change — the same reasoning
+/// ``GeminiModelChain/flashPreferred`` documents for not pinning IDs, and the same
+/// predicate as `supportsThinkingBudget` in `web/lib/gemini.js`.
+func supportsThinkingBudget(_ model: GeminiModel) -> Bool {
+    model.rawValue.range(of: "(?:^|[^0-9])2\\.0(?:[^0-9]|$)", options: .regularExpression) == nil
 }
 
 /// Whether a failure is really "that key is no good", whatever status it arrived under.

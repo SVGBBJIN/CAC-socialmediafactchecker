@@ -206,12 +206,32 @@ public struct TikTokMediaResolver: MediaURLResolver {
 
 /// TikTok URL shapes.
 public enum TikTokURL {
+    /// Whether `host` is TikTok's.
+    ///
+    /// Mirrors ``Platform/detect(from:)``'s TikTok branch and `isTikTokHost` in
+    /// `web/lib/tiktok.js`. Matched as a domain, never a substring, so a host like
+    /// `tiktok.com.evil.test` isn't treated as TikTok.
+    ///
+    /// Both predicates below gate on this. They are `public static` and documented for
+    /// standalone use, so they can't lean on ``DirectMediaExtractor/canHandle(_:)`` having
+    /// already run ``Platform/detect(from:)`` — the same hazard `YouTubeExtractor.videoID`
+    /// names next door. Without it, ``isShortLink(_:)`` answers `true` for any host with a
+    /// `/t/` first segment, and ``resolveVideoID(for:)`` then issues a redirect-following
+    /// GET to an attacker-named host on the strength of one path segment.
+    public static func isTikTokHost(_ host: String?) -> Bool {
+        guard let bare = host?.lowercased(), !bare.isEmpty else { return false }
+        return bare == "tiktok.com" || bare.hasSuffix(".tiktok.com")
+    }
+
     /// The numeric video ID, when the URL states it outright.
     ///
     /// Handles `/@user/video/<id>`, `/embed/v2/<id>`, `/embed/<id>`, `/v/<id>.html` and
-    /// a bare `?item_id=`. Returns nil for short links, which have to be followed, and
-    /// for `/@user/photo/<id>` carousels, which have no video to fetch.
+    /// a bare `?item_id=`. Returns nil for short links, which have to be followed, for
+    /// `/@user/photo/<id>` carousels, which have no video to fetch, and for any host that
+    /// isn't TikTok's.
     public static func videoID(from url: URL) -> String? {
+        guard isTikTokHost(url.host) else { return nil }
+
         let segments = Array(url.pathComponents.dropFirst())
 
         // /@user/photo/<id> — a real post, but a slideshow of stills. Declining here
@@ -241,8 +261,9 @@ public enum TikTokURL {
     public static func isShortLink(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         if host == "vm.tiktok.com" || host == "vt.tiktok.com" { return true }
-        // The `www.tiktok.com/t/<code>` form is the same redirect with a longer host.
-        return url.pathComponents.dropFirst().first == "t"
+        // The `www.tiktok.com/t/<code>` form is the same redirect with a longer host —
+        // and the host still has to be TikTok's, or any site's `/t/…` would qualify.
+        return isTikTokHost(host) && url.pathComponents.dropFirst().first == "t"
     }
 
     /// TikTok IDs are 19-digit snowflakes today, but were shorter in 2019 and there is

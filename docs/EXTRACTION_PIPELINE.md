@@ -47,7 +47,7 @@ its platform's, so the two can't drift apart.
 |---|---|---|
 | YouTube | native ingestion | **Working.** Verified against the live API. |
 | TikTok | direct media fetch | **Working.** Resolve + download verified live 2026-07-28; the Gemini leg needs a key to confirm. |
-| Instagram | screen capture (Swift) / direct media fetch (web) | **Working in web; frozen, unported in Swift.** The web app resolves reels anonymously and ships it. The Swift extractor is still the capture one and still unregistered — and, with `Sources/` now frozen (see [Cross-cutting](#sources-is-frozen)), stays that way rather than being ported. See [SPIKE-instagram.md](SPIKE-instagram.md). |
+| Instagram | screen capture (Swift) / direct media fetch (web) | **Working in web; unported in Swift.** The web app resolves reels anonymously and ships it. The Swift extractor is still the capture one and still unregistered; the port is wanted and unscheduled (see [Cross-cutting](#keeping-the-pairs-in-step)). See [SPIKE-instagram.md](SPIKE-instagram.md). |
 
 Only platforms that can actually be served get registered. TikTok and YouTube need nothing
 but the Gemini key. `SeerPipelineBuilder` leaves Instagram out unless a capture source and
@@ -215,11 +215,12 @@ needs them, and the ReplayKit audio question is unresolved.
 It no longer has to be. Instagram turned out to be resolvable to a direct MP4 with no
 credential (see §3), which is the outcome this section was told to check for — and porting
 the resolver would take the whole arm away with the ReplayKit problem inside it. That port
-is not happening: `Sources/` is frozen (see [Cross-cutting](#sources-is-frozen)), and a
-web → Swift port of the Instagram resolver is exactly the work the freeze stops. So the arm
-survives, unregistered and unmaintained rather than retired. **Do not spend anything
-further on the capture path** regardless — that was true when the plan was to delete it,
-and is equally true now that the plan is to leave it alone.
+was ruled out while `Sources/` was frozen and is back on the table now that it isn't (see
+[Cross-cutting](#keeping-the-pairs-in-step)); it wants its own pass, since it adds a
+platform rather than closing a gap. Until it happens the arm survives, unregistered.
+**Do not spend anything further on the capture path** regardless — the endpoint is
+deletion either way, and tuning something scheduled for removal is the one clearly wasted
+move.
 
 Two properties of that path worth preserving if it is revisited:
 
@@ -285,50 +286,54 @@ serves the MP4 with no credential. Full findings: [SPIKE-instagram.md](SPIKE-ins
 so a reel and a TikTok are one kind of thing to the Gemini layer. No Meta token, no
 capture, no ReplayKit.
 
-**The Swift app does not, and now will not.** `CaptureBasedExtractor.instagram` is still
-what exists and is still unregistered, which means Instagram remains the only platform on
-the capture arm and that arm is still carried for a platform that no longer needs it. The
-port used to be described here as small and worth doing — a `MediaURLResolver` alongside
-`TikTokMediaResolver`, then register Instagram as `directMediaFetch` and delete the capture
-path with it. That recommendation is withdrawn, not completed: see
-[the freeze decision](#sources-is-frozen) below. `Sources/` no longer receives new ports
-from `web/`, and this would have been one. The capture arm, the ReplayKit audio problem,
-and `CaptureBasedExtractor.instagram` all stay exactly as they are.
+**The Swift app does not, yet.** `CaptureBasedExtractor.instagram` is still what exists and
+is still unregistered, which means Instagram remains the only platform on the capture arm
+and that arm is still carried for a platform that no longer needs it. The port is small and
+worth doing — a `MediaURLResolver` alongside `TikTokMediaResolver`, then register Instagram
+as `directMediaFetch` and delete the capture path with it. That recommendation was
+withdrawn under the freeze and is reinstated now that `Sources/` tracks `web/` again (see
+[Keeping the pairs in step](#keeping-the-pairs-in-step) below). It is unscheduled rather
+than done: it adds a platform to the Swift side, which is a larger and more testable piece
+of work than closing a parity gap, and it deserves its own pass rather than riding along
+with one.
 
 ## Cross-cutting
 
-### `Sources/` is frozen
+### Keeping the pairs in step
 
 `web/lib/tiktok.js`, `web/lib/gemini-files.js`, `web/lib/gemini.js` and
 `web/lib/media-fetch.js` are ports of the Swift files named in their headers, and nothing
-ever kept the pairs in step but hand-porting, which did not happen reliably: the web side
-is where fixes land (42 commits to `web/` against 12 to `Sources/` over three months), all
-three hardening measures described above existed in `web/` before they existed here, and a
-fourth divergence — `TikTokURL` in `TikTokMediaResolver.swift` has no host check on its
-short-link and video-ID parsing, where `web/lib/tiktok.js`'s `isTikTokHost`-gated
-equivalents do — turned up in the audit that led to this decision.
+keeps the pairs in step but hand-porting, which historically did not happen reliably: the
+web side is where fixes land (42 commits to `web/` against 12 to `Sources/` over three
+months), and all three hardening measures described above existed in `web/` before they
+existed here.
 
-**The root README states the decision this section used to defer: `web/` is canonical,
-and `Sources/` is frozen rather than a second target for incremental parity patches.**
-Concretely, for anyone working in this file's directory:
+`Sources/` was **frozen** on 2026-08-02 in response to that — no more parity ports — and
+**unfrozen on 2026-08-04**, which is the state this section now describes. The freeze
+lasted one pass, and what ended it was what that pass had to write down: `TikTokURL`'s
+missing host check went into the audit as permanent, accepted drift, when it was ten lines
+and a test. A documented hole is cheaper than a fixed one exactly once; after that every
+reader has to be told about it, and the explanation outlives the effort it saved.
 
-- A fix that lands in `web/` is **not** ported into `Sources/` anymore. The `TikTokURL`
-  gap above is left exactly as found — not because it doesn't matter (a stray host check
-  missing on a URL-parsing helper is a real, if currently unreachable, gap — see
-  `Platform.detect`/`DirectMediaExtractor.canHandle`, which is what keeps it unreachable
-  through the registered pipeline today) but because patching it would be exactly the
-  incremental-parity pattern this decision exists to stop. It is documented here instead of
-  fixed so the next reader finds an explanation, not a surprise.
-- `Sources/` still has to compile and its own tests still have to pass. Frozen means no new
-  ports in, not "stop maintaining what's here" — a change that breaks the existing build is
-  still a regression.
+**The root README states the decision: `web/` is canonical, and `Sources/` is kept in step
+with it.** Concretely, for anyone working in this file's directory:
+
+- A correctness or hardening fix that lands in `web/` is **owed** to `Sources/`. Not every
+  change — the fact-check layer, the browser UI and the chat transport have no counterpart
+  here. What ports is what the two share: URL parsing, host allowlists, the Gemini wire
+  shape, the model chain's failure taxonomy, the media path's refusals.
+- Divergence between a named pair is a bug, not a property. Close it and add the Swift-side
+  regression test in the same pass that finds it.
+- `Sources/` has to compile and its own tests have to pass — `swift build && swift test`,
+  152 tests as of 2026-08-04. The container has no Swift toolchain by default, which is why
+  earlier passes read `Sources/` rather than running it; installing one takes a few minutes
+  and is the difference between checking a claim and asserting it.
 - Deleting `Sources/` — the other branch the root README lays out, worth roughly 5,700
-  lines — is a separate, larger decision this freeze does not make on its own. See the
-  README for why.
+  lines — remains a separate, larger decision. See the README.
 
-Read the web counterpart before touching anything in `Sources/` regardless — even frozen,
-understanding what the web side already learned about a given piece of logic is cheaper
-than rediscovering it, which is exactly how the Files API poll ramp got written twice.
+Read the web counterpart before touching anything in `Sources/` regardless: understanding
+what the web side already learned about a given piece of logic is cheaper than
+rediscovering it, which is exactly how the Files API poll ramp got written twice.
 
 **Retries** — exponential backoff with full jitter (`RetryPolicy`). Jitter matters because
 share-extension launches cluster. `Retry-After` wins over the local curve when the server
