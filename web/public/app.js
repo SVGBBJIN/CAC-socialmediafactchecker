@@ -86,6 +86,22 @@ const el = {
   linkConfirmTitle: document.getElementById("link-confirm-title"),
   linkConfirmBody: document.getElementById("link-confirm-body"),
   linkConfirmCancel: document.getElementById("link-confirm-cancel"),
+  settingsBtn: document.getElementById("settingsBtn"),
+  settingsDialog: document.getElementById("settings-dialog"),
+  settingsForm: document.getElementById("settings-form"),
+  settingReducedMotion: document.getElementById("setting-reduced-motion"),
+  settingHighContrast: document.getElementById("setting-high-contrast"),
+  settingFontSize: document.getElementById("setting-font-size"),
+  settingShowQuotes: document.getElementById("setting-show-quotes"),
+  settingSystemPrompt: document.getElementById("setting-system-prompt"),
+  searchStatus: document.getElementById("searchStatus"),
+  imageBtn: document.getElementById("imageBtn"),
+  imageInput: document.getElementById("imageInput"),
+  imageChip: document.getElementById("imageChip"),
+  imageChipThumb: document.getElementById("imageChipThumb"),
+  imageChipName: document.getElementById("imageChipName"),
+  imageChipRemove: document.getElementById("imageChipRemove"),
+  micBtn: document.getElementById("micBtn"),
 };
 
 let library = loadLibrary();
@@ -105,6 +121,149 @@ let videoPaneToken = 0;
 // same as the chat UI drops an in-progress bubble on refresh.
 let pendingFollowup = null; // { entryId, question, error? }
 let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check anyway"
+
+/* ---------------------------------------------------------------- settings */
+
+const SETTINGS_KEY = "seer.settings.v1";
+const DEFAULT_SETTINGS = {
+  reducedMotion: false,
+  highContrast: false,
+  fontSize: "normal", // "normal" | "large"
+  showQuotes: true, // gates the per-source "Show quote" toggle in sourcesHTML
+  systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
+};
+
+function loadSettings() {
+  let parsed;
+  try {
+    parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}");
+  } catch {
+    parsed = {};
+  }
+  return { ...DEFAULT_SETTINGS, ...(parsed && typeof parsed === "object" ? parsed : {}) };
+}
+
+function persistSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // Best-effort, same as the library and feedback stores.
+  }
+}
+
+let settings = loadSettings();
+let serverConfig = null; // last /api/config response, so the settings dialog can show search status
+
+/** Stamps the accessibility settings onto the root element so the CSS in index.html can
+ * key off them. Called once at startup and again on every settings change. */
+function applySettings() {
+  const root = document.documentElement;
+  setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
+  setAttrIf(root, "data-contrast", settings.highContrast, "high");
+  setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
+}
+
+function setAttrIf(node, name, condition, value) {
+  if (condition) node.setAttribute(name, value);
+  else node.removeAttribute(name);
+}
+
+/** The custom system-prompt text, appended to an outgoing message. Kept separate from
+ * what's stored/displayed as the question so the thread still shows what the user typed,
+ * not what was actually sent underneath it. */
+function withCustomInstructions(text) {
+  const instructions = settings.systemPrompt.trim();
+  return instructions
+    ? `${text}\n\n[The user has set custom instructions for you to follow throughout this conversation: ${instructions}]`
+    : text;
+}
+
+/* ---------------------------------------------------------------- feedback (like/dislike) */
+
+const FEEDBACK_KEY = "seer.feedback.v1";
+
+function loadFeedback() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FEEDBACK_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistFeedback() {
+  try {
+    localStorage.setItem(FEEDBACK_KEY, JSON.stringify(feedback));
+  } catch {
+    // Best-effort — losing a thumbs-up on a full/disabled store isn't worth surfacing.
+  }
+}
+
+let feedback = loadFeedback();
+
+/** One answer's key into `feedback` — the main analysis, or one specific follow-up. */
+function feedbackKey(entryId, followupIndex) {
+  return followupIndex == null ? entryId : `${entryId}::f${followupIndex}`;
+}
+
+/* ---------------------------------------------------------------- image attachment */
+
+// Long enough to keep detail Gemini can actually use, short enough that the base64 body
+// stays well under guard.js's `maxImageBase64Bytes`. A phone photo is easily 12MB raw;
+// re-encoding client-side is what makes attaching one affordable at all.
+const MAX_IMAGE_DIMENSION = 1600;
+const IMAGE_JPEG_QUALITY = 0.82;
+
+let pendingImage = null; // { mimeType, data (base64, no prefix), previewURL, name }
+
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error ?? new Error("Couldn't read that file."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Downscales and re-encodes an uploaded image client-side, so what leaves the browser is
+ * a bounded JPEG rather than whatever a phone camera produced. */
+async function processImageFile(file) {
+  const bitmap = await createImageBitmap(file).catch(() => {
+    throw new Error("Couldn't read that image.");
+  });
+  const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", IMAGE_JPEG_QUALITY));
+  if (!blob) throw new Error("Couldn't process that image.");
+  const dataURL = await blobToDataURL(blob);
+  const base64 = dataURL.slice(dataURL.indexOf(",") + 1);
+  return { mimeType: "image/jpeg", data: base64, previewURL: dataURL, name: file.name };
+}
+
+function showImageChip(image) {
+  el.imageChipThumb.src = image.previewURL;
+  el.imageChipThumb.alt = image.name;
+  el.imageChipName.textContent = image.name;
+  el.imageChip.hidden = false;
+}
+
+function clearPendingImage() {
+  pendingImage = null;
+  el.imageChip.hidden = true;
+  el.imageChipThumb.removeAttribute("src");
+}
+
+/** `{ image: {...} }` for a message about to be sent, or `{}` — spread onto the message
+ * object so a turn with no attachment looks exactly like it did before this existed. */
+function imagePayload(image) {
+  return image ? { image: { mimeType: image.mimeType, data: image.data } } : {};
+}
 
 /* ---------------------------------------------------------------- storage */
 
@@ -300,6 +459,85 @@ function linkCitations(html, sources) {
   });
 }
 
+/** Inline spans within one line: code, bold, italic, then citation markers. Order matters
+ * — bold is matched before italic so a `**bold**` pair never leaves a stray `*` for the
+ * italic pass to misfire on, and citations run last since `[n]` can sit inside any of the
+ * above. */
+function renderInline(text, sources) {
+  return linkCitations(
+    escapeHTML(text)
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>"),
+    sources,
+  );
+}
+
+/**
+ * One non-code segment of an answer, as block-level HTML.
+ *
+ * The model is asked (see citations.js's `describe`) to format multi-part claims as
+ * bullets with bold labels, but until now nothing on the way to the screen understood a
+ * `- ` line as a list item — it became one plain-text line with a literal dash, indistinct
+ * from the sentence above and below it. This turns consecutive `-`/`*`/`1.` lines into a
+ * real `<ul>`/`<ol>`, `#`-prefixed lines into a small heading, and `> ` lines into a
+ * blockquote, while leaving ordinary prose exactly as it rendered before.
+ */
+function renderBlock(text, sources) {
+  const lines = text.split("\n");
+  const html = [];
+  let list = null; // { tag: "ul" | "ol", items: string[] }
+  let para = [];
+
+  const flushPara = () => {
+    if (para.length === 0) return;
+    html.push(renderInline(para.join("\n"), sources).replace(/\n/g, "<br>"));
+    para = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    html.push(`<${list.tag}>${list.items.map((item) => `<li>${renderInline(item, sources)}</li>`).join("")}</${list.tag}>`);
+    list = null;
+  };
+
+  for (const line of lines) {
+    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushPara();
+      const tag = bullet ? "ul" : "ol";
+      if (!list || list.tag !== tag) {
+        flushList();
+        list = { tag, items: [] };
+      }
+      list.items.push((bullet ?? numbered)[1]);
+      continue;
+    }
+    flushList();
+
+    const header = /^#{1,4}\s+(.*)$/.exec(line);
+    if (header) {
+      flushPara();
+      html.push(`<h4>${renderInline(header[1], sources)}</h4>`);
+      continue;
+    }
+    const quote = /^>\s?(.*)$/.exec(line);
+    if (quote) {
+      flushPara();
+      html.push(`<blockquote>${renderInline(quote[1], sources)}</blockquote>`);
+      continue;
+    }
+    if (line.trim() === "") {
+      flushPara();
+      continue;
+    }
+    para.push(line);
+  }
+  flushPara();
+  flushList();
+  return html.join("");
+}
+
 function renderMarkdown(text, sources) {
   const segments = text.split(/```/);
   return segments
@@ -311,13 +549,7 @@ function renderMarkdown(text, sources) {
       let plain = segment;
       if (index > 0) plain = plain.replace(/^\n+/, "");
       if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
-      return linkCitations(
-        escapeHTML(plain)
-          .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-          .replace(/\n/g, "<br>"),
-        sources,
-      );
+      return renderBlock(plain, sources);
     })
     .join("");
 }
@@ -624,29 +856,146 @@ function verdictHTML(entry) {
     </div>`;
 }
 
+/**
+ * One source row, with the exact passage a citation rests on when there is one.
+ *
+ * `s.quote` is the best passage `find_in_page` pulled off that source (see `sourceRows`
+ * in verified-chat.js) — it already reaches the browser today, just unrendered. Gated by
+ * the settings-panel toggle: off means the row looks exactly as it always has, on means a
+ * "Show quote" control appears per source, collapsed by default so a long thread doesn't
+ * turn into a wall of blockquotes.
+ */
+function sourceItemHTML(s) {
+  const quoteToggle =
+    settings.showQuotes && s.quote
+      ? `<button type="button" class="source-quote-toggle" data-quote-toggle>Show quote</button>
+         <blockquote class="source-quote" hidden>&ldquo;${escapeHTML(s.quote)}&rdquo;</blockquote>`
+      : "";
+  return `
+    <div class="source-item">
+      <div class="source-row">
+        <span><a class="citation" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.title)}</a></span>
+        <span>${escapeHTML(s.domain)}</span>
+      </div>
+      ${quoteToggle}
+    </div>`;
+}
+
 function sourcesHTML(sources) {
   if (!sources?.length) return "";
   return `
     <div class="sources" data-reveal>
       <div class="sources-label">Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}</div>
-      ${sources
-        .map(
-          (s) =>
-            `<div class="source-item"><span><a class="citation" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.title)}</a></span><span>${escapeHTML(s.domain)}</span></div>`,
-        )
-        .join("")}
+      ${sources.map(sourceItemHTML).join("")}
     </div>`;
+}
+
+/**
+ * Copy / share / like / dislike for one answer — the main analysis when `followupIndex` is
+ * null, otherwise that follow-up. The row carries just enough in its dataset for the
+ * delegated click handler on `claimsPane` to look the real text back up in `library`
+ * rather than baking it into the HTML, where a long answer with quotes in it would be
+ * awkward to embed safely.
+ */
+function actionRowHTML(entryId, followupIndex) {
+  const liked = feedback[feedbackKey(entryId, followupIndex)];
+  const followupAttr = followupIndex == null ? "" : ` data-followup-index="${followupIndex}"`;
+  return `
+    <div class="action-row" data-entry-id="${escapeHTML(entryId)}"${followupAttr}>
+      <button type="button" class="action-btn" data-action="copy" aria-label="Copy answer" title="Copy">
+        <svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a2 2 0 012-2h9" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+      <button type="button" class="action-btn" data-action="share" aria-label="Share answer" title="Share">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="18" cy="5" r="2.3" stroke="currentColor" stroke-width="1.5"/><circle cx="6" cy="12" r="2.3" stroke="currentColor" stroke-width="1.5"/><circle cx="18" cy="19" r="2.3" stroke="currentColor" stroke-width="1.5"/><path d="M8.1 10.7l7.8-4.4M8.1 13.3l7.8 4.4" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button type="button" class="action-btn like" data-action="like" aria-pressed="${liked === "like"}" aria-label="Good response" title="Good response">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M7 10v10H4V10h3zm3 10h7.4a2 2 0 001.94-1.52l1.4-5.6A2 2 0 0017.8 10H14l.6-4.2A1.8 1.8 0 0012.86 4L10 9v11z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="action-btn dislike" data-action="dislike" aria-pressed="${liked === "dislike"}" aria-label="Bad response" title="Bad response">
+        <svg viewBox="0 0 24 24" fill="none" style="transform:rotate(180deg)"><path d="M7 10v10H4V10h3zm3 10h7.4a2 2 0 001.94-1.52l1.4-5.6A2 2 0 0017.8 10H14l.6-4.2A1.8 1.8 0 0012.86 4L10 9v11z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+      </button>
+      <span class="action-feedback"></span>
+    </div>`;
+}
+
+function flashActionFeedback(row, message) {
+  const span = row.querySelector(".action-feedback");
+  if (!span) return;
+  span.textContent = message;
+  span.classList.toggle("show", Boolean(message));
+  clearTimeout(row._feedbackTimer);
+  if (message) row._feedbackTimer = setTimeout(() => span.classList.remove("show"), 1800);
+}
+
+/** One delegated handler for everything a reader can click inside a rendered answer:
+ * expanding a citation quote, or acting on the answer itself. */
+async function handleClaimsPaneClick(event) {
+  const quoteToggle = event.target.closest("[data-quote-toggle]");
+  if (quoteToggle) {
+    const quote = quoteToggle.nextElementSibling;
+    const show = quote.hidden;
+    quote.hidden = !show;
+    quoteToggle.textContent = show ? "Hide quote" : "Show quote";
+    return;
+  }
+
+  const btn = event.target.closest(".action-btn");
+  if (!btn) return;
+  const row = btn.closest(".action-row");
+  const entry = row ? findEntry(row.dataset.entryId) : null;
+  if (!entry) return;
+  const followupIndex = row.dataset.followupIndex != null ? Number(row.dataset.followupIndex) : null;
+  const text = followupIndex == null ? entry.answer : entry.followups[followupIndex]?.answer;
+  if (text == null) return;
+
+  const action = btn.dataset.action;
+  if (action === "copy") {
+    try {
+      await navigator.clipboard.writeText(text);
+      flashActionFeedback(row, "Copied");
+    } catch {
+      flashActionFeedback(row, "Couldn't copy");
+    }
+    return;
+  }
+  if (action === "share") {
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: "Seer fact-check", text, url: entry.url });
+      } catch {
+        // AbortError from the user cancelling the share sheet isn't a failure worth reporting.
+      }
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(`${text}\n\n${entry.url}`);
+      flashActionFeedback(row, "Copied to share");
+    } catch {
+      flashActionFeedback(row, "Couldn't share");
+    }
+    return;
+  }
+  if (action === "like" || action === "dislike") {
+    const key = feedbackKey(entry.id, followupIndex);
+    feedback[key] = feedback[key] === action ? undefined : action; // click again to un-set
+    if (!feedback[key]) delete feedback[key];
+    persistFeedback();
+    row.querySelector('[data-action="like"]').setAttribute("aria-pressed", String(feedback[key] === "like"));
+    row.querySelector('[data-action="dislike"]').setAttribute("aria-pressed", String(feedback[key] === "dislike"));
+    flashActionFeedback(row, feedback[key] ? "Thanks for the feedback" : "");
+  }
 }
 
 /** Past follow-ups, plus one in flight or freshly failed, as a thread under the analysis. */
 function threadHTML(entry) {
   const settled = entry.followups
     .map(
-      (f) => `
+      (f, index) => `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(f.question)}</div>
           <div class="thread-a claim-text" data-reveal>${renderMarkdown(f.answer, f.sources)}</div>
           ${incompleteHTML(f.incomplete)}
+          ${actionRowHTML(entry.id, index)}
           ${sourcesHTML(f.sources)}
         </div>`,
     )
@@ -676,6 +1025,7 @@ function renderResultCard(entry) {
       <div class="claim-text" data-reveal>${renderMarkdown(entry.answer, entry.sources)}</div>
       ${incompleteHTML(entry.incomplete)}
       ${verdictHTML(entry)}
+      ${actionRowHTML(entry.id, null)}
       ${sourcesHTML(entry.sources)}
       ${threadHTML(entry)}
     </div>`;
@@ -836,11 +1186,11 @@ function incompleteFrom({ truncated, failure }) {
 }
 
 function composeCheckPrompt(url) {
-  return (
+  return withCustomInstructions(
     `Fact-check this video: ${url}\n\n` +
-    "List the distinct factual claims it makes, check each one, and explain what the evidence " +
-    "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
-    "|Insufficient evidence>` summarizing the main claim — no other text on that line."
+      "List the distinct factual claims it makes, check each one, and explain what the evidence " +
+      "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
+      "|Insufficient evidence>` summarizing the main claim — no other text on that line.",
   );
 }
 
@@ -882,13 +1232,17 @@ async function runCheck(url, existingId) {
   renderRunningCard();
   updateComposerMode();
 
+  const image = pendingImage;
+  clearPendingImage();
+
   const controller = new AbortController();
   inFlight = controller;
   el.checkBtn.disabled = true;
   el.newCheckBtn.disabled = true;
 
   try {
-    const { answer, sources, incomplete } = await streamChat([{ role: "user", content: prompt }], {
+    const message = { role: "user", content: prompt, ...imagePayload(image) };
+    const { answer, sources, incomplete } = await streamChat([message], {
       signal: controller.signal,
       onStage: (frame) => {
         const status = document.getElementById("runStatus");
@@ -935,6 +1289,8 @@ async function runFollowup(entry, question) {
 
   pendingFollowup = { entryId: entry.id, question, error: null };
   el.linkInput.value = "";
+  const image = pendingImage;
+  clearPendingImage();
   renderResultCard(entry);
   updateComposerMode();
 
@@ -945,7 +1301,8 @@ async function runFollowup(entry, question) {
   let settled = false;
 
   try {
-    const { answer, sources, incomplete } = await streamChat([...historyFor(entry), { role: "user", content: question }], {
+    const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
+    const { answer, sources, incomplete } = await streamChat([...historyFor(entry), message], {
       signal: controller.signal,
       onStage: (frame) => {
         const status = document.getElementById("followupStatus");
@@ -1002,11 +1359,29 @@ function updateComposerMode() {
 
 /* ---------------------------------------------------------------- config + gating */
 
+/** The settings dialog's read-only "Search" section — whether the server has a provider
+ * configured, since that's what decides whether answers come back cited at all. */
+function renderSearchStatus() {
+  if (!el.searchStatus) return;
+  if (!serverConfig) {
+    el.searchStatus.innerHTML = `<span class="dot muted"></span><span>Checking…</span>`;
+    return;
+  }
+  const search = serverConfig.search;
+  if (search?.enabled) {
+    el.searchStatus.innerHTML = `<span class="dot good"></span><span>On — via ${escapeHTML(search.provider)}</span>`;
+  } else {
+    el.searchStatus.innerHTML = `<span class="dot warn"></span><span>Off — answers won't be cited</span>`;
+  }
+}
+
 async function loadServerConfig() {
   try {
     const response = await fetch("/api/config");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const config = await response.json();
+    serverConfig = config;
+    renderSearchStatus();
     if (!config.apiKeyConfigured) {
       el.checkBtn.disabled = true;
       el.linkInput.placeholder = "Server has no GEMINI_API_KEY — see web/README.md";
@@ -1018,7 +1393,75 @@ async function loadServerConfig() {
   } catch {
     el.checkBtn.disabled = true;
     el.linkInput.placeholder = "Server unreachable";
+    renderSearchStatus();
   }
+}
+
+/* ---------------------------------------------------------------- settings dialog */
+
+function updateFontSizeButtons() {
+  el.settingFontSize.querySelectorAll("button[data-value]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === settings.fontSize);
+  });
+}
+
+function openSettingsDialog() {
+  el.settingReducedMotion.checked = settings.reducedMotion;
+  el.settingHighContrast.checked = settings.highContrast;
+  el.settingShowQuotes.checked = settings.showQuotes;
+  el.settingSystemPrompt.value = settings.systemPrompt;
+  updateFontSizeButtons();
+  renderSearchStatus();
+  el.settingsDialog.showModal();
+}
+
+/* ---------------------------------------------------------------- speech-to-text */
+
+const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let recognizing = false;
+
+function setListening(on) {
+  recognizing = on;
+  el.micBtn.classList.toggle("listening", on);
+  el.micBtn.setAttribute("aria-pressed", String(on));
+}
+
+/** Wires up the mic button if the browser has a speech-recognition API, otherwise hides
+ * it — a button that silently does nothing is worse than no button. */
+function initSpeechToText() {
+  if (!SpeechRecognitionImpl) {
+    el.micBtn.hidden = true;
+    return;
+  }
+  recognizer = new SpeechRecognitionImpl();
+  recognizer.lang = navigator.language || "en-US";
+  recognizer.interimResults = false;
+  recognizer.maxAlternatives = 1;
+  recognizer.addEventListener("result", (event) => {
+    const transcript = Array.from(event.results)
+      .map((result) => result[0]?.transcript ?? "")
+      .join(" ")
+      .trim();
+    if (!transcript) return;
+    el.linkInput.value = el.linkInput.value ? `${el.linkInput.value} ${transcript}` : transcript;
+    updateComposerMode();
+  });
+  recognizer.addEventListener("end", () => setListening(false));
+  recognizer.addEventListener("error", () => setListening(false));
+
+  el.micBtn.addEventListener("click", () => {
+    if (recognizing) {
+      recognizer.stop();
+      return;
+    }
+    try {
+      recognizer.start();
+      setListening(true);
+    } catch {
+      setListening(false);
+    }
+  });
 }
 
 /* ---------------------------------------------------------------- wiring */
@@ -1071,6 +1514,57 @@ el.passForm.addEventListener("submit", () => {
   if (value) sessionStorage.setItem(PASSPHRASE_KEY, value);
   el.passInput.value = "";
 });
+
+el.claimsPane.addEventListener("click", handleClaimsPaneClick);
+
+el.settingsBtn.addEventListener("click", openSettingsDialog);
+el.settingReducedMotion.addEventListener("change", () => {
+  settings.reducedMotion = el.settingReducedMotion.checked;
+  persistSettings();
+  applySettings();
+});
+el.settingHighContrast.addEventListener("change", () => {
+  settings.highContrast = el.settingHighContrast.checked;
+  persistSettings();
+  applySettings();
+});
+el.settingFontSize.addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-value]");
+  if (!btn) return;
+  settings.fontSize = btn.dataset.value;
+  persistSettings();
+  applySettings();
+  updateFontSizeButtons();
+});
+el.settingShowQuotes.addEventListener("change", () => {
+  settings.showQuotes = el.settingShowQuotes.checked;
+  persistSettings();
+  // Re-render whatever's on screen so the toggle takes effect immediately, not on the
+  // next navigation.
+  const entry = selectedId ? findEntry(selectedId) : null;
+  if (entry?.status === "done") renderResultCard(entry);
+});
+el.settingsForm.addEventListener("submit", () => {
+  settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);
+  persistSettings();
+});
+
+el.imageBtn.addEventListener("click", () => el.imageInput.click());
+el.imageInput.addEventListener("change", async () => {
+  const file = el.imageInput.files?.[0];
+  el.imageInput.value = ""; // lets the same file be picked again later
+  if (!file || !file.type.startsWith("image/")) return;
+  try {
+    pendingImage = await processImageFile(file);
+    showImageChip(pendingImage);
+  } catch {
+    clearPendingImage();
+  }
+});
+el.imageChipRemove.addEventListener("click", clearPendingImage);
+
+applySettings();
+initSpeechToText();
 
 renderLibrary();
 if (selectedId) {
