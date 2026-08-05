@@ -134,6 +134,10 @@ web/
                    quote it to the model as the material being checked.
   lib/resolve-hint.js  Carries intake's resolve to the fact-check so it isn't run twice,
                    and the vetting that makes accepting it from the browser safe.
+  lib/browser-resolve.js  When a resolve is throttled or refused, ask the browser worker
+                   for a second opinion. Optional; off unless BROWSER_WORKER_URL is set.
+  lib/post-preview.js  The last metadata tier: a post page's Open Graph tags, for a clip
+                   that could not be downloaded and whose resolve carried nothing.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
@@ -147,7 +151,15 @@ web/
   test-probe.js    Tests for the intake ping and its address vetting.
   test-hint.js     Tests for the resolve hint the browser carries to the check.
   test-article.js  Tests for reading a pasted page — vetting, refusals, and fencing.
+  test-browser-resolve.js  Tests for the browser-worker tier: which failures escalate,
+                   which deliberately don't, and what happens when it can't help.
+  test-post-preview.js  Tests for the page-preview tier: what it reads, what it refuses,
+                   and the order the three metadata tiers run in.
 ```
+
+The browser worker itself lives outside this directory, in [`worker/`](../worker/), because
+it needs Playwright and `web/` has no dependencies and no build step. It is optional — with
+`BROWSER_WORKER_URL` unset, nothing here reaches for it.
 
 ## How a pasted video reaches the model
 
@@ -221,6 +233,70 @@ claim and the video is B-roll, which makes this a much better answer than "that 
 couldn't be attached". An expired signed URL (`403` from the CDN) is repaired first, by
 resolving the post again for a freshly signed one and downloading from that; the fallback
 is only reached if that fails too.
+
+**When even the resolve carried nothing.** Three metadata tiers run in cost order, and the
+first one that answers wins:
+
+1. **The resolve's own caption and creator** — already in hand, no request at all.
+2. **The platform's oEmbed** — one documented endpoint. TikTok only; Instagram's needs a
+   Meta App Review token.
+3. **The post page's Open Graph tags** — one GET, both platforms.
+
+The third tier is what finally gives Instagram a metadata fallback: before it, a reel whose
+resolve failed outright had nothing left and was simply lost. `og:description` on a post
+*is* the caption, and those tags are served to anonymous requests and kept stable because
+every link preview on the internet reads them.
+
+It deliberately does **not** reuse `lib/article.js`, and the reason is worth keeping: that
+path requires 200 characters of readable prose and throws `empty` below it, on the grounds
+that a page with less than a paragraph is drawn by JavaScript. A post page *is* drawn by
+JavaScript — its body is an app shell — so the article scraper would refuse it every single
+time. The `<head>` is the opposite: Open Graph tags exist precisely so software can describe
+a page without executing it. So the tier reads the head and ignores the body.
+
+A login wall, an age gate and a "content unavailable" page all return `200` with well-formed
+tags describing *the platform*, so previews that read as the site rather than the post are
+dropped — telling the model a reel's caption is "Log in to Instagram" is worse than saying
+nothing, because it looks like content. Each tier hangs off the provider like `oEmbed` does,
+so a caller supplying its own providers gets no request it didn't ask for.
+
+**A refused resolve can get a second opinion from a browser.** Optional, off unless
+`BROWSER_WORKER_URL` is set, and only ever reached after something has already failed. The
+resolvers above are anonymous HTTP, which is what makes a reel cost what a TikTok costs —
+and also why they get `429`'d, refused outright, or left behind when a payload shape moves.
+None of those are facts about the post: it is public, and a browser can see it. So a worker
+service running a real Chromium loads the post, watches for the media request the player
+makes, and reports the URL it saw.
+
+The insight is the session, not the recording. Cookies, a `Referer` and an executed JS
+runtime are what get you *to* the media URL; the URL itself is signed rather than
+cookie-bound, so the bytes still come down `web/`'s normal path at network speed, through
+the same host allowlist, size cap and retry policy as any clip. The worker is never on the
+byte path, and its answer is validated by `validateHint` — the same function that vets a
+resolve handed back by the browser, for the same reason.
+
+Which failures escalate is a closed set (`ESCALATED_KINDS`): `rateLimited`, `forbidden`,
+`malformed`, `upstream`. A private or deleted post does not — a browser gets the same
+nothing, more slowly — nor does a link that was never a post, nor an expired signed URL,
+which is already repaired more cheaply by resolving again over HTTP. A kind that isn't in
+the set never spends browser time, so a new failure mode has to be classified deliberately
+before it can start costing seconds.
+
+It rescues **video posts only**. A photo post is an ordered set rather than one URL, and the
+worker reads media off the network in fetch order — guessing a slide sequence out of that
+would produce a plausible-looking wrong order, which changes what the model thinks the post
+says. So a throttled carousel keeps its original error.
+
+It is bounded twice, because it runs while the user is waiting: the call is capped at 20
+seconds *and* at whatever is left of the clip budget, and below three seconds remaining it
+is not attempted at all. If the worker can't help, the platform's own error is what the user
+sees — never "the browser worker returned 502", which would report our infrastructure
+instead of their link.
+
+This is **not** the screen-capture path in `Sources/SeerCapture`, which is dead and stays
+dead: that one is real-time by construction, needs a visible surface to record, and hits
+ReplayKit's silent-audio bug. This resolves; it does not record. See
+[worker/README.md](../worker/README.md).
 
 **Clips are kept between turns.** Every turn replays the whole conversation, and each clip
 is re-attached at its first mention, so before this a thread about one reel re-resolved and

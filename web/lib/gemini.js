@@ -25,6 +25,12 @@ import {
 import { uploadFile, deleteFile } from "./gemini-files.js";
 import { findArticleLinks, resolveArticles, describeArticle } from "./article.js";
 import {
+  browserResolve,
+  worthEscalating,
+  BROWSER_RESOLVE_TIMEOUT_MS,
+} from "./browser-resolve.js";
+import { fetchPostPreview } from "./post-preview.js";
+import {
   modelHealth,
   planChain,
   describeDegradation,
@@ -548,6 +554,9 @@ export const CLIP_PROVIDERS = [
     // thumbnail — but that's still worth handing the model when the real download fails.
     // Instagram has no equivalent: its oEmbed needs a Meta App Review token we don't have.
     oEmbed: fetchTikTokOEmbed,
+    // The tier below oEmbed: the post page's own Open Graph tags. Both platforms have one,
+    // which is what finally gives Instagram a metadata fallback.
+    preview: (url, options) => fetchPostPreview(url, { ...options, platform: "TikTok" }),
   },
   {
     platform: "Instagram",
@@ -556,6 +565,7 @@ export const CLIP_PROVIDERS = [
     resolve: resolveInstagramVideo,
     download: downloadInstagramMedia,
     downloadImages: downloadInstagramImages,
+    preview: (url, options) => fetchPostPreview(url, { ...options, platform: "Instagram" }),
   },
 ];
 
@@ -723,6 +733,15 @@ function clipCachePut(key, { resolved, media }, maxBytes, ttlMs) {
 export const CLIP_BUDGET_MS = 120_000;
 
 /**
+ * Least clip budget worth handing to the browser worker.
+ *
+ * A resolve is a page load plus a media sighting; under a couple of seconds it cannot
+ * finish, so attempting it only postpones the note the user was going to get anyway. Below
+ * this the escalation is skipped and the platform's own error stands.
+ */
+export const MIN_ESCALATION_MS = 3_000;
+
+/**
  * Resolve every clip link in the conversation to a Gemini part.
  *
  * Kept separate from `toGeminiContents` on purpose. That function is pure, synchronous
@@ -771,6 +790,12 @@ export async function resolveClipParts(
     // see lib/resolve-hint.js, which is also where the reasoning lives for why these are
     // never trusted further than "skip one round trip and check the work afterwards".
     hints = null,
+    // The browser worker, when one is configured. Off by default and switched on by
+    // `api/chat.js` for the same reason the clip cache is: which infrastructure exists is a
+    // deployment fact, and a test that stubs the network must not reach a real service.
+    // Null means every failure below is reported exactly as it was before this existed.
+    browserWorker = null,
+    browserResolveImpl = browserResolve,
   } = {},
 ) {
   const caching = Boolean(cache) && cacheTTLMs > 0 && cacheMaxBytes > 0;
@@ -805,6 +830,7 @@ export async function resolveClipParts(
   const onCallerAbort = () => budget.abort();
   if (signal?.aborted) budget.abort();
   else signal?.addEventListener("abort", onCallerAbort, { once: true });
+  const budgetStartedAt = Date.now();
   const budgetTimer = budgetMs ? setTimeout(() => budget.abort(), budgetMs) : null;
   const releaseBudget = () => {
     if (budgetTimer) clearTimeout(budgetTimer);
@@ -820,6 +846,38 @@ export async function resolveClipParts(
       : error?.message || "the video could not be fetched";
 
   const clipOptions = { fetchImpl, signal: budget.signal, sleepImpl };
+
+  /**
+   * A second opinion from the browser worker, for the failures where one is worth having.
+   *
+   * Returns a `resolved` or null, and never throws: the caller's original error is the
+   * thing worth reporting, and this only ever replaces it with a success. Gated three ways
+   * — a worker has to be configured, the failure has to be one a browser could plausibly
+   * get past (`worthEscalating`), and the clip budget has to have enough time left to be
+   * worth spending, since this is the slow path.
+   *
+   * That last gate is a clock, not a flag. Asking only whether the budget has *already*
+   * blown lets an escalation start with a second left and then run for its own full
+   * timeout, which is how a bounded stage stops being bounded — so the worker call is
+   * capped at whatever is actually left, the same way `downloadTikTokMedia` caps an attempt
+   * at the remainder of its retry budget. Below `MIN_ESCALATION_MS` there is not enough
+   * time for a page load to finish, so the attempt would only delay a note we already have.
+   */
+  const escalate = async (link, platform, error) => {
+    if (!browserWorker || !worthEscalating(error)) return null;
+    if (signal?.aborted || budget.signal.aborted) return null;
+
+    const remainingMs = budgetMs ? budgetMs - (Date.now() - budgetStartedAt) : Infinity;
+    if (remainingMs < MIN_ESCALATION_MS) return null;
+
+    return browserResolveImpl(link, {
+      platform,
+      worker: browserWorker,
+      fetchImpl,
+      signal: budget.signal,
+      timeoutMs: Math.min(BROWSER_RESOLVE_TIMEOUT_MS, remainingMs),
+    });
+  };
 
   try {
     // What we already have from an earlier turn of this conversation. Checked before any
@@ -847,6 +905,12 @@ export async function resolveClipParts(
           const resolve = resolveImpl ?? provider.resolve;
           return { link, provider, resolved: await resolve(link, clipOptions) };
         } catch (error) {
+          // A throttled, refused or shape-changed resolve is a failure about *us* rather
+          // than about the post — the page is public and a browser can see it. Ask one.
+          // `escalate` keeps the original error if the worker can't help, so the worst case
+          // is the note the user would have got anyway, arriving later.
+          const resolved = await escalate(link, provider.platform, error);
+          if (resolved) return { link, provider, resolved };
           return { link, provider, error: describeFailure(error) };
         }
       }),
@@ -998,21 +1062,35 @@ export async function resolveClipParts(
       // unable to change an answer: the worst a bad hint can do is spend one failed
       // download before the real path takes over.
       const repairable = error?.kind === "expired" || entry.fromHint;
-      if (!repairable || signal?.aborted || budget.signal.aborted) throw error;
-      const resolve = resolveImpl ?? entry.provider.resolve;
-      // The link as it appears in the message, not `resolved.sourceURL` — on a hinted
-      // entry that field was stamped from the link anyway, and on any other it is the same
-      // string. Going through the message text means the re-resolve never re-reads
-      // anything the failed attempt supplied.
-      const from = entry.fromHint ? entry.link : (entry.resolved.sourceURL ?? entry.link);
-      // If re-resolving fails, the first error is the more useful of the two to report: it
-      // is the one that says what actually went wrong with the download.
-      let fresh;
-      try {
-        fresh = await resolve(from, clipOptions);
-      } catch {
-        throw error;
+      // A CDN that throttles or refuses us is the download-side twin of a throttled
+      // resolve, and has the same second opinion available: a browser session gets a URL
+      // signed for someone the CDN is willing to serve.
+      const escalatable = Boolean(browserWorker) && worthEscalating(error);
+      if ((!repairable && !escalatable) || signal?.aborted || budget.signal.aborted) throw error;
+
+      let fresh = null;
+      if (repairable) {
+        const resolve = resolveImpl ?? entry.provider.resolve;
+        // The link as it appears in the message, not `resolved.sourceURL` — on a hinted
+        // entry that field was stamped from the link anyway, and on any other it is the same
+        // string. Going through the message text means the re-resolve never re-reads
+        // anything the failed attempt supplied.
+        const from = entry.fromHint ? entry.link : (entry.resolved.sourceURL ?? entry.link);
+        try {
+          fresh = await resolve(from, clipOptions);
+        } catch {
+          // Not fatal on its own any more: the browser worker below may still get there,
+          // and if it doesn't, the original download error is what gets reported.
+          fresh = null;
+        }
       }
+      if (!fresh && escalatable) {
+        fresh = await escalate(entry.link, entry.platform, error);
+      }
+      // If nothing repaired it, the first error is the more useful of the two to report: it
+      // is the one that says what actually went wrong with the download.
+      if (!fresh) throw error;
+
       entry.resolved = fresh;
       // No longer caller-supplied, so the result may be cached like any other.
       delete entry.fromHint;
@@ -1045,13 +1123,38 @@ export async function resolveClipParts(
       return;
     }
 
+    const from = resolved?.sourceURL ?? entry.link;
+
     const oEmbed = entry.provider.oEmbed;
-    if (!oEmbed || budget.signal.aborted) return;
+    if (oEmbed && !budget.signal.aborted) {
+      try {
+        const meta = await oEmbed(from, clipOptions);
+        if (meta) {
+          entry.metadataOnly = meta;
+          return;
+        }
+      } catch {
+        // Best-effort: the download error already recorded above stands, and the page
+        // preview below is still worth a try.
+      }
+    }
+
+    // Last resort: the post page's own link-preview tags. This is the only metadata
+    // Instagram has ever had — its oEmbed needs a Meta App Review token — so before this a
+    // reel whose resolve carried no caption was simply lost. See lib/post-preview.js for
+    // why the article scraper cannot be pointed at these pages instead.
+    //
+    // Hangs off the provider exactly as `oEmbed` does, rather than being a parameter with a
+    // live default. A provider that doesn't declare one simply skips the tier, which means
+    // a test that supplies its own `providers` gets no network call it didn't ask for —
+    // where a defaulted parameter would have quietly fetched a real post page.
+    const preview = entry.provider.preview;
+    if (!preview || budget.signal.aborted) return;
     try {
-      const meta = await oEmbed(resolved?.sourceURL ?? entry.link, clipOptions);
+      const meta = await preview(from, clipOptions);
       if (meta) entry.metadataOnly = meta;
     } catch {
-      // Best-effort: the download error already recorded above stands.
+      // Best-effort, like everything else in this function: the download error stands.
     }
   }
 }

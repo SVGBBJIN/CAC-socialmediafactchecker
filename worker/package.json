@@ -1,0 +1,17 @@
+{
+  "name": "seer-browser-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Resolves a TikTok/Instagram post with a real browser when web/'s bare-HTTP resolvers are throttled, refused, or out of step with the page. Returns a media URL; never downloads.",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test.js"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
