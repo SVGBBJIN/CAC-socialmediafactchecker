@@ -400,6 +400,18 @@ async function pingLink(url) {
  * Best-effort check that a link is something this app can actually pull video from,
  * before spending a full (expensive) fact-check run on it.
  *
+ * Two paths, split on whether the host already names a platform.
+ *
+ * When it does, the platform's own resolver decides, alone: it is the code that has to
+ * work for the check to produce anything, and on these three platforms it is the *only*
+ * thing that can tell a live post from a deleted one — see the note below on why a status
+ * code cannot. The host regex picks which resolver to start, which it is entitled to do
+ * because a link is unambiguous by host.
+ *
+ * When it doesn't, the ping takes over entirely (see `verifyByRedirect`): following the
+ * redirects is the only way a shortener or a share wrapper ever names its platform, and
+ * a name that resolves to nothing is how intake tells a link from a sentence.
+ *
  * Verification only ever calls infrastructure that's already safe to hit: /api/probe-link
  * reads headers and never a body, and /api/resolve-media is host-allowlisted to TikTok/
  * Instagram's CDNs (see api/resolve-media.js and lib/link-probe.js) — neither is a
@@ -409,39 +421,89 @@ async function pingLink(url) {
  * them or guessing it'll work.
  */
 async function verifyLinkViewable(url) {
-  const probe = await pingLink(url);
+  const platform = platformFor(url);
 
-  // No probe: the URL's shape is all we have, which is where intake used to start.
-  if (!probe) return verifyByShape(url, platformFor(url));
+  // An unrecognised host is the one case with nothing to run the ping *against*: until the
+  // redirects have been followed there is no resolver to start. It is also the case where
+  // the ping adds reach rather than just confidence — a shortener or a news-site share
+  // wrapper only names its platform once it has been followed, and before the ping those
+  // were a silent text-only check.
+  if (!SUPPORTED_PLATFORMS.has(platform)) return verifyByRedirect(url, platform);
 
-  if (!probe.reachable) {
-    return {
-      ok: false,
-      url,
-      platform: probe.platform ?? platformFor(url),
-      reason: probe.reason ?? "Couldn't reach that link.",
-      // Only a name that doesn't resolve means "this was never a link". A 404 or a
-      // timeout is a real host, so the user still gets asked rather than having their
-      // paste quietly rewritten into a chat message.
-      notALink: probe.kind === "dns",
-    };
-  }
-
-  // Everything downstream works from where the link *landed*, not what was pasted. This
-  // is what makes share wrappers and shorteners work: `vm.tiktok.com/ZM…` and
-  // `instagram.com/share/…` only name their platform after they've been followed.
-  const resolved = probe.canonicalURL || probe.finalURL || url;
-  return { ...(await verifyByShape(resolved, probe.platform ?? platformFor(resolved))), url: resolved };
+  // The host already names the platform, so the resolver runs alone — no ping, not even
+  // alongside. Measured, not assumed: all three platforms answer 200 for a post that does
+  // not exist. They are single-page apps, so the server hands back the same shell either
+  // way and "this video is unavailable" is rendered client-side from JS. A deleted
+  // YouTube video, a nonexistent TikTok ID and a live reel are indistinguishable to
+  // anything reading status codes.
+  //
+  // Which means a ping on this path cannot come back dead, cannot beat the resolver to an
+  // answer, and cannot change the one it gives — it is a second request to the same
+  // platform for information it already declined to put in the response line. Racing it
+  // would be free in wall-clock and still wrong: the resolver is the only code that can
+  // tell these two cases apart, because parsing the embed is the only thing that does.
+  return verifyOnPlatform(url, platform);
 }
 
 /**
- * The URL-shape half of verification: given a platform, confirm the link is one this app
- * can pull media from.
+ * What the ping found when there's nothing at the other end.
  *
- * Secondary by design. It runs on the probe's resolved URL when there is one, and on the
- * raw paste when the probe couldn't answer.
+ * `notALink` is the narrow claim: only a name that doesn't resolve means the string was
+ * never a link. A 404 or a timeout is a real host, so those still ask the user rather than
+ * quietly rewriting their paste into a chat message.
  */
-async function verifyByShape(url, platform) {
+function deadLinkResult(url, probe, platform) {
+  return {
+    ok: false,
+    url,
+    platform: probe.platform ?? platform,
+    reason: probe.reason ?? "Couldn't reach that link.",
+    notALink: probe.kind === "dns",
+  };
+}
+
+/**
+ * Classify a link whose host names no platform, by following it.
+ *
+ * Serial by necessity — the redirects are what produce the platform, so there is nothing
+ * to parallelise. The wait is paid only by links that resolve to nothing today, which is
+ * the trade this is meant to make.
+ */
+async function verifyByRedirect(url, platform) {
+  const probe = await pingLink(url);
+
+  // No ping and no recognisable host: shape is all that's left, and it has nothing good to
+  // say. Exactly the answer intake gave before any of this existed.
+  if (!probe) return verifyOnPlatform(url, platform);
+  if (!probe.reachable) return deadLinkResult(url, probe, platform);
+
+  // Where it *landed*, not what was pasted.
+  const resolved = probe.canonicalURL || probe.finalURL || url;
+  const landed = probe.platform ?? platformFor(resolved);
+  return { ...(await verifyOnPlatform(resolved, landed)), url: resolved };
+}
+
+/**
+ * Ask the platform itself whether this link is a post we can pull media from.
+ *
+ * YouTube is answered from the URL alone — a valid video ID is all Gemini needs, since it
+ * fetches the video itself. TikTok and Instagram go to /api/resolve-media, which runs the
+ * same resolve the fact-check will run: an embed page for one, a post query for the other.
+ * That is what makes this authoritative rather than advisory: it is not a cheaper proxy
+ * for the real work, it is the same work.
+ *
+ * Which it then does again. /api/chat resolves the clip a second time inside
+ * `resolveClipParts`, against a clip cache that lives in lib/gemini.js's module scope and
+ * that this route has no way to reach — a separate function instance on Vercel, and not
+ * even the same file locally. Verification therefore costs one duplicated embed fetch per
+ * check. Worth knowing about and not worth fixing from here: the fix is a resolve cache
+ * both routes can see, which means the shared store the README already wants for rate
+ * limits, not a change to intake.
+ *
+ * Runs on the probe's resolved URL when there was a probe, and on the raw paste when the
+ * host named its platform outright.
+ */
+async function verifyOnPlatform(url, platform) {
   if (platform === "YouTube") {
     return youTubeVideoID(url)
       ? { ok: true, url, platform }
