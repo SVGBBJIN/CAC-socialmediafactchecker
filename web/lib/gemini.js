@@ -765,6 +765,11 @@ export async function resolveClipParts(
     cache = false,
     cacheTTLMs = CLIP_CACHE_TTL_MS,
     cacheMaxBytes = clipCacheLimitFromEnv(),
+    // Resolves the caller already paid for, keyed `platform:link`, standing in for the
+    // resolve this function would otherwise do itself. Validated at the route boundary —
+    // see lib/resolve-hint.js, which is also where the reasoning lives for why these are
+    // never trusted further than "skip one round trip and check the work afterwards".
+    hints = null,
   } = {},
 ) {
   const caching = Boolean(cache) && cacheTTLMs > 0 && cacheMaxBytes > 0;
@@ -833,6 +838,10 @@ export async function resolveClipParts(
       links.map(async ({ link, provider }) => {
         const hit = cached.get(link);
         if (hit) return { link, provider, resolved: hit.resolved, cached: hit };
+        // A real cache hit outranks a hint: it already holds the bytes, so it skips the
+        // download too, where a hint only skips the resolve.
+        const hinted = hints?.get(`${provider.platform}:${link}`);
+        if (hinted) return { link, provider, resolved: hinted, fromHint: true };
         try {
           const resolve = resolveImpl ?? provider.resolve;
           return { link, provider, resolved: await resolve(link, clipOptions) };
@@ -850,7 +859,7 @@ export async function resolveClipParts(
     // since two platforms' ID spaces are unrelated and only look alike.
     const byVideoID = new Map();
     const toDownload = [];
-    for (const { link, provider, resolved, error, cached: hit } of resolutions) {
+    for (const { link, provider, resolved, error, cached: hit, fromHint } of resolutions) {
       if (error) {
         attachments.set(link, { platform: provider.platform, error });
         continue;
@@ -871,6 +880,8 @@ export async function resolveClipParts(
         continue;
       }
       const entry = { videoID: key, platform: provider.platform, provider, resolved, link };
+      // Cleared again the moment a real resolve replaces the hint — see `fetchClipMedia`.
+      if (fromHint) entry.fromHint = true;
       // A cache hit already has the bytes; it still goes through the download phase, which
       // is where bytes become parts (inline, or an upload past the ceiling) — it just
       // doesn't touch the network to get them.
@@ -891,7 +902,11 @@ export async function resolveClipParts(
         try {
           const media = entry.media ?? (await fetchClipMedia(entry));
           delete entry.media;
-          if (!media.fromCache && caching) {
+          // `entry.fromHint` is re-read here rather than captured above because a failed
+          // hint clears it: media that came back only after a real re-resolve is ours, and
+          // is cacheable. What must never land in this process-global cache is bytes named
+          // by a caller — the next request to hit this warm instance would be served them.
+          if (!media.fromCache && caching && !entry.fromHint) {
             clipCachePut(
               `${entry.platform}:${entry.link}`,
               { resolved: entry.resolved, media },
@@ -970,17 +985,36 @@ export async function resolveClipParts(
     try {
       return await fetchFor(entry.resolved);
     } catch (error) {
-      if (error?.kind !== "expired" || signal?.aborted || budget.signal.aborted) throw error;
+      // Two things are repaired by resolving again, and they are the same repair.
+      //
+      // An expired signature is the original case: the URL was ours and has simply aged
+      // out, which asking for it again cannot fix but resolving again can.
+      //
+      // A hint is the wider one. It came from the caller, describes a resolve done some
+      // seconds ago on another instance, and has no claim on being current or even honest
+      // — so *any* failure on a hinted entry retires the hint and does the resolve this
+      // function would have done in the first place. That is what keeps the optimisation
+      // unable to change an answer: the worst a bad hint can do is spend one failed
+      // download before the real path takes over.
+      const repairable = error?.kind === "expired" || entry.fromHint;
+      if (!repairable || signal?.aborted || budget.signal.aborted) throw error;
       const resolve = resolveImpl ?? entry.provider.resolve;
-      // If re-resolving fails, the expiry is the more useful of the two errors to report:
-      // it is the one that says what actually went wrong with the download.
+      // The link as it appears in the message, not `resolved.sourceURL` — on a hinted
+      // entry that field was stamped from the link anyway, and on any other it is the same
+      // string. Going through the message text means the re-resolve never re-reads
+      // anything the failed attempt supplied.
+      const from = entry.fromHint ? entry.link : (entry.resolved.sourceURL ?? entry.link);
+      // If re-resolving fails, the first error is the more useful of the two to report: it
+      // is the one that says what actually went wrong with the download.
       let fresh;
       try {
-        fresh = await resolve(entry.resolved.sourceURL, clipOptions);
+        fresh = await resolve(from, clipOptions);
       } catch {
         throw error;
       }
       entry.resolved = fresh;
+      // No longer caller-supplied, so the result may be cached like any other.
+      delete entry.fromHint;
       return fetchFor(fresh);
     }
   }

@@ -354,6 +354,17 @@ function normalizeLink(raw) {
 }
 
 /**
+ * Whether the user typed a scheme, rather than us inferring one.
+ *
+ * This is the difference between evidence and a guess. "https://…" is someone saying
+ * "this is a link"; a bare "hi.there" is only the regex saying so, and when the probe
+ * finds nothing at that name, the regex is what should give way.
+ */
+function hasExplicitScheme(raw) {
+  return /^https?:\/\//i.test(raw.trim());
+}
+
+/**
  * Anything that isn't a recognizable link is a follow-up question — "hi", "what about the
  * second claim?", etc. Pasting an actual URL always starts a new check even while a result
  * is on screen — the one case that must never be ambiguous.
@@ -363,23 +374,139 @@ function looksLikeFollowup(raw) {
 }
 
 /**
+ * Ping the link through the server and report what's really there.
+ *
+ * Returns `null` — meaning "no answer, fall back to the URL's shape" — for any failure of
+ * the probe itself: an old deployment without the route, a rate limit, a network blip.
+ * A link that genuinely doesn't work comes back as a 200 with `reachable: false`, so the
+ * two cases never get confused.
+ */
+async function pingLink(url) {
+  try {
+    const response = await fetch("/api/probe-link", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    if (!response.ok) return null;
+    const probe = await response.json();
+    return typeof probe?.reachable === "boolean" ? probe : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Best-effort check that a link is something this app can actually pull video from,
  * before spending a full (expensive) fact-check run on it.
  *
- * Verification only ever calls infrastructure that's already safe to hit: YouTube's URL
- * shape needs no network call, and /api/resolve-media is host-allowlisted to TikTok/
- * Instagram's CDNs (see api/resolve-media.js) — there is no generic "fetch whatever host
- * the user pasted" path here, since that would hand the server an open SSRF-shaped proxy.
- * An unsupported platform, or a supported one that fails to confirm, falls back to asking
- * the user rather than either silently blocking them or guessing it'll work.
+ * Two paths, split on whether the host already names a platform.
+ *
+ * When it does, the platform's own resolver decides, alone: it is the code that has to
+ * work for the check to produce anything, and on these three platforms it is the *only*
+ * thing that can tell a live post from a deleted one — see the note below on why a status
+ * code cannot. The host regex picks which resolver to start, which it is entitled to do
+ * because a link is unambiguous by host.
+ *
+ * When it doesn't, the ping takes over entirely (see `verifyByRedirect`): following the
+ * redirects is the only way a shortener or a share wrapper ever names its platform, and
+ * a name that resolves to nothing is how intake tells a link from a sentence.
+ *
+ * Verification only ever calls infrastructure that's already safe to hit: /api/probe-link
+ * reads headers and never a body, and /api/resolve-media is host-allowlisted to TikTok/
+ * Instagram's CDNs (see api/resolve-media.js and lib/link-probe.js) — neither is a
+ * "fetch whatever host the user pasted and hand back what it said" path, which is what
+ * would make this an SSRF-shaped proxy. An unsupported platform, or a supported one that
+ * fails to confirm, falls back to asking the user rather than either silently blocking
+ * them or guessing it'll work.
  */
 async function verifyLinkViewable(url) {
   const platform = platformFor(url);
 
+  // An unrecognised host is the one case with nothing to run the ping *against*: until the
+  // redirects have been followed there is no resolver to start. It is also the case where
+  // the ping adds reach rather than just confidence — a shortener or a news-site share
+  // wrapper only names its platform once it has been followed, and before the ping those
+  // were a silent text-only check.
+  if (!SUPPORTED_PLATFORMS.has(platform)) return verifyByRedirect(url, platform);
+
+  // The host already names the platform, so the resolver runs alone — no ping, not even
+  // alongside. Measured, not assumed: all three platforms answer 200 for a post that does
+  // not exist. They are single-page apps, so the server hands back the same shell either
+  // way and "this video is unavailable" is rendered client-side from JS. A deleted
+  // YouTube video, a nonexistent TikTok ID and a live reel are indistinguishable to
+  // anything reading status codes.
+  //
+  // Which means a ping on this path cannot come back dead, cannot beat the resolver to an
+  // answer, and cannot change the one it gives — it is a second request to the same
+  // platform for information it already declined to put in the response line. Racing it
+  // would be free in wall-clock and still wrong: the resolver is the only code that can
+  // tell these two cases apart, because parsing the embed is the only thing that does.
+  return verifyOnPlatform(url, platform);
+}
+
+/**
+ * What the ping found when there's nothing at the other end.
+ *
+ * `notALink` is the narrow claim: only a name that doesn't resolve means the string was
+ * never a link. A 404 or a timeout is a real host, so those still ask the user rather than
+ * quietly rewriting their paste into a chat message.
+ */
+function deadLinkResult(url, probe, platform) {
+  return {
+    ok: false,
+    url,
+    platform: probe.platform ?? platform,
+    reason: probe.reason ?? "Couldn't reach that link.",
+    notALink: probe.kind === "dns",
+  };
+}
+
+/**
+ * Classify a link whose host names no platform, by following it.
+ *
+ * Serial by necessity — the redirects are what produce the platform, so there is nothing
+ * to parallelise. The wait is paid only by links that resolve to nothing today, which is
+ * the trade this is meant to make.
+ */
+async function verifyByRedirect(url, platform) {
+  const probe = await pingLink(url);
+
+  // No ping and no recognisable host: shape is all that's left, and it has nothing good to
+  // say. Exactly the answer intake gave before any of this existed.
+  if (!probe) return verifyOnPlatform(url, platform);
+  if (!probe.reachable) return deadLinkResult(url, probe, platform);
+
+  // Where it *landed*, not what was pasted.
+  const resolved = probe.canonicalURL || probe.finalURL || url;
+  const landed = probe.platform ?? platformFor(resolved);
+  return { ...(await verifyOnPlatform(resolved, landed)), url: resolved };
+}
+
+/**
+ * Ask the platform itself whether this link is a post we can pull media from.
+ *
+ * YouTube is answered from the URL alone — a valid video ID is all Gemini needs, since it
+ * fetches the video itself. TikTok and Instagram go to /api/resolve-media, which runs the
+ * same resolve the fact-check will run: an embed page for one, a post query for the other.
+ * That is what makes this authoritative rather than advisory: it is not a cheaper proxy
+ * for the real work, it is the same work.
+ *
+ * Which is why the result travels onward instead of being thrown away. /api/chat used to
+ * resolve the clip a second time, because the clip cache it consults lives in
+ * lib/gemini.js's module scope and a separate Vercel function cannot reach it. Rather than
+ * a shared store, the resolve rides along with the check as `hint` — the browser is the
+ * one thing both functions talk to. It is a hint and not an instruction: /api/chat vets it
+ * and discards it on any failure. See lib/resolve-hint.js.
+ *
+ * Runs on the probe's resolved URL when there was a probe, and on the raw paste when the
+ * host named its platform outright.
+ */
+async function verifyOnPlatform(url, platform) {
   if (platform === "YouTube") {
     return youTubeVideoID(url)
-      ? { ok: true, platform }
-      : { ok: false, platform, reason: "That doesn't look like a valid YouTube video link." };
+      ? { ok: true, url, platform }
+      : { ok: false, url, platform, reason: "That doesn't look like a valid YouTube video link." };
   }
 
   if (platform === "TikTok" || platform === "Instagram") {
@@ -392,6 +519,7 @@ async function verifyLinkViewable(url) {
       if (!response.ok) {
         return {
           ok: false,
+          url,
           platform,
           reason: `Couldn't confirm this is a playable ${platform} video (it may still work).`,
         };
@@ -400,21 +528,23 @@ async function verifyLinkViewable(url) {
       // playable URL. That is a post the fact-check handles fine — the stills go to the
       // model the same way a clip does — so warning that it isn't "a playable video" would
       // be talking the user out of a link that works.
-      const { mediaURL, images } = await response.json();
+      const { mediaURL, images, hint } = await response.json();
       return mediaURL || images?.length
-        ? { ok: true, platform }
+        ? { ok: true, url, platform, hint }
         : {
             ok: false,
+            url,
             platform,
             reason: `Couldn't confirm this is a playable ${platform} post (it may still work).`,
           };
     } catch {
-      return { ok: false, platform, reason: "Couldn't reach the server to confirm this link." };
+      return { ok: false, url, platform, reason: "Couldn't reach the server to confirm this link." };
     }
   }
 
   return {
     ok: false,
+    url,
     platform,
     reason: "This isn't a TikTok, YouTube, or Instagram link, so the video may not come through.",
   };
@@ -429,15 +559,31 @@ function showLinkConfirm(url, result) {
   el.linkConfirmDialog.showModal();
 }
 
-/** Verifies the link is actually viewable before committing to a run; if it isn't
- * (or can't be confirmed), asks first instead of burning a check on a dead link. */
-async function confirmAndRunCheck(url) {
+/**
+ * Verifies the link is actually viewable before committing to a run; if it isn't (or
+ * can't be confirmed), asks first instead of burning a check on a dead link.
+ *
+ * `entry` and `raw` are what let a failed ping undo the regex's guess. If the URL regex
+ * was the only reason this string was treated as a link — no scheme typed — and the ping
+ * found no such name, then it was a sentence, and it goes to the open chat instead of
+ * putting a dialog in front of someone who was only asking a question.
+ */
+async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
   const result = await verifyLinkViewable(url);
+  const target = result.url ?? url;
   if (result.ok) {
-    runCheck(url);
+    // Verification just resolved this post; hand that along so the check doesn't repeat it.
+    runCheck(target, undefined, result.hint);
     return;
   }
-  showLinkConfirm(url, result);
+  if (result.notALink && !hasExplicitScheme(raw)) {
+    const question = raw.trim();
+    if (entry && question) {
+      runFollowup(entry, question);
+      return;
+    }
+  }
+  showLinkConfirm(target, result);
 }
 
 function truncate(text, max) {
@@ -1141,11 +1287,11 @@ function requestHeaders() {
  * An error with *no* text before it is unchanged: there is nothing to preserve, so it
  * throws and the caller reports it as the whole outcome of the turn.
  */
-async function streamChat(messages, { signal, onStage, onSearchCount } = {}) {
+async function streamChat(messages, { signal, onStage, onSearchCount, clipHints } = {}) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify(clipHints ? { messages, clipHints } : { messages }),
     signal,
   });
 
@@ -1264,7 +1410,14 @@ function historyFor(entry) {
 
 /* ---------------------------------------------------------------- the two turns */
 
-async function runCheck(url, existingId) {
+/**
+ * @param hint the resolve verification already did for this exact link, if it did one.
+ *   Deliberately not stored on the entry and not replayed on follow-ups: the URLs inside
+ *   it are signed and short-lived, so a hint kept past the moment it was made is one
+ *   failed download and a re-resolve — slower than simply resolving. Seconds old is the
+ *   only age at which this is worth anything.
+ */
+async function runCheck(url, existingId, hint) {
   if (inFlight) return;
 
   const id = existingId ?? crypto.randomUUID();
@@ -1299,6 +1452,7 @@ async function runCheck(url, existingId) {
     const message = { role: "user", content: prompt, ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([message], {
       signal: controller.signal,
+      clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
         const status = document.getElementById("runStatus");
         if (status) status.textContent = stageText(frame);
@@ -1530,7 +1684,7 @@ el.checkBtn.addEventListener("click", () => {
     return;
   }
   const url = normalizeLink(raw);
-  if (url) confirmAndRunCheck(url);
+  if (url) confirmAndRunCheck(url, { entry, raw });
 });
 
 el.linkConfirmForm.addEventListener("submit", () => {

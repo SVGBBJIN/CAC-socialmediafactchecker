@@ -113,6 +113,7 @@ web/
   public/          Front end — index.html, app.js. No key, ever.
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
+  api/probe-link.js  Pings a pasted link so intake knows what's really there.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
   lib/degradation.js  When to stop asking for the best model, and how the UI says so.
   lib/verified-chat.js  The fact-check turn: both research tools, system prompt, frames.
@@ -127,6 +128,10 @@ web/
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
   lib/instagram.js  Instagram link → post query → CDN URL → the MP4 bytes.
   lib/media-fetch.js  What both of those share: deadline, host allowlist, capped read.
+  lib/link-probe.js  Follow a pasted link, headers only — and the vetting that makes
+                   fetching a user-named host safe to do at all.
+  lib/resolve-hint.js  Carries intake's resolve to the fact-check so it isn't run twice,
+                   and the vetting that makes accepting it from the browser safe.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
