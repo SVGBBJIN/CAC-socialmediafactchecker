@@ -24,48 +24,69 @@ public struct AnalysisProgressView: View {
     }
 
     public var body: some View {
-        // A 10 Hz tick drives the elapsed clock and the reassurance threshold. Cheap,
-        // and it stops as soon as the view goes away.
-        TimelineView(.periodic(from: .now, by: 0.1)) { context in
-            let now = context.date
-            VStack(spacing: 24) {
-                ScanningFilmstrip(isActive: model.state == .running)
+        VStack(spacing: 24) {
+            ScanningFilmstrip(isActive: model.state.isActive)
 
-                VStack(spacing: 6) {
-                    Text(model.label)
-                        .font(.headline)
-                        .multilineTextAlignment(.center)
-                        .contentTransition(.opacity)
+            // Only the clock and the reassurance text are time-driven, so only they sit
+            // inside the timeline. Wrapping the whole view in it — which is what this
+            // did — re-evaluated `ScanningFilmstrip`, `StageList` and every `StageRow`
+            // ten times a second for the entire life of the screen, including after the
+            // run had finished or failed and nothing could change again. The stage rows
+            // redraw when `model` publishes, which is the only time they have news.
+            TimeDrivenStatus(model: model)
 
-                    if model.state == .running {
-                        Text(elapsedText(at: now))
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
+            StageList(steps: model.steps, currentStage: model.currentStage)
+        }
+        .padding(24)
+        .animation(.easeInOut(duration: 0.25), value: model.currentStage)
+    }
+}
+
+/// The two elements that genuinely change with the clock rather than with the model.
+///
+/// The schedule is paused outside a running state: an idle, finished, cancelled or failed
+/// screen has no elapsed time to advance and no threshold left to cross, so ticking it is
+/// pure battery. `.animation(minimumInterval:paused:)` rather than `.periodic` because it
+/// keeps the timeline in place — no view identity change when a run starts — while
+/// emitting nothing until there is something to say.
+private struct TimeDrivenStatus: View {
+    let model: AnalysisModel
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.1, paused: !model.state.isActive)) { context in
+            // Computed once per tick and shared. `explanation(at:)` walks `steps` and
+            // builds an `ExtractionProgress` on every call, and it used to be called
+            // twice per frame — once for the `if let`, once again for the `.animation`
+            // value — so half that work was being thrown away.
+            let explanation = model.explanation(at: context.date)
+            let elapsed = String(format: "%.0fs elapsed", model.elapsed(at: context.date))
+
+            VStack(spacing: 6) {
+                Text(model.label)
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                    .contentTransition(.opacity)
+
+                if model.state.isActive {
+                    Text(elapsed)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
 
-                if let explanation = model.explanation(at: now) {
+                if let explanation {
                     Text(explanation)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
-
-                StageList(steps: model.steps, currentStage: model.currentStage)
             }
-            .padding(24)
-            .animation(.easeInOut(duration: 0.25), value: model.currentStage)
-            .animation(.easeInOut(duration: 0.25), value: model.explanation(at: now))
+            .animation(.easeInOut(duration: 0.25), value: explanation)
             // One spoken summary instead of a dozen chattering elements.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(model.label)
-            .accessibilityValue(model.state == .running ? elapsedText(at: now) : "")
+            .accessibilityValue(model.state.isActive ? elapsed : "")
         }
-    }
-
-    private func elapsedText(at now: Date) -> String {
-        String(format: "%.0fs elapsed", model.elapsed(at: now))
     }
 }
 
@@ -139,7 +160,19 @@ struct ScanningFilmstrip: View {
     }
 
     private func startAnimating() {
-        guard isActive else { return }
+        // A `repeatForever` animation runs until something replaces it — going inactive
+        // only stops the sweep being *drawn*, because `scanLine` leaves the hierarchy.
+        // The animation itself keeps driving `sweep` (and, under Reduce Motion, `breathe`,
+        // which stays attached to a `scaleEffect` that is still in the tree) for as long
+        // as the screen is up. Replacing it with a non-repeating animation back to rest
+        // is what actually ends it.
+        guard isActive else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                sweep = 0
+                breathe = false
+            }
+            return
+        }
         if reduceMotion {
             withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
                 breathe = true

@@ -29,7 +29,17 @@ public final class AnalysisModel {
         case idle
         case running
         case finished
+        /// The run was cancelled by the caller. Distinct from ``failed`` on purpose: a
+        /// `CancellationError` falling into the failure path gets rendered through
+        /// `localizedDescription`, which produces "The operation couldn't be completed.
+        /// (Swift.CancellationError error 1.)" as the headline the user reads — an
+        /// internal error string presented as the outcome of an action they chose.
+        case cancelled
         case failed(String)
+
+        /// Whether anything is still moving. The view keys its clock off this, so a
+        /// settled run stops driving redraws.
+        public var isActive: Bool { self == .running }
     }
 
     public private(set) var state: State = .idle
@@ -77,6 +87,7 @@ public final class AnalysisModel {
         switch state {
         case .idle: return "Paste a link to begin"
         case .finished: return "Done"
+        case .cancelled: return "Cancelled"
         case .failed(let message): return message
         case .running:
             guard let currentStage else { return "Starting…" }
@@ -99,6 +110,12 @@ public final class AnalysisModel {
     /// the stream buffers in order and the loop processes one at a time.
     @discardableResult
     public func analyse(_ url: URL) async -> ClaimContext? {
+        // One model, one run. Two concurrent `analyse` calls would share `steps`,
+        // `currentStage` and `lastAppliedSequence`, so the second run's first event
+        // (sequence 1) loses the `sequence > lastAppliedSequence` test against the
+        // first run's progress and is silently dropped — the second run then renders
+        // as permanently stuck on whatever stage the first one had reached.
+        guard state != .running else { return nil }
         prepare(for: url)
 
         let (stream, continuation) = AsyncStream<ExtractionProgress>.makeStream()
@@ -126,13 +143,19 @@ public final class AnalysisModel {
 
     // MARK: - State transitions
 
-    private func prepare(for url: URL) {
-        platform = Platform.detect(from: url)
-        // Lay the whole sequence out up front so rows don't appear one at a time, which
-        // reads as the app deciding what to do as it goes.
-        steps = ExtractionStage.expected(for: platform)
+    /// The sequence a platform will pass through, as unstarted rows.
+    ///
+    /// Laid out in full up front so rows don't appear one at a time, which reads as the
+    /// app deciding what to do as it goes.
+    private static func plannedSteps(for platform: Platform) -> [Step] {
+        ExtractionStage.expected(for: platform)
             .filter { $0 != .done }
             .map { Step(stage: $0) }
+    }
+
+    private func prepare(for url: URL) {
+        platform = Platform.detect(from: url)
+        steps = Self.plannedSteps(for: platform)
         currentStage = nil
         result = nil
         startedAt = Date()
@@ -147,7 +170,19 @@ public final class AnalysisModel {
         guard progress.sequence > lastAppliedSequence else { return }
         lastAppliedSequence = progress.sequence
 
-        platform = progress.platform
+        // The pipeline builds its sink from `extractor.platform`, which is the extractor
+        // that actually claimed the URL — not necessarily what `Platform.detect` guessed
+        // from the host in `prepare`. When the two disagree the laid-out step list belongs
+        // to the wrong ingestion strategy: a run routed to `directMediaFetch` would show
+        // the `screenCapture` sequence and never fill in the row it is actually on. Relay
+        // the list out to match, but only on a genuine change and only while no step has
+        // begun, so this can't disturb rows the user is already watching.
+        if progress.platform != platform {
+            platform = progress.platform
+            if !steps.contains(where: { $0.hasStarted }) {
+                steps = Self.plannedSteps(for: platform)
+            }
+        }
         startedAt = progress.startedAt
 
         guard progress.stage != .done else { return }
@@ -188,6 +223,17 @@ public final class AnalysisModel {
     private func fail(with error: Error) {
         closeCurrentStep(at: Date())
         currentStage = nil
+        // Cancellation is an outcome the user asked for, not a fault to report. It
+        // arrives here as `CancellationError` (thrown by the `Task.checkCancellation()`
+        // calls every extractor makes) or as `NSURLErrorCancelled` from a URLSession task
+        // torn down mid-flight — both of which describe themselves in language written
+        // for a crash log, not for the person who pressed Cancel.
+        let nsError = error as NSError
+        if error is CancellationError
+            || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
+            state = .cancelled
+            return
+        }
         let message = (error as? ExtractionError)?.errorDescription
             ?? error.localizedDescription
         state = .failed(message)
