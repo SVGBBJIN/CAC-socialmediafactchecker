@@ -130,6 +130,8 @@ web/
   lib/media-fetch.js  What both of those share: deadline, host allowlist, capped read.
   lib/link-probe.js  Follow a pasted link, headers only — and the vetting that makes
                    fetching a user-named host safe to do at all.
+  lib/resolve-hint.js  Carries intake's resolve to the fact-check so it isn't run twice,
+                   and the vetting that makes accepting it from the browser safe.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.

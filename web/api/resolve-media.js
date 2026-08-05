@@ -21,6 +21,7 @@ import {
   ALLOWED_MEDIA_HOSTS as INSTAGRAM_MEDIA_HOSTS,
 } from "../lib/instagram.js";
 import { hostAllowed } from "../lib/media-fetch.js";
+import { hintFromResolved } from "../lib/resolve-hint.js";
 import { authorize, config, GuardError } from "../lib/guard.js";
 
 function sendJSON(res, status, payload, headers = {}) {
@@ -131,6 +132,10 @@ export default async function handler(req, res) {
         mimeType: resolved.mimeType,
         width: resolved.width,
         height: resolved.height,
+        // Handed back so the fact-check does not have to run this same resolve again a
+        // second later. Opaque to the client: it is passed through untouched, and vetted
+        // from scratch on the way in. See lib/resolve-hint.js.
+        hint: hintFromResolved({ ...resolved, images }),
       });
     }
 
@@ -145,6 +150,8 @@ export default async function handler(req, res) {
       mimeType: resolved.mimeType,
       width: resolved.width,
       height: resolved.height,
+      // See the images branch above.
+      hint: hintFromResolved({ ...resolved, mediaURL }),
     });
   } catch (error) {
     if (error instanceof TikTokError || error instanceof InstagramError) {

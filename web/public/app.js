@@ -492,13 +492,12 @@ async function verifyByRedirect(url, platform) {
  * That is what makes this authoritative rather than advisory: it is not a cheaper proxy
  * for the real work, it is the same work.
  *
- * Which it then does again. /api/chat resolves the clip a second time inside
- * `resolveClipParts`, against a clip cache that lives in lib/gemini.js's module scope and
- * that this route has no way to reach — a separate function instance on Vercel, and not
- * even the same file locally. Verification therefore costs one duplicated embed fetch per
- * check. Worth knowing about and not worth fixing from here: the fix is a resolve cache
- * both routes can see, which means the shared store the README already wants for rate
- * limits, not a change to intake.
+ * Which is why the result travels onward instead of being thrown away. /api/chat used to
+ * resolve the clip a second time, because the clip cache it consults lives in
+ * lib/gemini.js's module scope and a separate Vercel function cannot reach it. Rather than
+ * a shared store, the resolve rides along with the check as `hint` — the browser is the
+ * one thing both functions talk to. It is a hint and not an instruction: /api/chat vets it
+ * and discards it on any failure. See lib/resolve-hint.js.
  *
  * Runs on the probe's resolved URL when there was a probe, and on the raw paste when the
  * host named its platform outright.
@@ -529,9 +528,9 @@ async function verifyOnPlatform(url, platform) {
       // playable URL. That is a post the fact-check handles fine — the stills go to the
       // model the same way a clip does — so warning that it isn't "a playable video" would
       // be talking the user out of a link that works.
-      const { mediaURL, images } = await response.json();
+      const { mediaURL, images, hint } = await response.json();
       return mediaURL || images?.length
-        ? { ok: true, url, platform }
+        ? { ok: true, url, platform, hint }
         : {
             ok: false,
             url,
@@ -573,7 +572,8 @@ async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
   const result = await verifyLinkViewable(url);
   const target = result.url ?? url;
   if (result.ok) {
-    runCheck(target);
+    // Verification just resolved this post; hand that along so the check doesn't repeat it.
+    runCheck(target, undefined, result.hint);
     return;
   }
   if (result.notALink && !hasExplicitScheme(raw)) {
@@ -1287,11 +1287,11 @@ function requestHeaders() {
  * An error with *no* text before it is unchanged: there is nothing to preserve, so it
  * throws and the caller reports it as the whole outcome of the turn.
  */
-async function streamChat(messages, { signal, onStage, onSearchCount } = {}) {
+async function streamChat(messages, { signal, onStage, onSearchCount, clipHints } = {}) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify(clipHints ? { messages, clipHints } : { messages }),
     signal,
   });
 
@@ -1410,7 +1410,14 @@ function historyFor(entry) {
 
 /* ---------------------------------------------------------------- the two turns */
 
-async function runCheck(url, existingId) {
+/**
+ * @param hint the resolve verification already did for this exact link, if it did one.
+ *   Deliberately not stored on the entry and not replayed on follow-ups: the URLs inside
+ *   it are signed and short-lived, so a hint kept past the moment it was made is one
+ *   failed download and a re-resolve — slower than simply resolving. Seconds old is the
+ *   only age at which this is worth anything.
+ */
+async function runCheck(url, existingId, hint) {
   if (inFlight) return;
 
   const id = existingId ?? crypto.randomUUID();
@@ -1445,6 +1452,7 @@ async function runCheck(url, existingId) {
     const message = { role: "user", content: prompt, ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([message], {
       signal: controller.signal,
+      clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
         const status = document.getElementById("runStatus");
         if (status) status.textContent = stageText(frame);

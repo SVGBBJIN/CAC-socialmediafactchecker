@@ -4,7 +4,13 @@
 // ask for, the credential. Written against raw Node request/response objects so the
 // same file runs under `node server.js` locally and as a Vercel Node function.
 
-import { modelChainFromEnv, mediaResolutionFromEnv, GeminiError } from "../lib/gemini.js";
+import {
+  modelChainFromEnv,
+  mediaResolutionFromEnv,
+  findClipLinks,
+  GeminiError,
+} from "../lib/gemini.js";
+import { validateHints } from "../lib/resolve-hint.js";
 import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "../lib/verified-chat.js";
 import { authorize, config, validateMessages, GuardError } from "../lib/guard.js";
 
@@ -72,10 +78,20 @@ export default async function handler(req, res) {
   }
 
   let messages;
+  let clipHints = null;
   let usage = { pressure: 0 };
   try {
     usage = authorize(req, limits) ?? usage;
-    messages = validateMessages(await readBody(req), limits);
+    const body = await readBody(req);
+    messages = validateMessages(body, limits);
+    // Resolves the browser already paid for during intake, offered back so the clip stage
+    // can skip repeating them. Matched against the links this message actually mentions
+    // and vetted field by field; anything that doesn't survive is simply resolved the
+    // usual way. See lib/resolve-hint.js for why that is the only safe posture.
+    clipHints = validateHints(
+      body?.clipHints,
+      findClipLinks(String(messages.at(-1)?.content ?? "")),
+    );
   } catch (error) {
     if (error instanceof GuardError) {
       const headers = error.retryAfter ? { "retry-after": String(error.retryAfter) } : {};
@@ -148,7 +164,7 @@ export default async function handler(req, res) {
       // turn of the same conversation instead of pulling the same MP4 off the CDN again on
       // every follow-up question — see `CLIP_CACHE_TTL_MS` in lib/gemini.js — and switching
       // it on is a deployment decision made here rather than imposed on every caller.
-      clipOptions: { cache: true },
+      clipOptions: { cache: true, hints: clipHints },
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);
