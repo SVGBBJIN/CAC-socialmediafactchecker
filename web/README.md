@@ -130,6 +130,8 @@ web/
   lib/media-fetch.js  What both of those share: deadline, host allowlist, capped read.
   lib/link-probe.js  Follow a pasted link, headers only — and the vetting that makes
                    fetching a user-named host safe to do at all.
+  lib/article.js   A pasted link that isn't a video: follow it, pull its text out, and
+                   quote it to the model as the material being checked.
   lib/resolve-hint.js  Carries intake's resolve to the fact-check so it isn't run twice,
                    and the vetting that makes accepting it from the browser safe.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
@@ -142,6 +144,9 @@ web/
   test-search.js   Tests for search, the schema, and the turn end to end.
   test-find.js     Tests for the in-page find and the fuzzy matching under it.
   test-cleanup.js  Tests for citation cleanup — what it removes, and what it must not.
+  test-probe.js    Tests for the intake ping and its address vetting.
+  test-hint.js     Tests for the resolve hint the browser carries to the check.
+  test-article.js  Tests for reading a pasted page — vetting, refusals, and fencing.
 ```
 
 ## How a pasted video reaches the model
@@ -223,6 +228,42 @@ re-downloaded it on every follow-up question. A downloaded clip is now held for 
 in process memory, bounded by `CLIP_CACHE_MAX_BYTES` and evicted oldest-first. The whole
 clip stage also runs under a two-minute budget: past it, the remaining links become notes
 rather than holding the request open.
+
+## How a pasted page reaches the model
+
+Anything that is not a TikTok, YouTube or Instagram link is a **page**, and a page is now a
+first-class thing to check rather than a link the app talked you out of. Intake pings it
+(`/api/probe-link`), and if something readable answers, the check runs; `/api/chat` then
+fetches the page server-side, extracts its text with the same `htmlToText` the in-page find
+uses, and quotes it into the prompt between `<<<PAGE` markers as the material under
+examination — the exact role a video plays for a clip.
+
+What that changes: before this, a pasted article reached the model as a bare URL it could
+not open, so it searched for the *headline* and checked whatever came back. Now it checks
+what the page actually says.
+
+Four rules hold that together, and each of them is a thing that goes wrong without it:
+
+- **The page is the subject, never a source.** It gets no citation number and the system
+  prompt says it may not be cited. A page is not evidence for its own claims; the figures
+  in it still need a source `web_search` retrieved.
+- **Its text is fenced and disclaimed.** Everything between the markers was written by
+  whoever owns that domain, some of whom write for models. The prompt says in as many words
+  that an instruction found inside the fence is part of what is being checked — and that a
+  page trying to steer its own fact-check is a finding worth reporting.
+- **The fetch is vetted per hop.** This is the app fetching a host the user named and
+  returning its *body*, which is a strictly bigger exposure than the header-only probe. So
+  `lib/article.js` reuses the probe's vetting on every redirect: scheme allowlist, no
+  credentials, no cookies, every hop's address re-resolved and refused if it is private, a
+  hop cap, a deadline, a size cap, and a content-type allowlist that admits HTML and plain
+  text only.
+- **Bounded like a clip is.** Two pages per request, 12,000 characters each, cut at the end
+  with the model told it was cut. The text is replayed on every turn the way a message is,
+  so an uncapped long-read would be re-billed on every follow-up.
+
+A page that will not open — a 404, a PDF, a paywall answering 403, a shell rendered by
+JavaScript — is reported to the model as a bracketed note naming the reason, exactly as an
+undownloadable clip is, and the turn proceeds from the link and the searches.
 
 ## Tests
 
