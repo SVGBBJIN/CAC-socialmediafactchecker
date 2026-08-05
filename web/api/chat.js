@@ -11,6 +11,7 @@ import {
   GeminiError,
 } from "../lib/gemini.js";
 import { validateHints } from "../lib/resolve-hint.js";
+import { browserWorkerFromEnv } from "../lib/browser-resolve.js";
 import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "../lib/verified-chat.js";
 import { authorize, config, validateMessages, GuardError } from "../lib/guard.js";
 
@@ -164,7 +165,13 @@ export default async function handler(req, res) {
       // turn of the same conversation instead of pulling the same MP4 off the CDN again on
       // every follow-up question — see `CLIP_CACHE_TTL_MS` in lib/gemini.js — and switching
       // it on is a deployment decision made here rather than imposed on every caller.
-      clipOptions: { cache: true, hints: clipHints },
+      clipOptions: {
+        cache: true,
+        hints: clipHints,
+        // Null unless BROWSER_WORKER_URL is set, which leaves every clip failure reported
+        // exactly as it was before the worker existed. See lib/browser-resolve.js.
+        browserWorker: browserWorkerFromEnv(),
+      },
       // Read a pasted link that isn't a video — an article, a blog post, a press release —
       // and quote its text to the model as the material being checked. Off by default in
       // the library because it fetches a host the user named; switched on here, where the
