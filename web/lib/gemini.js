@@ -29,6 +29,7 @@ import {
   worthEscalating,
   BROWSER_RESOLVE_TIMEOUT_MS,
 } from "./browser-resolve.js";
+import { fetchPostPreview } from "./post-preview.js";
 import {
   modelHealth,
   planChain,
@@ -553,6 +554,9 @@ export const CLIP_PROVIDERS = [
     // thumbnail — but that's still worth handing the model when the real download fails.
     // Instagram has no equivalent: its oEmbed needs a Meta App Review token we don't have.
     oEmbed: fetchTikTokOEmbed,
+    // The tier below oEmbed: the post page's own Open Graph tags. Both platforms have one,
+    // which is what finally gives Instagram a metadata fallback.
+    preview: (url, options) => fetchPostPreview(url, { ...options, platform: "TikTok" }),
   },
   {
     platform: "Instagram",
@@ -561,6 +565,7 @@ export const CLIP_PROVIDERS = [
     resolve: resolveInstagramVideo,
     download: downloadInstagramMedia,
     downloadImages: downloadInstagramImages,
+    preview: (url, options) => fetchPostPreview(url, { ...options, platform: "Instagram" }),
   },
 ];
 
@@ -1118,13 +1123,38 @@ export async function resolveClipParts(
       return;
     }
 
+    const from = resolved?.sourceURL ?? entry.link;
+
     const oEmbed = entry.provider.oEmbed;
-    if (!oEmbed || budget.signal.aborted) return;
+    if (oEmbed && !budget.signal.aborted) {
+      try {
+        const meta = await oEmbed(from, clipOptions);
+        if (meta) {
+          entry.metadataOnly = meta;
+          return;
+        }
+      } catch {
+        // Best-effort: the download error already recorded above stands, and the page
+        // preview below is still worth a try.
+      }
+    }
+
+    // Last resort: the post page's own link-preview tags. This is the only metadata
+    // Instagram has ever had — its oEmbed needs a Meta App Review token — so before this a
+    // reel whose resolve carried no caption was simply lost. See lib/post-preview.js for
+    // why the article scraper cannot be pointed at these pages instead.
+    //
+    // Hangs off the provider exactly as `oEmbed` does, rather than being a parameter with a
+    // live default. A provider that doesn't declare one simply skips the tier, which means
+    // a test that supplies its own `providers` gets no network call it didn't ask for —
+    // where a defaulted parameter would have quietly fetched a real post page.
+    const preview = entry.provider.preview;
+    if (!preview || budget.signal.aborted) return;
     try {
-      const meta = await oEmbed(resolved?.sourceURL ?? entry.link, clipOptions);
+      const meta = await preview(from, clipOptions);
       if (meta) entry.metadataOnly = meta;
     } catch {
-      // Best-effort: the download error already recorded above stands.
+      // Best-effort, like everything else in this function: the download error stands.
     }
   }
 }

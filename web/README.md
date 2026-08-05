@@ -136,6 +136,8 @@ web/
                    and the vetting that makes accepting it from the browser safe.
   lib/browser-resolve.js  When a resolve is throttled or refused, ask the browser worker
                    for a second opinion. Optional; off unless BROWSER_WORKER_URL is set.
+  lib/post-preview.js  The last metadata tier: a post page's Open Graph tags, for a clip
+                   that could not be downloaded and whose resolve carried nothing.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
   lib/static.js    Request path → file on disk, with the containment rule.
@@ -151,6 +153,8 @@ web/
   test-article.js  Tests for reading a pasted page — vetting, refusals, and fencing.
   test-browser-resolve.js  Tests for the browser-worker tier: which failures escalate,
                    which deliberately don't, and what happens when it can't help.
+  test-post-preview.js  Tests for the page-preview tier: what it reads, what it refuses,
+                   and the order the three metadata tiers run in.
 ```
 
 The browser worker itself lives outside this directory, in [`worker/`](../worker/), because
@@ -229,6 +233,32 @@ claim and the video is B-roll, which makes this a much better answer than "that 
 couldn't be attached". An expired signed URL (`403` from the CDN) is repaired first, by
 resolving the post again for a freshly signed one and downloading from that; the fallback
 is only reached if that fails too.
+
+**When even the resolve carried nothing.** Three metadata tiers run in cost order, and the
+first one that answers wins:
+
+1. **The resolve's own caption and creator** — already in hand, no request at all.
+2. **The platform's oEmbed** — one documented endpoint. TikTok only; Instagram's needs a
+   Meta App Review token.
+3. **The post page's Open Graph tags** — one GET, both platforms.
+
+The third tier is what finally gives Instagram a metadata fallback: before it, a reel whose
+resolve failed outright had nothing left and was simply lost. `og:description` on a post
+*is* the caption, and those tags are served to anonymous requests and kept stable because
+every link preview on the internet reads them.
+
+It deliberately does **not** reuse `lib/article.js`, and the reason is worth keeping: that
+path requires 200 characters of readable prose and throws `empty` below it, on the grounds
+that a page with less than a paragraph is drawn by JavaScript. A post page *is* drawn by
+JavaScript — its body is an app shell — so the article scraper would refuse it every single
+time. The `<head>` is the opposite: Open Graph tags exist precisely so software can describe
+a page without executing it. So the tier reads the head and ignores the body.
+
+A login wall, an age gate and a "content unavailable" page all return `200` with well-formed
+tags describing *the platform*, so previews that read as the site rather than the post are
+dropped — telling the model a reel's caption is "Log in to Instagram" is worse than saying
+nothing, because it looks like content. Each tier hangs off the provider like `oEmbed` does,
+so a caller supplying its own providers gets no request it didn't ask for.
 
 **A refused resolve can get a second opinion from a browser.** Optional, off unless
 `BROWSER_WORKER_URL` is set, and only ever reached after something has already failed. The
