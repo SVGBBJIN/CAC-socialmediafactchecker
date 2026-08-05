@@ -165,6 +165,14 @@ export default async function handler(req, res) {
       // every follow-up question — see `CLIP_CACHE_TTL_MS` in lib/gemini.js — and switching
       // it on is a deployment decision made here rather than imposed on every caller.
       clipOptions: { cache: true, hints: clipHints },
+      // Read a pasted link that isn't a video — an article, a blog post, a press release —
+      // and quote its text to the model as the material being checked. Off by default in
+      // the library because it fetches a host the user named; switched on here, where the
+      // deployment decision belongs, because a fact-checker that cannot open the page it
+      // was given is checking a headline. lib/article.js has the vetting that makes the
+      // fetch safe and the fencing that keeps the page's own words from being read as
+      // instructions.
+      attachPages: true,
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);

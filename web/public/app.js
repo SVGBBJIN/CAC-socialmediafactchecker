@@ -397,8 +397,13 @@ async function pingLink(url) {
 }
 
 /**
- * Best-effort check that a link is something this app can actually pull video from,
- * before spending a full (expensive) fact-check run on it.
+ * Best-effort check that a link is something this app can actually check, before spending
+ * a full (expensive) fact-check run on it.
+ *
+ * "Actually check" now means two different things, because there are two kinds of link. On
+ * the three video platforms it means a post whose media can be pulled; on every other host
+ * it means a page whose text can be read (lib/article.js does the reading, server-side).
+ * Both go through this function, and what a link *is* decides which question gets asked.
  *
  * Two paths, split on whether the host already names a platform.
  *
@@ -416,18 +421,18 @@ async function pingLink(url) {
  * reads headers and never a body, and /api/resolve-media is host-allowlisted to TikTok/
  * Instagram's CDNs (see api/resolve-media.js and lib/link-probe.js) — neither is a
  * "fetch whatever host the user pasted and hand back what it said" path, which is what
- * would make this an SSRF-shaped proxy. An unsupported platform, or a supported one that
- * fails to confirm, falls back to asking the user rather than either silently blocking
- * them or guessing it'll work.
+ * would make this an SSRF-shaped proxy. A supported platform that fails to confirm, or a
+ * page the ping couldn't establish anything about, falls back to asking the user rather
+ * than either silently blocking them or guessing it'll work.
  */
 async function verifyLinkViewable(url) {
   const platform = platformFor(url);
 
   // An unrecognised host is the one case with nothing to run the ping *against*: until the
   // redirects have been followed there is no resolver to start. It is also the case where
-  // the ping adds reach rather than just confidence — a shortener or a news-site share
-  // wrapper only names its platform once it has been followed, and before the ping those
-  // were a silent text-only check.
+  // the ping decides the outcome rather than merely raising confidence in it — a shortener
+  // or a share wrapper only names its platform once it has been followed, and for a link
+  // that turns out to be a page, what the ping saw is the whole of what intake knows.
   if (!SUPPORTED_PLATFORMS.has(platform)) return verifyByRedirect(url, platform);
 
   // The host already names the platform, so the resolver runs alone — no ping, not even
@@ -466,8 +471,9 @@ function deadLinkResult(url, probe, platform) {
  * Classify a link whose host names no platform, by following it.
  *
  * Serial by necessity — the redirects are what produce the platform, so there is nothing
- * to parallelise. The wait is paid only by links that resolve to nothing today, which is
- * the trade this is meant to make.
+ * to parallelise. The wait is paid by links whose host names no platform, and it buys them
+ * two different things: a share wrapper gets routed to the resolver it was hiding, and a
+ * plain page gets confirmed as one before a run is spent on it.
  */
 async function verifyByRedirect(url, platform) {
   const probe = await pingLink(url);
@@ -480,7 +486,26 @@ async function verifyByRedirect(url, platform) {
   // Where it *landed*, not what was pasted.
   const resolved = probe.canonicalURL || probe.finalURL || url;
   const landed = probe.platform ?? platformFor(resolved);
-  return { ...(await verifyOnPlatform(resolved, landed)), url: resolved };
+  return { ...(await verifyOnPlatform(resolved, landed, probe)), url: resolved };
+}
+
+/**
+ * Content types a pasted link can be *checked* as a page.
+ *
+ * The server reads the page with the same extractor `find_in_page` uses, and that extractor
+ * takes HTML and plain text and nothing else — a PDF or an MP4 comes back as bytes with no
+ * prose in them. Refusing those here, where the probe has already told us the type, is what
+ * turns "the check produced nothing and we don't know why" into a sentence naming the file
+ * type before a run is spent on it.
+ *
+ * A missing content-type is treated as readable: some servers omit it on a HEAD, and the
+ * server-side fetch checks the type again on the response it actually reads.
+ */
+const READABLE_TYPE = /^(?:text\/html|text\/plain|application\/xhtml\+xml)/i;
+
+function readablePage(probe) {
+  const type = probe?.contentType;
+  return !type || READABLE_TYPE.test(type);
 }
 
 /**
@@ -502,7 +527,7 @@ async function verifyByRedirect(url, platform) {
  * Runs on the probe's resolved URL when there was a probe, and on the raw paste when the
  * host named its platform outright.
  */
-async function verifyOnPlatform(url, platform) {
+async function verifyOnPlatform(url, platform, probe = null) {
   if (platform === "YouTube") {
     return youTubeVideoID(url)
       ? { ok: true, url, platform }
@@ -542,19 +567,43 @@ async function verifyOnPlatform(url, platform) {
     }
   }
 
-  return {
-    ok: false,
-    url,
-    platform,
-    reason: "This isn't a TikTok, YouTube, or Instagram link, so the video may not come through.",
-  };
+  // Everything else is a page, and a page is now something this app checks rather than
+  // something it turns away. The server fetches it, pulls its text out and hands that to
+  // the model as the material under examination — see lib/article.js — so an article, a
+  // blog post or a press release gets the same treatment a video does.
+  //
+  // The ping is what makes that a decision rather than a hope: it has already followed the
+  // redirects and seen what answered, so a live HTML page starts a check, a PDF or a media
+  // file is named as such before a run is spent on it, and a link with no ping behind it
+  // still asks first — that is the case where nothing has been established at all.
+  if (!probe) {
+    return {
+      ok: false,
+      url,
+      platform,
+      reason: "Couldn't check whether there's a readable page at this link.",
+    };
+  }
+  if (!readablePage(probe)) {
+    const type = String(probe.contentType).split(";")[0];
+    return {
+      ok: false,
+      url,
+      platform,
+      reason: `That link is ${type}, not a page — there's no text on it to check.`,
+    };
+  }
+  return { ok: true, url, platform, kind: "page" };
 }
 
 function showLinkConfirm(url, result) {
   pendingConfirmUrl = url;
+  // "Not a supported link" is no longer what an unrecognised host means — a page is
+  // checkable now, so reaching this dialog with one means the ping found something wrong
+  // with *that* link rather than with its platform.
   el.linkConfirmTitle.textContent = SUPPORTED_PLATFORMS.has(result.platform)
     ? `Couldn't confirm this ${result.platform} link`
-    : "Not a supported link";
+    : "Couldn't read this link";
   el.linkConfirmBody.textContent = result.reason;
   el.linkConfirmDialog.showModal();
 }
@@ -807,7 +856,7 @@ function renderEmptyState() {
   el.videoTitle.textContent = "Paste a link below to start a check.";
   el.videoLink.href = "#";
   clearVideoMedia();
-  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a TikTok, YouTube, or Instagram link below and press Check.</p></div>`;
+  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page.</p></div>`;
 }
 
 /**
@@ -964,10 +1013,23 @@ async function loadDirectMedia(entry, token) {
   }
 }
 
+/**
+ * The two shapes the pane's placeholder takes: a play triangle, and a sheet of paper.
+ *
+ * A page has no media to load, so the placeholder is the whole of what that pane will ever
+ * show — and a play button over an article promises a video that is never coming. One
+ * attribute swap is the cheapest honest answer.
+ */
+const PLAY_GLYPH = "M8 5v14l11-7z";
+const PAGE_GLYPH = "M14 2H7a1 1 0 00-1 1v18a1 1 0 001 1h10a1 1 0 001-1V6zm-1 5V3l5 5h-4a1 1 0 01-1-1z";
+
 function renderVideoPane(entry) {
   el.videoChip.textContent = entry.platform;
   el.videoTitle.textContent = entry.title;
   el.videoLink.href = entry.url;
+  el.videoPlaceholder
+    .querySelector("path")
+    ?.setAttribute("d", SUPPORTED_PLATFORMS.has(entry.platform) ? PLAY_GLYPH : PAGE_GLYPH);
 
   const token = ++videoPaneToken;
   clearVideoMedia();
@@ -1239,6 +1301,8 @@ function stageText(frame) {
   switch (frame?.stage) {
     case "attaching":
       return "Fetching the video";
+    case "reading":
+      return "Reading the page";
     case "waiting":
       if (frame.media) return "Watching the video";
       return frame.round > 0 ? "Reading the sources" : "Asking the model";
@@ -1386,9 +1450,19 @@ function incompleteFrom({ truncated, failure }) {
   return null;
 }
 
+/**
+ * The check itself, worded for what was actually pasted.
+ *
+ * "This video" is a lie about an article, and a small one with a real cost: the model is
+ * told elsewhere that a video link is attached for it to watch, so a prompt calling a news
+ * page a video invites it to apologise for not being able to see one. The page's text is
+ * quoted into the request server-side (lib/article.js), so what changes here is only the
+ * noun — the job, and the verdict line the app parses, are the same either way.
+ */
 function composeCheckPrompt(url) {
+  const subject = SUPPORTED_PLATFORMS.has(platformFor(url)) ? "video" : "page";
   return withCustomInstructions(
-    `Fact-check this video: ${url}\n\n` +
+    `Fact-check this ${subject}: ${url}\n\n` +
       "List the distinct factual claims it makes, check each one, and explain what the evidence " +
       "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
       "|Insufficient evidence>` summarizing the main claim — no other text on that line.",
@@ -1556,7 +1630,7 @@ function updateComposerMode() {
   const entry = selectedDoneEntry();
   if (!entry) {
     el.checkBtn.textContent = "Check";
-    el.linkInput.placeholder = "Paste a TikTok, YouTube, or Instagram link…";
+    el.linkInput.placeholder = "Paste a video or article link…";
     return;
   }
   const asking = looksLikeFollowup(el.linkInput.value);

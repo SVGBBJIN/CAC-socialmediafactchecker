@@ -67,6 +67,7 @@ frozen means:
 | **TikTok photo mode** | embed page → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
 | **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
 | **Instagram images/carousels** | post query → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
+| **Any other link** | fetch the page → its text quoted to Gemini as the subject | Working — verified live 2026-08-05 | **Not ported** |
 
 Only platforms that can actually be served get registered, so an Instagram link shared
 *to the Swift app* gets an honest "not supported yet" rather than an empty result. The web
@@ -276,6 +277,7 @@ web/                       The fact-checker. Static front end, Gemini key server
   lib/media-fetch.js       ⟷ Sources/SeerCore/Media/MediaDownloader.swift
   lib/retry.js             ⟷ Sources/SeerCore/Networking/RetryPolicy.swift
   lib/instagram.js         no Swift counterpart — the unported resolver
+  lib/article.js           no Swift counterpart — a pasted page, read and quoted
   lib/search.js            no Swift counterpart — research, citations, verdicts
   lib/verified-chat.js     ⌟
 ```
@@ -291,7 +293,7 @@ route that holds the key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 303 tests, no network
+npm test                               # 361 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to

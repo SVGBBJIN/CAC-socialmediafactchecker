@@ -23,6 +23,7 @@ import {
   downloadInstagramImages,
 } from "./instagram.js";
 import { uploadFile, deleteFile } from "./gemini-files.js";
+import { findArticleLinks, resolveArticles, describeArticle } from "./article.js";
 import {
   modelHealth,
   planChain,
@@ -1139,10 +1140,12 @@ function describeOEmbedFallback(meta, platform, link, reason) {
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
  */
-export function toGeminiContents(messages, { clips, attachVideos = true } = {}) {
+export function toGeminiContents(messages, { clips, articles, attachVideos = true } = {}) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
+  const attachedPages = new Set();
   const attachments = clips?.attachments ?? new Map();
+  const pages = articles?.pages ?? new Map();
 
   return messages.map((message) => {
     const isUser = message.role !== "assistant";
@@ -1205,6 +1208,17 @@ export function toGeminiContents(messages, { clips, attachVideos = true } = {}) 
         if (entry.parts) parts.push(...entry.parts);
         else parts.push(entry.part);
         const context = describeClip(entry.resolved, platform, entry);
+        if (context) notes.push(context);
+      }
+
+      // A pasted page, quoted in full. Same "once, at first mention" rule the clips follow
+      // and for the same reason — the history is replayed on every turn, so re-quoting a
+      // page the user linked three messages ago would send its text again on each one.
+      for (const link of findArticleLinks(text)) {
+        const page = pages.get(link);
+        if (!page || attachedPages.has(link)) continue;
+        attachedPages.add(link);
+        const context = describeArticle(link, page);
         if (context) notes.push(context);
       }
     }
@@ -1571,6 +1585,11 @@ export async function* streamChat({
   idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS,
   attachMedia = true,
   clipOptions = {},
+  // Reading a pasted page is opt-in per caller, the way the clip cache is: it is a fetch
+  // of a host the user named, and a caller that has not thought about that should not get
+  // one by default. /api/chat opts in — see the note there.
+  attachPages = false,
+  articleOptions = {},
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
@@ -1582,6 +1601,7 @@ export async function* streamChat({
 }) {
   const deadline = new StreamDeadline(signal);
   let clips = null;
+  let articles = null;
 
   try {
     // Clips are fetched before the first model call, not per model: the bytes are the same
@@ -1608,7 +1628,23 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { clips, attachVideos: attachMedia });
+    // Pages are read after the clips rather than alongside them, and the ordering is not
+    // arbitrary: a message rarely contains both, and when it does the clip is the slow one
+    // — running them together would only overlap a two-second fetch with a thirty-second
+    // download while making the failure of either harder to read in the stage line.
+    if (attachPages) {
+      if (
+        messages.some(
+          (m) => m?.role !== "assistant" && findArticleLinks(String(m?.content ?? "")).length > 0,
+        )
+      ) {
+        yield { type: "stage", stage: "reading" };
+      }
+      articles = await resolveArticles(messages, { fetchImpl, signal, ...articleOptions });
+    }
+    if (deadline.callerAborted) return;
+
+    const contents = toGeminiContents(messages, { clips, articles, attachVideos: attachMedia });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
