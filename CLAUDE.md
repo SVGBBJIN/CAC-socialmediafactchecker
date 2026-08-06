@@ -45,7 +45,7 @@ There is no bundler and no `node_modules` dependency for `web/` itself — every
 Node 20+ stdlib. To run a single test file directly: `node --test test-search.js` (etc. —
 see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
-test-article.js test-browser-resolve.js test-post-preview.js`).
+test-article.js test-browser-resolve.js test-post-preview.js test-device.js`).
 
 ### `Sources/` (Swift, frozen)
 
