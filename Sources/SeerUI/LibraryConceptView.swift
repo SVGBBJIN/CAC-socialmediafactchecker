@@ -525,8 +525,25 @@ private struct ConceptLibraryItem: Identifiable {
     ]
 }
 
-#Preview("Library concept") {
+// Previews are pinned to a width in each band rather than left to size themselves. The
+// layout branches on the width it is handed (see `DeviceProfile`), and an unsized preview
+// settles on this view's `minWidth` — so "the phone layout" and "the desktop layout" were
+// not separately viewable, and which one the canvas showed was an accident of that floor.
+#Preview("Library concept — phone") {
     LibraryConceptView()
+        .frame(width: 390, height: 780)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Library concept — tablet") {
+    LibraryConceptView()
+        .frame(width: 834, height: 700)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Library concept — desktop") {
+    LibraryConceptView()
+        .frame(width: 1040, height: 660)
         .preferredColorScheme(.dark)
 }
 #endif
