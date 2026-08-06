@@ -314,6 +314,36 @@
   .claim-text a.citation { color: var(--accent); text-decoration: none; }
   .claim-text a.citation:hover { text-decoration: underline; }
 
+  /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
+     leaves the page for a source, a timestamp moves the player a few inches away, and the
+     two being visually interchangeable would be a promise about where a click goes. So this
+     is a chip with a play triangle in it rather than accent-coloured text. */
+  .ts-chip {
+    display: inline-flex; align-items: center; gap: 3px; vertical-align: baseline;
+    margin: 0 1px 0 3px; padding: 1px 6px 1px 5px;
+    border: 1px solid rgba(255,255,255,0.14); border-radius: 999px;
+    background: var(--surface-raised); color: var(--ink-dim);
+    font-family: var(--font-mono); font-size: 0.72em; line-height: 1.5;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    cursor: pointer; transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+  }
+  .ts-chip svg { width: 0.8em; height: 0.8em; flex: none; opacity: 0.75; }
+  .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: rgba(79,209,197,0.12); }
+  .ts-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* The claim the playhead is inside right now — see `syncPlayhead`. Filled rather than
+     outlined so the eye finds it while the video is running and the text is not being read
+     word by word. Direct MP4 only; a YouTube embed's clock isn't readable from this page. */
+  .ts-chip.playing {
+    color: #06201d; background: var(--accent); border-color: var(--accent); font-weight: 600;
+  }
+  .ts-chip.playing svg { opacity: 1; }
+  /* Clicked with no player behind it (the CDN link never resolved). Stays legible — the
+     timestamp is still true — but stops advertising itself as something that will play. */
+  .ts-chip.dead { cursor: default; opacity: 0.5; }
+  .ts-chip.dead:hover { color: var(--ink-dim); border-color: rgba(255,255,255,0.14); background: var(--surface-raised); }
+  /* A page or a photo post: rendered by `linkTimestamps` as plain text, never a button. */
+  .ts-chip.static { cursor: default; opacity: 0.7; }
+
   /* An answer that arrived damaged — cut off by the output cap, or by a stream that died
      part-way. Warn-coloured rather than error-coloured on purpose: the text above it is
      real and worth reading, and a red band would tell the reader to discard it. */
