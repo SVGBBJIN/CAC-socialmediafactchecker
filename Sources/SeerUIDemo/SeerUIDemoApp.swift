@@ -1,4 +1,5 @@
-// A runnable harness for the progress animation.
+// A runnable harness for everything `SeerUI` draws: the progress animation and the
+// library concept, picked between at the top of the one window.
 //
 // `SeerUI` had no consumer. It compiled to nothing on Linux (`#if canImport(SwiftUI)`),
 // nothing in the package imported it, and there is no app target in this repository — so
@@ -14,6 +15,9 @@
 // Run it with `swift run SeerUIDemo` on macOS, or open Package.swift in Xcode and pick
 // the SeerUIDemo scheme. On Linux it builds to the stub at the bottom of this file, so
 // `swift build` and `swift test` keep working there.
+//
+// Note that Linux CI does *not* type-check anything below the `canImport(SwiftUI)` guard,
+// so this file's correctness rests on it having been built on a Mac.
 
 #if canImport(SwiftUI)
 import SwiftUI
@@ -22,23 +26,128 @@ import SeerUI
 
 @main
 struct SeerUIDemoApp: App {
+    // One window, not two. `LibraryConceptView` used to live in a second `WindowGroup`,
+    // which is why it never appeared: SwiftUI only presents the *first* scene at launch,
+    // and a `WindowGroup` with no `id` and no `openWindow` call has nothing that can open
+    // it afterwards. Running the demo showed the progress screen and nothing else, so the
+    // library concept — and with it the phone layout — was unreachable from Xcode.
     var body: some Scene {
-        WindowGroup("Seer — progress") {
-            DemoScreen()
+        WindowGroup("Seer") {
+            DemoRoot()
         }
         #if os(macOS)
-        .defaultSize(width: 460, height: 720)
+        .defaultSize(width: 1040, height: 760)
         #endif
+    }
+}
 
-        // A second window for `LibraryConceptView` — see that file's header for why it's
-        // scripted mock data rather than a pipeline consumer.
-        WindowGroup("Seer — library concept") {
+/// Which of the two screens the demo is showing.
+enum DemoTab: String, CaseIterable, Identifiable {
+    case progress
+    case library
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .progress: return "Progress"
+        case .library: return "Library concept"
+        }
+    }
+}
+
+/// The window's contents: a switch between the two things `SeerUI` draws.
+struct DemoRoot: View {
+    @State private var tab: DemoTab = .library
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Screen", selection: $tab) {
+                ForEach(DemoTab.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            switch tab {
+            case .progress:
+                DemoScreen()
+            case .library:
+                LibraryConceptHarness()
+            }
+        }
+    }
+}
+
+/// `LibraryConceptView` inside a viewport whose width the demo controls.
+///
+/// The view branches on the width it is *given* (see `DeviceProfile`), so on a Mac the
+/// phone layout is only reachable by dragging the window under 700pt — which is both easy
+/// to not think to do and impossible to do at all from an iPad in landscape. Since this
+/// package has no iOS app target (a SwiftPM executable runs on the host, never on a
+/// simulator), pinning the width here is the only way to look at the drawer layout in
+/// Xcode at all.
+struct LibraryConceptHarness: View {
+    /// Widths chosen to sit in each of `DeviceProfile`'s three bands: 390pt is an iPhone
+    /// in portrait (phone, ≤700), 834pt an iPad in portrait (tablet, ≤1024), and `window`
+    /// hands over the real window so resizing still demonstrates the breakpoints.
+    enum Viewport: String, CaseIterable, Identifiable {
+        case phone
+        case tablet
+        case window
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .phone: return "Phone · 390pt"
+            case .tablet: return "Tablet · 834pt"
+            case .window: return "Fill window"
+            }
+        }
+
+        /// `nil` means "take whatever the window gives you".
+        var width: CGFloat? {
+            switch self {
+            case .phone: return 390
+            case .tablet: return 834
+            case .window: return nil
+            }
+        }
+    }
+
+    @State private var viewport: Viewport = .phone
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Viewport", selection: $viewport) {
+                ForEach(Viewport.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+
             LibraryConceptView()
                 .preferredColorScheme(.dark)
+                .frame(width: viewport.width)
+                // A visible edge, so a 390pt column in a 1040pt window reads as a phone
+                // rather than as a layout that failed to fill the space.
+                .overlay {
+                    if viewport.width != nil {
+                        Rectangle().strokeBorder(.separator, lineWidth: 1)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.black.opacity(0.25))
         }
-        #if os(macOS)
-        .defaultSize(width: 1040, height: 660)
-        #endif
     }
 }
 
