@@ -45,7 +45,8 @@ There is no bundler and no `node_modules` dependency for `web/` itself — every
 Node 20+ stdlib. To run a single test file directly: `node --test test-search.js` (etc. —
 see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
-test-article.js test-browser-resolve.js test-post-preview.js test-device.js`).
+test-article.js test-browser-resolve.js test-post-preview.js test-device.js
+test-timestamps.js`).
 
 ### `Sources/` (Swift, frozen)
 
@@ -106,6 +107,16 @@ that deletion is the entire enforcement mechanism. There used to be a second lay
 LLM-based auditor that guessed which sentences were "claims" and forced rewrites); it was
 removed because the guess was unreliable, not replaced. Don't reintroduce sentence-level
 claim detection — it was deliberately torn out.
+
+**Timestamps are a separate marker from citations, and they point at the post, not at a
+source.** On a video check the model is asked to write `[t=M:SS]` (or `[t=M:SS-M:SS]`) after
+each claim, marking when in the clip it is made. `public/timestamps.js` owns that syntax —
+parsing, formatting, and turning the marks into playback windows — and `public/app.js`
+renders each one as a chip that seeks the video pane (`currentTime` on the MP4 element,
+`postMessage` for the YouTube embed) and lights up while the playhead is inside it. The
+`t=` is load-bearing: `lib/citation-cleanup.js` deletes any `[n]` it can't resolve in the
+ledger, so a bare `[0:12]` would be destroyed on the way out. Chips are only rendered as
+controls when there is something to seek — an article or a photo carousel gets inert text.
 
 **Model fallback chain** (`lib/gemini.js` / `lib/degradation.js`): Flash 3.6 → 3.5 →
 3-preview → 2.5 → 2.0, walked on 404/403 (unavailable), 429/`RESOURCE_EXHAUSTED` (quota,
