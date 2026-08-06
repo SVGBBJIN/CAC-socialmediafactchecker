@@ -37,5 +37,9 @@ let package = Package(
         .executableTarget(name: "SeerUIDemo", dependencies: ["SeerUI", "SeerCore"]),
         .executableTarget(name: "SeerSecretsTool", dependencies: ["SeerCore"]),
         .testTarget(name: "SeerCoreTests", dependencies: ["SeerCore"]),
+        // Covers the parts of SeerUI that are pure Foundation — currently the device
+        // classification that decides the layout. Those deliberately sit outside the
+        // `#if canImport(SwiftUI)` guards, so this target runs on Linux CI like the rest.
+        .testTarget(name: "SeerUITests", dependencies: ["SeerUI"]),
     ]
 )

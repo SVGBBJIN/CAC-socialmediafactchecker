@@ -16,6 +16,8 @@
 // — exactly what the chat UI already does across turns, just anchored to one link instead
 // of scrolling.
 
+import { watchDevice } from "./device.js";
+
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
 
@@ -103,6 +105,10 @@ const el = {
   imageChipName: document.getElementById("imageChipName"),
   imageChipRemove: document.getElementById("imageChipRemove"),
   micBtn: document.getElementById("micBtn"),
+  sidebar: document.getElementById("sidebar"),
+  drawerToggle: document.getElementById("drawerToggle"),
+  drawerScrim: document.getElementById("drawerScrim"),
+  topbarSettingsBtn: document.getElementById("topbarSettingsBtn"),
 };
 
 let library = loadLibrary();
@@ -177,6 +183,70 @@ function withCustomInstructions(text) {
   return instructions
     ? `${text}\n\n[The user has set custom instructions for you to follow throughout this conversation: ${instructions}]`
     : text;
+}
+
+/* ---------------------------------------------------------------- device + drawer */
+
+// The layout itself is CSS's job — the media queries in index.html already re-run on
+// rotate and resize without any help from here. What JS owns is the part a media query
+// cannot express: stamping the *capability* (touch vs. mouse) onto the root element, and
+// running the drawer, which is a stateful control rather than a style.
+//
+// See public/device.js for why width and pointer are kept as separate signals.
+
+let device = { kind: "desktop", touch: false, width: 0 };
+
+/** Publishes the current classification to CSS and re-syncs anything that depends on it. */
+function applyDevice(next) {
+  const previousKind = device.kind;
+  device = next;
+
+  const root = document.documentElement;
+  root.setAttribute("data-device", next.kind);
+  root.setAttribute("data-pointer", next.touch ? "coarse" : "fine");
+
+  // Growing out of the phone layout — rotating to landscape, un-splitting a tablet,
+  // widening a window — turns the drawer back into a permanent column. Leaving
+  // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
+  if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
+  syncDrawerInert();
+}
+
+function isDrawerOpen() {
+  return document.documentElement.getAttribute("data-drawer") === "open";
+}
+
+function openDrawer() {
+  if (device.kind !== "phone") return;
+  document.documentElement.setAttribute("data-drawer", "open");
+  el.drawerToggle.setAttribute("aria-expanded", "true");
+  el.drawerToggle.setAttribute("aria-label", "Close library");
+  syncDrawerInert();
+  // Focus has to move into the drawer for a keyboard user, but on a touchscreen landing
+  // on the search field summons the on-screen keyboard over the very list the user just
+  // opened to browse. The "New check" button is the first control either way.
+  if (device.touch) el.newCheckBtn.focus();
+  else el.searchInput.focus();
+}
+
+function closeDrawer({ restoreFocus = true } = {}) {
+  if (!isDrawerOpen()) return;
+  // Focus has to leave before the drawer becomes inert, or it lands on <body> and the
+  // next Tab restarts from the top of the document.
+  if (restoreFocus) el.drawerToggle.focus();
+  else if (el.sidebar.contains(document.activeElement)) document.activeElement.blur();
+
+  document.documentElement.removeAttribute("data-drawer");
+  el.drawerToggle.setAttribute("aria-expanded", "false");
+  el.drawerToggle.setAttribute("aria-label", "Open library");
+  syncDrawerInert();
+}
+
+/** A closed off-canvas drawer is still in the DOM and still focusable without this —
+ *  tabbing from the composer would walk invisibly through the whole library. `inert` is
+ *  the belt to the CSS `visibility: hidden` braces, and covers assistive tech too. */
+function syncDrawerInert() {
+  el.sidebar.inert = device.kind === "phone" && !isDrawerOpen();
 }
 
 /* ---------------------------------------------------------------- feedback (like/dislike) */
@@ -769,6 +839,30 @@ function splitVerdict(answer) {
  * Two rAFs: the first lands after the browser has laid the new nodes out, the second
  * after it has committed that layout — the gap a transition needs to actually fire.
  */
+/** OS-level and in-app reduced-motion both mean "skip it" — matches how `applySettings`
+ * treats them as one signal via `[data-motion="reduced"]`, just read here as a boolean
+ * instead of a CSS selector, since this gates a `setTimeout` rather than a transition. */
+function prefersReducedMotion() {
+  return settings.reducedMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
+ * Morphs the running check's loading iris into its resolved checkmark before the card
+ * beneath it is replaced by the answer.
+ *
+ * The `.iris-wrap.resolved` styling has existed since the loading view was built, but
+ * nothing ever applied the class — every check jumped straight from spinner to answer
+ * with no beat marking the moment it actually landed. A no-op if the running card isn't
+ * on screen any more (the user navigated away, or reduced motion skips the pause).
+ */
+async function resolveIris() {
+  const iris = el.claimsPane.querySelector(".iris-wrap");
+  if (!iris) return;
+  iris.classList.add("resolved");
+  if (prefersReducedMotion()) return;
+  await new Promise((resolve) => setTimeout(resolve, 380));
+}
+
 function revealIn(root) {
   const targets = root.querySelectorAll("[data-reveal]");
   requestAnimationFrame(() => {
@@ -866,6 +960,9 @@ function statusLabel(entry) {
 
 function selectEntry(id) {
   if (inFlight) return; // Don't let a click yank the pane out from under a running turn.
+  // Picking a check is the whole reason the drawer was opened, so it has done its job.
+  // No-op above phone width, where the sidebar is a permanent column.
+  closeDrawer({ restoreFocus: false });
   selectedId = id;
   pendingFollowup = null;
   renderLibrary(el.searchInput.value);
@@ -893,6 +990,9 @@ function renderEmptyState() {
  */
 function startNewCheck() {
   if (inFlight) return; // Same guard as switching library items mid-run.
+  // "New check" lives inside the drawer on a phone, and it hands focus to the composer
+  // behind it — so the drawer has to be out of the way before that focus call lands.
+  closeDrawer({ restoreFocus: false });
   selectedId = null;
   pendingFollowup = null;
   el.linkInput.value = "";
@@ -1603,7 +1703,12 @@ async function runCheck(url, existingId, hint) {
     entry.verdictKey = verdictKey ?? (incomplete ? null : "insufficient");
     persistLibrary();
     renderLibrary(el.searchInput.value);
-    if (selectedId === id) renderResultCard(entry);
+    if (selectedId === id) {
+      await resolveIris();
+      // The wait above can outlast the user's patience for this entry — they may have
+      // already clicked to a different check. Re-check rather than trust the guard above.
+      if (selectedId === id) renderResultCard(entry);
+    }
   } catch (error) {
     if (error.name === "AbortError") return;
     entry.status = "error";
@@ -1867,7 +1972,28 @@ el.passForm.addEventListener("submit", () => {
 
 el.claimsPane.addEventListener("click", handleClaimsPaneClick);
 
+el.drawerToggle.addEventListener("click", () => {
+  if (isDrawerOpen()) closeDrawer();
+  else openDrawer();
+});
+el.drawerScrim.addEventListener("click", () => closeDrawer());
+
+document.addEventListener("keydown", (event) => {
+  // Escape closes the drawer, the same way it closes the <dialog>s. Dialogs handle their
+  // own Escape natively and stop here only because an open one is not the drawer.
+  if (event.key === "Escape" && isDrawerOpen()) {
+    event.preventDefault();
+    closeDrawer();
+  }
+});
+
 el.settingsBtn.addEventListener("click", openSettingsDialog);
+// The phone top bar's copy of the settings button — same dialog, and it closes the
+// drawer first so the sheet doesn't open behind a scrim.
+el.topbarSettingsBtn.addEventListener("click", () => {
+  closeDrawer({ restoreFocus: false });
+  openSettingsDialog();
+});
 el.settingReducedMotion.addEventListener("change", () => {
   settings.reducedMotion = el.settingReducedMotion.checked;
   persistSettings();
@@ -1914,6 +2040,9 @@ el.imageInput.addEventListener("change", async () => {
 el.imageChipRemove.addEventListener("click", clearPendingImage);
 
 applySettings();
+// Classifies now and re-classifies on rotate/resize/pointer change, calling back only
+// when the answer actually changes — see watchDevice in device.js.
+watchDevice(window, applyDevice);
 initSpeechToText();
 
 renderLibrary();
@@ -1933,4 +2062,6 @@ if (startupEntry) {
 }
 updateComposerMode();
 loadServerConfig();
-el.linkInput.focus();
+// Focusing the composer on load saves a click on desktop. On a touchscreen it costs one
+// instead: the keyboard covers half the screen before the user has decided to type.
+if (!device.touch) el.linkInput.focus();
