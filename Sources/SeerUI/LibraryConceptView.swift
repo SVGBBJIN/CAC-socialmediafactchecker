@@ -1,8 +1,14 @@
 #if canImport(SwiftUI)
 import SwiftUI
 
-/// A desktop "library" screen — paste a link, watch each claim resolve to a verdict,
-/// browse past checks in a sidebar.
+/// The "library" screen — paste a link, watch each claim resolve to a verdict, browse
+/// past checks in a sidebar.
+///
+/// Adapts across three width bands rather than assuming a desktop window: on a phone
+/// (or any window narrow enough to be one) the sidebar becomes an overlaid drawer and
+/// the video pane moves above the claims instead of beside them. `DeviceProfile` decides
+/// which band applies and documents the rule; it is a port of the same rule in
+/// `web/public/device.js`, which drives the equivalent layout there.
 ///
 /// This is a **visual concept**, not a consumer of the real pipeline: `SeerCore` has no
 /// verdict or source-matching model yet (`ClaimContext` stops at `candidateClaims`), so
@@ -14,22 +20,53 @@ public struct LibraryConceptView: View {
     @State private var library: [ConceptLibraryItem] = .sample
     @State private var selection: ConceptLibraryItem.ID?
     @State private var runID = 0
+    @State private var isDrawerOpen = false
 
     public init() {}
 
     public var body: some View {
+        // Width comes from the layout, not from the device — see `DeviceProfile` for why,
+        // and `web/public/device.js` for the same decision on the other surface. Reading
+        // it here rather than from `horizontalSizeClass` also keeps this building on
+        // macOS, where that environment value does not exist.
+        GeometryReader { proxy in
+            let profile = DeviceProfile.classify(width: Double(proxy.size.width))
+
+            Group {
+                if profile.usesDrawerNavigation {
+                    compactLayout(profile, viewportHeight: proxy.size.height)
+                } else {
+                    splitLayout(profile)
+                }
+            }
+            // Crossing a breakpoint is a layout change the user caused by dragging or
+            // rotating; animating it reads as the panes moving rather than the screen
+            // being replaced.
+            .animation(.easeInOut(duration: 0.24), value: profile.kind)
+        }
+        // Was `minWidth: 900`, which made the compact layout unreachable on macOS — the
+        // window could not be dragged narrow enough to trigger it. The floor now sits
+        // just under the phone band so the same window can demonstrate either layout.
+        .frame(minWidth: 380, minHeight: 480)
+        .onAppear { selection = library.first?.id }
+    }
+
+    // MARK: - Layouts
+
+    /// Tablet and desktop: library, video and claims all on screen at once.
+    private func splitLayout(_ profile: DeviceProfile) -> some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 250)
+                .frame(width: profile.kind == .tablet ? 220 : 250)
                 .background(.thinMaterial)
 
             Divider()
 
             VStack(spacing: 0) {
                 ScrollView {
-                    HStack(alignment: .top, spacing: 20) {
-                        videoPane
-                            .frame(width: 240)
+                    HStack(alignment: .top, spacing: profile.kind == .tablet ? 16 : 20) {
+                        videoPane(maxThumbnailHeight: nil)
+                            .frame(width: profile.kind == .tablet ? 200 : 240)
 
                         VStack(spacing: 16) {
                             ForEach(ConceptClaim.sample) { claim in
@@ -38,14 +75,97 @@ public struct LibraryConceptView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(20)
+                    .padding(profile.kind == .tablet ? 16 : 20)
                 }
                 Divider()
-                entryBar
+                entryBar(compact: false)
             }
         }
-        .frame(minWidth: 900, minHeight: 600)
-        .onAppear { selection = library.first?.id }
+    }
+
+    /// Phone: one column, with the library promoted to an overlaid drawer.
+    ///
+    /// The library is the app's navigation, so it cannot simply be dropped — but 250pt of
+    /// permanent gutter out of 390pt is most of the screen. Off-canvas is the same
+    /// resolution the web layout reaches for at the same breakpoint.
+    private func compactLayout(_ profile: DeviceProfile, viewportHeight: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            VStack(spacing: 0) {
+                topBar
+                Divider()
+
+                ScrollView {
+                    VStack(spacing: 14) {
+                        // The pane confirms *which* post is being checked; the claims
+                        // under it are what the user opened the app for. Capped at
+                        // roughly a third of the viewport so the first verdict still
+                        // lands above the fold — the 32vh cap in index.html, in points.
+                        videoPane(maxThumbnailHeight: max(160, viewportHeight * 0.32))
+
+                        ForEach(ConceptClaim.sample) { claim in
+                            ClaimCardView(claim: claim, runID: runID)
+                        }
+                    }
+                    .padding(14)
+                }
+
+                Divider()
+                entryBar(compact: true)
+            }
+
+            if isDrawerOpen {
+                // Tapping outside is the primary way out of a drawer on a phone; a
+                // drawer whose only exit is the button that opened it is a trap.
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { setDrawer(open: false) }
+                    .transition(.opacity)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel("Close library")
+
+                sidebar
+                    .frame(width: 300)
+                    .background(.thinMaterial)
+                    .transition(.move(edge: .leading))
+            }
+        }
+        .animation(.easeInOut(duration: 0.24), value: isDrawerOpen)
+        // Picking a check is what the drawer was opened to do, so it has done its job.
+        .onChange(of: selection) { _, _ in setDrawer(open: false) }
+        // Growing out of the phone band turns the sidebar back into a permanent column;
+        // a drawer flag left set would then hold a dimming scrim over a normal layout.
+        .onDisappear { isDrawerOpen = false }
+    }
+
+    private func setDrawer(open: Bool) {
+        guard isDrawerOpen != open else { return }
+        isDrawerOpen = open
+    }
+
+    /// Phone-only header, carrying the drawer handle and the wordmark that lives in the
+    /// sidebar's own header at wider sizes.
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                setDrawer(open: !isDrawerOpen)
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 17, weight: .medium))
+                    .frame(width: 38, height: 38)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isDrawerOpen ? "Close library" : "Open library")
+
+            Label("Seer", systemImage: "eye")
+                .font(.system(.headline, design: .serif))
+                .labelStyle(.titleAndIcon)
+
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     private var sidebar: some View {
@@ -57,6 +177,14 @@ public struct LibraryConceptView: View {
             List(library, selection: $selection) { item in
                 LibraryRow(item: item)
                     .tag(item.id)
+                    // An explicit tap, rather than relying on `List`'s selection binding
+                    // alone: on iOS that binding only drives selection in edit mode, so
+                    // without this a tap in the drawer would neither select nor dismiss.
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selection = item.id
+                        setDrawer(open: false)
+                    }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -64,13 +192,13 @@ public struct LibraryConceptView: View {
         .padding(.top, 18)
     }
 
-    private var entryBar: some View {
+    private func entryBar(compact: Bool) -> some View {
         HStack(spacing: 8) {
             TextField("Paste a TikTok, YouTube, or Instagram link…", text: .constant(
                 "tiktok.com/@wellness.tips/video/7412…"
             ))
             .textFieldStyle(.plain)
-            .padding(11)
+            .padding(compact ? 12 : 11)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
 
             // Re-runs the mock stage sequence, matching the concept's "Check" button.
@@ -78,10 +206,15 @@ public struct LibraryConceptView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.teal)
         }
-        .padding(18)
+        // Tighter gutters on a phone, where 18pt on each side is width the field needs.
+        .padding(.horizontal, compact ? 12 : 18)
+        .padding(.vertical, compact ? 10 : 18)
     }
 
-    private var videoPane: some View {
+    /// - Parameter maxThumbnailHeight: caps the 9:16 thumbnail so it cannot push the
+    ///   claims below the fold. `nil` in the split layouts, where the pane is in a
+    ///   fixed-width column and its height follows from that.
+    private func videoPane(maxThumbnailHeight: CGFloat?) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(
@@ -93,6 +226,10 @@ public struct LibraryConceptView: View {
                 )
                 .aspectRatio(9.0 / 16.0, contentMode: .fit)
                 .overlay(Image(systemName: "play.fill").foregroundStyle(.white.opacity(0.55)))
+                // `fit` shrinks the width to match, so the shape stays 9:16 rather than
+                // being cropped — then it is centred in the column it left room in.
+                .frame(maxHeight: maxThumbnailHeight)
+                .frame(maxWidth: .infinity)
 
             Label("TikTok · 0:58", systemImage: "play.fill")
                 .font(.caption)

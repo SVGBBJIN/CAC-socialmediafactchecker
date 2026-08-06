@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- viewport-fit=cover lets the layout extend under the notch and home indicator; the
+     safe-area insets below are what keep content out from under them. Without it,
+     env(safe-area-inset-*) is always 0 and the entry bar sits behind the home bar. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Seer</title>
 <link
   rel="icon"
@@ -563,6 +566,189 @@
     color: var(--ink-dim); font-style: italic;
   }
 
+  /* ================================================================
+     Responsive / device adaptation
+     ================================================================
+
+     Two independent axes, matching the two questions public/device.js answers:
+
+       * **Width** picks the layout, and it is owned here in CSS, by media queries.
+         Nothing in JS decides whether to be one column or two — a media query already
+         re-evaluates on rotate, on resize, and on a split-screen change, for free and
+         without a repaint of our own. The breakpoints below are the same two numbers
+         device.js exports as PHONE_MAX_WIDTH / TABLET_MAX_WIDTH; they are duplicated
+         rather than shared because CSS cannot import them, and both sides say so.
+
+       * **Pointer** picks the affordances, and that is what `[data-pointer="coarse"]`
+         (stamped on <html> by app.js) is for. It is deliberately *not* a width query:
+         a touchscreen laptop at 1512px still needs 44px tap targets, and a narrow
+         desktop window still has a mouse. Every hover-reveal control gets a
+         permanently-visible fallback there, because hover is unreachable with a thumb.
+
+     `data-device` is stamped alongside for the handful of behavioural decisions JS
+     actually makes (drawer vs. static sidebar), not for styling that a media query
+     can already express. */
+
+  /* ---------- Compact top bar (phones only) ---------- */
+  /* On a phone the sidebar becomes a drawer, so the controls that lived in its header
+     need somewhere to be reachable from. This bar is that place. */
+  .topbar {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    padding-top: max(10px, env(safe-area-inset-top));
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .topbar .wordmark { font-family: var(--font-display); font-size: 16px; color: var(--ink); }
+  .topbar .mark { width: 17px; height: 17px; color: var(--accent); display: flex; }
+  .topbar .mark svg { width: 100%; height: 100%; }
+  .drawer-toggle {
+    display: flex; align-items: center; justify-content: center;
+    width: 38px; height: 38px; flex-shrink: 0;
+    border-radius: 9px; border: 1px solid var(--border);
+    background: var(--surface-raised); color: var(--ink); cursor: pointer;
+  }
+  .drawer-toggle svg { width: 18px; height: 18px; }
+  .drawer-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .topbar .settings-btn { width: 38px; height: 38px; }
+
+  /* The drawer's backdrop. Also the "tap outside to dismiss" target — a drawer with no
+     way out but the toggle button is a trap on a phone. */
+  .scrim {
+    position: fixed; inset: 0; z-index: 30;
+    background: rgba(0,0,0,0.55);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+
+  /* ---------- Phone: one column, sidebar as a drawer ---------- */
+  @media (max-width: 700px) {
+    .topbar { display: flex; }
+
+    /* Off-canvas rather than hidden: the library is the app's navigation, and a phone
+       still needs it — it just cannot afford 270px of permanent gutter out of 390px. */
+    .sidebar {
+      position: fixed; z-index: 40;
+      top: 0; bottom: 0; left: 0;
+      width: min(300px, 84vw);
+      padding-top: max(18px, env(safe-area-inset-top));
+      padding-bottom: max(18px, env(safe-area-inset-bottom));
+      border-right: 1px solid var(--border);
+      box-shadow: 0 0 40px rgba(0,0,0,0.5);
+      transform: translateX(-100%);
+      /* `visibility` is what keeps the closed drawer out of the tab order; delaying it
+         to the end of the close transition means it still animates out rather than
+         vanishing mid-slide. app.js sets `inert` too, for browsers that would otherwise
+         let a screen reader wander in. */
+      visibility: hidden;
+      transition: transform 0.24s ease, visibility 0s linear 0.24s;
+    }
+    [data-drawer="open"] .sidebar {
+      transform: translateX(0);
+      visibility: visible;
+      transition: transform 0.24s ease, visibility 0s;
+    }
+    [data-drawer="open"] .scrim { opacity: 1; pointer-events: auto; }
+
+    .content-grid {
+      grid-template-columns: 1fr;
+      gap: 14px;
+      padding: 14px;
+    }
+
+    /* The video pane stops being a sidecar and becomes a header for the claims below
+       it. Un-sticky on purpose: sticking it would eat half the screen permanently on
+       the one device where vertical room is scarcest. */
+    .video-pane { position: static; padding: 12px; }
+
+    /* A 9:16 thumb at full phone width is ~690px tall — taller than the viewport, so
+       the answer would start below the fold on every single check. Capping the height
+       and letting `aspect-ratio` derive the width keeps the shape honest instead of
+       cropping it.
+       32vh, not more: the pane is here to confirm *which* post is being checked, and
+       the analysis under it is what the user came for. Anything taller and the verdict
+       starts off-screen on every check, which is the one thing this layout must not do.
+       Still large enough to tap and watch in place. */
+    .video-thumb {
+      width: auto; max-width: 100%;
+      max-height: 32vh;
+      margin: 0 auto 12px;
+    }
+
+    .claim-card { padding: 16px; border-radius: 12px; }
+    .claim-text { font-size: 15.5px; }
+
+    /* The composer follows the thumb to the bottom of the screen and stays there. It is
+       the only control that matters on a phone, and hunting for it after a long answer
+       is not a thing anyone should have to do. */
+    .entry-bar {
+      position: sticky; bottom: 0; z-index: 10;
+      gap: 6px;
+      padding: 10px 12px;
+      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+    }
+    /* 16px exactly. Mobile Safari force-zooms the page on focusing any input whose text
+       is smaller than that, and never zooms back out — the layout is then wrong for the
+       rest of the session. This is a workaround for that, not a type-scale choice. */
+    .entry-bar input { font-size: 16px; padding: 12px; min-width: 0; }
+    .entry-bar button { padding: 12px 16px; font-size: 14px; }
+    .image-chip { margin: 0 12px; }
+
+    /* This disclaimer sits outside `.app`, so it is pinned below the composer rather
+       than scrolling away — which at the desktop size is fine and at 390px was eating
+       a fifth of the screen. Kept rather than hidden (it is a real caveat about how the
+       verdict is derived), just tightened to about two lines. */
+    .note { padding: 7px 14px; font-size: 10.5px; line-height: 1.35; }
+
+    /* Dialogs are sheets at this width — a 92vw box floating mid-screen wastes the room
+       it is short of. */
+    .passphrase {
+      width: 100%; max-width: 100%;
+      margin: auto auto 0;
+      border-radius: 16px 16px 0 0;
+      border-bottom: 0;
+      padding-bottom: max(20px, env(safe-area-inset-bottom));
+    }
+    .settings-dialog { width: 100%; max-height: 88vh; }
+    .passphrase input { font-size: 16px; }
+  }
+
+  /* ---------- Tablet: keep both panes, tighten the gutters ---------- */
+  @media (min-width: 701px) and (max-width: 1024px) {
+    .sidebar { width: 220px; padding: 16px 10px; }
+    /* At 220px "Instagram · Contradicted" wraps onto a second line and makes the rows
+       uneven. The title already truncates; the subtitle should too. */
+    .lib-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .content-grid { grid-template-columns: 200px 1fr; gap: 16px; padding: 16px; }
+    .entry-bar { padding: 14px 16px; }
+    /* Same iOS zoom-on-focus rule as above — an iPad does it too. */
+    .entry-bar input { font-size: 16px; }
+  }
+
+  /* ---------- Touch input, at any width ---------- */
+  /* Hover states never fire on a touchscreen, so anything that only appears on hover is
+     invisible there. These get a resting border instead of a hover-only one. */
+  [data-pointer="coarse"] .action-btn,
+  [data-pointer="coarse"] .settings-btn {
+    border-color: var(--border);
+    color: var(--ink-dim);
+  }
+  /* 44px is about the smallest target a thumb hits reliably; the desktop sizes here are
+     26–28px, which is a miss a good fraction of the time. */
+  [data-pointer="coarse"] .action-btn { width: 40px; height: 40px; }
+  [data-pointer="coarse"] .action-row { gap: 8px; }
+  [data-pointer="coarse"] .icon-btn { width: 46px; }
+  [data-pointer="coarse"] .lib-item { padding: 12px 10px; }
+  [data-pointer="coarse"] .source-quote-toggle { padding: 8px 0; font-size: 11.5px; }
+  /* The strip is swiped, not scrolled with a trackpad — the scrollbar is just noise
+     taking 6px off an already-short image. */
+  [data-pointer="coarse"] .image-strip::-webkit-scrollbar { display: none; }
+
   /* ---------- Accessibility overrides ---------- */
   :root[data-font-size="large"] {
     --claim-scale: 1.16;
@@ -592,7 +778,11 @@
 <body>
 
   <div class="app">
-    <aside class="sidebar">
+    <!-- Tapping anywhere outside the open drawer closes it. Ordered before the sidebar
+         so the sidebar's own stacking sits above it. -->
+    <div class="scrim" id="drawerScrim" aria-hidden="true"></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Library">
       <div class="sidebar-header">
         <div class="mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg></div>
         <div class="wordmark">Library</div>
@@ -609,6 +799,20 @@
     </aside>
 
     <div class="main">
+      <!-- Phone-only (CSS `display: none` above 700px): the drawer's handle, plus the
+           wordmark and settings button that live in the sidebar header on desktop. -->
+      <div class="topbar">
+        <button type="button" class="drawer-toggle" id="drawerToggle"
+                aria-label="Open library" aria-expanded="false" aria-controls="sidebar">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+        <div class="mark"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg></div>
+        <div class="wordmark">Seer</div>
+        <button type="button" class="settings-btn" id="topbarSettingsBtn" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="1.6"/><path d="M19.4 13a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V19a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H4a2 2 0 110-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H10a1.65 1.65 0 001-1.51V4a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V10a1.65 1.65 0 001.51 1H20a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="1.4"/></svg>
+        </button>
+      </div>
+
       <div class="content-grid">
         <div class="video-pane">
           <div class="video-thumb" id="videoThumb">

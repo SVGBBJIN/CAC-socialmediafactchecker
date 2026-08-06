@@ -13,7 +13,13 @@ This repo has two surfaces, and they are **not equals**:
 
 Concretely: **a fix that lands in `web/` stays in `web/`.** Do not port it into `Sources/`. A
 gap between the two (e.g. `Sources/` missing a host-allowlist check `web/` has) is expected,
-not a bug to fix. `Sources/` still must compile and its own tests must still pass — "frozen"
+not a bug to fix.
+
+The one standing exception is **presentation**, not pipeline: `SeerUI/LibraryConceptView.swift`
+is a mirror of the `web/` library screen by design, so a *layout* decision made in `web/` may
+be ported to it (`DeviceProfile.swift` ⟷ `public/device.js` is the current example). That is
+still a narrow carve-out — it covers how the same screen is arranged, never how a claim is
+extracted, fetched, searched or cited. `Sources/` still must compile and its own tests must still pass — "frozen"
 means no new parity work goes in, not that it's abandoned to bit rot. Don't delete
 `Sources/` either unless explicitly asked; that's a separate, deliberate decision.
 
@@ -44,12 +50,15 @@ test-article.js test-browser-resolve.js test-post-preview.js`).
 ### `Sources/` (Swift, frozen)
 
 ```bash
-swift test               # SeerCoreTests — the only tested target
+swift test               # SeerCoreTests + SeerUITests
 swift run SeerUIDemo     # macOS only: watch the progress animation with a scripted extractor, no key/network
 ```
 
-`SeerCapture` and `SeerUI` need an Apple SDK and are wrapped in `#if canImport(…)`, so they
-build to nothing on Linux (CI runs `swift test` on `ubuntu-latest`).
+`SeerCapture` and the SwiftUI half of `SeerUI` need an Apple SDK and are wrapped in
+`#if canImport(…)`, so they build to nothing on Linux (CI runs `swift test` on
+`ubuntu-latest`). `SeerUI/DeviceProfile.swift` is deliberately outside that guard — it is
+pure Foundation precisely so the layout rule stays testable in CI, which is what
+`SeerUITests` covers.
 
 ### `worker/` (optional browser-resolve fallback)
 

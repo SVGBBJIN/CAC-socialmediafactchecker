@@ -8,7 +8,7 @@ on:
 
 jobs:
   swift:
-    name: swift test (SeerCore)
+    name: swift test (SeerCore + SeerUI)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
