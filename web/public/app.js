@@ -839,6 +839,30 @@ function splitVerdict(answer) {
  * Two rAFs: the first lands after the browser has laid the new nodes out, the second
  * after it has committed that layout — the gap a transition needs to actually fire.
  */
+/** OS-level and in-app reduced-motion both mean "skip it" — matches how `applySettings`
+ * treats them as one signal via `[data-motion="reduced"]`, just read here as a boolean
+ * instead of a CSS selector, since this gates a `setTimeout` rather than a transition. */
+function prefersReducedMotion() {
+  return settings.reducedMotion || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
+ * Morphs the running check's loading iris into its resolved checkmark before the card
+ * beneath it is replaced by the answer.
+ *
+ * The `.iris-wrap.resolved` styling has existed since the loading view was built, but
+ * nothing ever applied the class — every check jumped straight from spinner to answer
+ * with no beat marking the moment it actually landed. A no-op if the running card isn't
+ * on screen any more (the user navigated away, or reduced motion skips the pause).
+ */
+async function resolveIris() {
+  const iris = el.claimsPane.querySelector(".iris-wrap");
+  if (!iris) return;
+  iris.classList.add("resolved");
+  if (prefersReducedMotion()) return;
+  await new Promise((resolve) => setTimeout(resolve, 380));
+}
+
 function revealIn(root) {
   const targets = root.querySelectorAll("[data-reveal]");
   requestAnimationFrame(() => {
@@ -1679,7 +1703,12 @@ async function runCheck(url, existingId, hint) {
     entry.verdictKey = verdictKey ?? (incomplete ? null : "insufficient");
     persistLibrary();
     renderLibrary(el.searchInput.value);
-    if (selectedId === id) renderResultCard(entry);
+    if (selectedId === id) {
+      await resolveIris();
+      // The wait above can outlast the user's patience for this entry — they may have
+      // already clicked to a different check. Re-check rather than trust the guard above.
+      if (selectedId === id) renderResultCard(entry);
+    }
   } catch (error) {
     if (error.name === "AbortError") return;
     entry.status = "error";

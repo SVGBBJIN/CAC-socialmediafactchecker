@@ -650,9 +650,27 @@
     transition: opacity 0.22s ease;
   }
 
-  /* ---------- Phone: one column, sidebar as a drawer ---------- */
+  /* ---------- Phone: video as a full-bleed backdrop, everything else floats over it ---------- */
   @media (max-width: 700px) {
-    .topbar { display: flex; }
+    /* `.main` becomes the positioning root for the video layer below, instead of the
+       viewport — bounded to the app's own box so the backdrop can never slide under the
+       disclaimer paragraph, which sits outside `.app` in the DOM. */
+    .main { position: relative; }
+
+    /* The bar floats over the video rather than sitting on its own solid strip above it,
+       so its own background is just a scrim gradient, and each icon carries its own pill
+       so it stays legible over arbitrary video content. */
+    .topbar {
+      display: flex;
+      position: relative; z-index: 3;
+      background: linear-gradient(to bottom, rgba(5,6,10,0.7), transparent);
+      border-bottom: 0;
+    }
+    .topbar .drawer-toggle, .topbar .settings-btn {
+      background: rgba(10,12,16,0.55);
+      backdrop-filter: blur(8px);
+    }
+    .topbar .wordmark, .topbar .mark { filter: drop-shadow(0 1px 5px rgba(0,0,0,0.7)); }
 
     /* Off-canvas rather than hidden: the library is the app's navigation, and a phone
        still needs it — it just cannot afford 270px of permanent gutter out of 390px. */
@@ -679,44 +697,134 @@
     }
     [data-drawer="open"] .scrim { opacity: 1; pointer-events: auto; }
 
-    .content-grid {
-      grid-template-columns: 1fr;
-      gap: 14px;
-      padding: 14px;
+    /* The single biggest change from the desktop/tablet layout: the video stops being a
+       card that sits above the answer and becomes the backdrop the answer floats over —
+       full-bleed behind the topbar, the claim sheet and the composer, the way a
+       short-form video app's own player sits behind its own UI chrome. */
+    .video-pane {
+      position: absolute; z-index: 0;
+      /* `top: 0` + explicit `width`/`height: 100%`, not `inset: 0`. `.video-pane`'s
+         direct parent (`.content-grid`) is a flex container, and Chromium — even though
+         `.content-grid` is `position: static` and correctly skipped as the containing
+         block — falls back to content-based auto-sizing instead of solving `top: 0;
+         bottom: 0; height: auto` against `.main`'s stretched flex height, collapsing
+         this to the height of its in-flow caption children instead of the full box.
+         Percentage sizing against that same height is unaffected by the bug, so it's
+         used instead of relying on the `bottom` offset at all. */
+      top: 0; left: 0; right: 0;
+      width: 100%; height: 100%;
+      padding: 0; margin: 0; border: 0; border-radius: 0;
+      background: #000;
     }
-
-    /* The video pane stops being a sidecar and becomes a header for the claims below
-       it. Un-sticky on purpose: sticking it would eat half the screen permanently on
-       the one device where vertical room is scarcest. */
-    .video-pane { position: static; padding: 12px; }
-
-    /* A 9:16 thumb at full phone width is ~690px tall — taller than the viewport, so
-       the answer would start below the fold on every single check. Capping the height
-       and letting `aspect-ratio` derive the width keeps the shape honest instead of
-       cropping it.
-       32vh, not more: the pane is here to confirm *which* post is being checked, and
-       the analysis under it is what the user came for. Anything taller and the verdict
-       starts off-screen on every check, which is the one thing this layout must not do.
-       Still large enough to tap and watch in place. */
     .video-thumb {
-      width: auto; max-width: 100%;
-      max-height: 32vh;
-      margin: 0 auto 12px;
+      position: absolute; inset: 0;
+      width: 100%; height: 100%; max-height: none;
+      /* The base rule's `aspect-ratio: 9/16` is what shapes the card everywhere else;
+         here `inset: 0` against a full-height containing block should already win, but
+         an explicit `auto` removes any doubt rather than leaning on that precedence. */
+      aspect-ratio: auto;
+      margin: 0; border-radius: 0;
+    }
+    /* `cover`, not the `contain` every other breakpoint uses — deliberately. `contain`
+       exists elsewhere so a carousel's on-image text is never cropped, because the
+       thumbnail *is* the evidence being read there. Here the video is ambient backdrop
+       behind the actual reading surface (the sheet below), so filling the screen matters
+       more than preserving its exact framing. */
+    .video-thumb .video-media { object-fit: cover; }
+    .video-thumb .image-strip img { object-fit: cover; }
+
+    /* A scrim so the caption and the topbar's icons stay legible over arbitrary video
+       content, not just whichever frame the placeholder or a given clip happens to open
+       on. */
+    .video-pane::after {
+      content: "";
+      position: absolute; inset: 0 0 auto 0; height: 170px;
+      background: linear-gradient(to bottom, rgba(5,6,10,0.75), transparent);
+      pointer-events: none;
     }
 
-    .claim-card { padding: 16px; border-radius: 12px; }
-    .claim-text { font-size: 15.5px; }
+    /* What used to be the card's chip/title/link, now floating over the top of the video
+       instead of stacked in a box below it. Pushed down by a flat estimate of the
+       topbar's height (safe-area inset + its own ~38px content) rather than reading it
+       from the DOM — this is the one place that number isn't shared with app.js, so if
+       the topbar's height ever changes, this constant has to move with it. */
+    .video-source-chip {
+      position: relative; z-index: 1;
+      margin: calc(env(safe-area-inset-top, 0px) + 58px) 14px 6px;
+      background: rgba(10,12,16,0.55);
+      backdrop-filter: blur(8px);
+    }
+    .video-title {
+      position: relative; z-index: 1;
+      margin: 0 14px 4px;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.75);
+    }
+    .video-link {
+      position: relative; z-index: 1;
+      display: inline-block;
+      margin: 0 14px;
+      padding: 3px 10px;
+      border-radius: 100px;
+      background: rgba(10,12,16,0.55);
+      backdrop-filter: blur(8px);
+    }
 
-    /* The composer follows the thumb to the bottom of the screen and stays there. It is
-       the only control that matters on a phone, and hunting for it after a long answer
-       is not a thing anyone should have to do. */
+    /* The claims pane stops being a column beside/below the video and becomes a sheet
+       anchored to the bottom of it, transparent above so the video shows through in the
+       gap — a bottom sheet over a full-bleed player, not a page with a card on it. */
+    .content-grid {
+      display: flex; flex-direction: column; justify-content: flex-end;
+      /* No `position` here on purpose — `.video-pane`'s `inset: 0` needs `.main` as its
+         containing block, not this element, or the backdrop only fills the gap between
+         the topbar and the composer instead of running the full height behind both of
+         them. `z-index` still applies without it: this is a flex item of `.main`, and
+         z-index applies to flex items even at `position: static`. */
+      z-index: 2;
+      overflow: visible; /* only the sheet scrolls internally, not this whole layer */
+      gap: 0; padding: 0;
+      background: transparent;
+    }
+    .claims-pane {
+      max-height: 62vh;
+      overflow-y: auto;
+      padding: 18px 16px 14px;
+      border-radius: 20px 20px 0 0;
+      /* Not fully transparent even at the top edge — `backdrop-filter` blurs whatever's
+         behind it regardless of this gradient's local alpha, but a blur alone is a thin
+         guarantee of contrast against video content that could be anything. The gradient
+         is there so the sheet reads as a sheet from its very first pixel. */
+      background: linear-gradient(to bottom, rgba(15,18,23,0.55) 0%, rgba(15,18,23,0.92) 22%, rgba(15,18,23,0.97) 45%);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }
+    /* The sheet itself is now the surface — a card floating inside a sheet would double
+       the chrome. */
+    .claim-card { background: transparent; border: 0; padding: 0; border-radius: 0; }
+    .claim-text { font-size: 16.5px; }
+
+    /* The loading iris sits inside the same bottom sheet as everything else here, but it
+       can still afford to be a bigger, more centered moment than the compact inline
+       spinner the desktop card uses — there's a full video behind it and nothing else
+       competing for attention in the sheet while it's the only thing in there. */
+    .card-loading { padding: 36px 0 40px; gap: 18px; }
+    .iris-wrap { width: 72px; height: 72px; }
+    .status-text { font-size: 14.5px; }
+    .source-counter { font-size: 12px; }
+
+    /* Part of the same floating sheet as the claims pane above it, not a separate bar —
+       same frosted background, no seam between them, just a hairline to mark where the
+       reading surface ends and the input begins. It no longer needs `position: sticky`
+       to reach the bottom of the screen: `.content-grid`'s `justify-content: flex-end`
+       already pins the sheet directly above it, and this is the very next flex child. */
     .entry-bar {
-      position: sticky; bottom: 0; z-index: 10;
+      position: relative; z-index: 2;
       gap: 6px;
       padding: 10px 12px;
       padding-bottom: max(10px, env(safe-area-inset-bottom));
-      background: var(--bg);
-      border-top: 1px solid var(--border);
+      background: rgba(15,18,23,0.97);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border-top: 1px solid rgba(255,255,255,0.07);
     }
     /* 16px exactly. Mobile Safari force-zooms the page on focusing any input whose text
        is smaller than that, and never zooms back out — the layout is then wrong for the
@@ -785,6 +893,19 @@
 
   [data-contrast="high"] {
     --ink-dim: #D7DBE3; --muted: #B6BCC9; --border: #454C59; --surface-raised: #2A303B;
+  }
+  /* The phone layout's text sits over an arbitrary video rather than a fixed dark
+     surface — a blur and a gradient are a thin guarantee of contrast there compared to
+     everywhere else in this stylesheet, so high-contrast mode gets a near-opaque scrim
+     and sheet instead of the blend the default treatment uses. */
+  @media (max-width: 700px) {
+    [data-contrast="high"] .video-pane::after {
+      background: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.15));
+    }
+    [data-contrast="high"] .video-source-chip,
+    [data-contrast="high"] .video-link { background: rgba(5,6,10,0.85); }
+    [data-contrast="high"] .claims-pane { background: rgba(10,12,16,0.98); }
+    [data-contrast="high"] .entry-bar { background: rgba(10,12,16,0.98); }
   }
 
   [data-motion="reduced"] .blade,
