@@ -1788,15 +1788,23 @@ async function runFollowup(entry, question) {
  * label and placeholder track it live as they type, so the switch never lands as a
  * surprise on submit.
  */
+function setCheckBtnLabel(label) {
+  // The button is icon-only on phones (CSS) but keeps its text — visually on wider
+  // layouts, screen-reader-only via the visually-hidden span on phones — so this one
+  // setter has to reach both without knowing which layout is active.
+  el.checkBtn.querySelector(".check-btn-label").textContent = label;
+  el.checkBtn.setAttribute("aria-label", label);
+}
+
 function updateComposerMode() {
   const entry = selectedDoneEntry();
   if (!entry) {
-    el.checkBtn.textContent = "Check";
+    setCheckBtnLabel("Check");
     el.linkInput.placeholder = "Paste a video or article link…";
     return;
   }
   const asking = looksLikeFollowup(el.linkInput.value);
-  el.checkBtn.textContent = asking ? "Ask" : "Check";
+  setCheckBtnLabel(asking ? "Ask" : "Check");
   el.linkInput.placeholder = asking
     ? "Ask a follow-up…"
     : `Ask a follow-up about "${truncate(entry.title, 44)}", or paste a new link…`;
