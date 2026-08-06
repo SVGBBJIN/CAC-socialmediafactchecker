@@ -17,7 +17,7 @@ import SwiftUI
 /// `SeerUIDemoApp` gave `AnalysisProgressView` a consumer before there was a real app
 /// target. Do not wire this to a network call — build the verdict model first.
 public struct LibraryConceptView: View {
-    @State private var library: [ConceptLibraryItem] = .sample
+    @State private var library: [ConceptLibraryItem] = ConceptLibraryItem.sample
     @State private var selection: ConceptLibraryItem.ID?
     @State private var runID = 0
     @State private var isDrawerOpen = false
