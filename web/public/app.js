@@ -848,6 +848,21 @@ function revealIn(root) {
   });
 }
 
+/**
+ * The class/attribute pair for a block that fades or stamps itself in.
+ *
+ * `renderResultCard` rebuilds the whole card from scratch — it is the only way a new
+ * follow-up gets onto the screen — so every re-render used to hand `revealIn` the
+ * analysis text, the verdict badge, the sources and every previously settled follow-up,
+ * all freshly marked `data-reveal`. The result was that asking a second question replayed
+ * the entrance of everything already on screen: the text re-faded, the badge re-stamped,
+ * the sources re-expanded. Content that has already been read should just be there, so it
+ * is emitted with `in` already on it and no `data-reveal` for `revealIn` to find.
+ */
+function revealAttrs(classes, animate) {
+  return animate ? `class="${classes}" data-reveal` : `class="${classes} in"`;
+}
+
 /* ---------------------------------------------------------------- sidebar */
 
 function renderLibrary(filter = "") {
@@ -867,6 +882,11 @@ function renderLibrary(filter = "") {
     const item = document.createElement("li");
     item.className = `lib-item${entry.id === selectedId ? " active" : ""}`;
     item.tabIndex = 0;
+    // A focusable `<li>` with a click handler is a button to a mouse and nothing at all
+    // to a screen reader: it announces as a list item, gives no hint that it does
+    // something, and never says which check is currently open.
+    item.setAttribute("role", "button");
+    if (entry.id === selectedId) item.setAttribute("aria-current", "true");
 
     const thumb = document.createElement("div");
     thumb.className = "lib-thumb";
@@ -886,7 +906,13 @@ function renderLibrary(filter = "") {
     item.append(thumb, meta);
     item.addEventListener("click", () => selectEntry(entry.id));
     item.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") selectEntry(entry.id);
+      // Space as well as Enter: anything announcing itself as a button is expected to
+      // answer both, and Space is the one most screen-reader users reach for. The
+      // preventDefault stops it scrolling the sidebar at the same time.
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectEntry(entry.id);
+      }
     });
     el.libList.append(item);
   }
@@ -973,7 +999,11 @@ function clearVideoMedia() {
   el.videoPlayer.removeAttribute("src");
   el.videoPlayer.load();
   el.videoPlayer.hidden = true;
-  el.videoEmbed.src = "";
+  // Explicitly `about:blank` rather than `""`. Current engines resolve an empty `src` to
+  // about:blank too, so this is not a behaviour change today — it just says the intended
+  // destination outright instead of relying on how the empty string gets resolved against
+  // the document's base URL, which is the part that has moved between engines.
+  el.videoEmbed.src = "about:blank";
   el.videoEmbed.hidden = true;
   el.videoImages.replaceChildren();
   el.videoImages.hidden = true;
@@ -1030,6 +1060,10 @@ function showVideoElement(media) {
   // even when the API's numbers are missing or wrong.
   if (media.width && media.height) setVideoAspect(`${media.width} / ${media.height}`);
   el.videoPlayer.src = media.mediaURL;
+  // Set here *and* re-applied on `loadedmetadata` below. Loading a new resource resets
+  // playbackRate to the element's defaultPlaybackRate, so assigning it in the same tick as
+  // `src` — before the media has loaded — is assigning it to something about to be thrown
+  // away, and the pane silently plays at 1×.
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
   el.videoPlayer.hidden = false;
   el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
@@ -1170,10 +1204,10 @@ function renderErrorCard(entry) {
  * it says, then how much of it there is, then what it concluded — and on an incomplete turn
  * the third one is usually missing, which this is the explanation for.
  */
-function incompleteHTML(incomplete) {
+function incompleteHTML(incomplete, animate) {
   if (!incomplete) return "";
   return `
-    <div class="notice ${escapeHTML(incomplete.kind)}" data-reveal>
+    <div ${revealAttrs(`notice ${escapeHTML(incomplete.kind)}`, animate)}>
       <span class="notice-label">${escapeHTML(incomplete.label)}</span>
       <span>${escapeHTML(incomplete.text)}</span>
     </div>`;
@@ -1186,12 +1220,12 @@ function incompleteHTML(incomplete) {
  * note in `runCheck`. A badge is the app asserting the check's finding, and there is no
  * finding to assert when the answer stopped before it got to one.
  */
-function verdictHTML(entry) {
+function verdictHTML(entry, animate) {
   if (entry.incomplete && !entry.verdictKey) return "";
   const verdict = VERDICTS[entry.verdictKey] ?? VERDICTS.insufficient;
   return `
     <div class="badges">
-      <span class="badge verdict ${verdict.css}" data-reveal>${escapeHTML(verdict.label)}</span>
+      <span ${revealAttrs(`badge verdict ${verdict.css}`, animate)}>${escapeHTML(verdict.label)}</span>
     </div>`;
 }
 
@@ -1220,12 +1254,14 @@ function sourceItemHTML(s) {
     </div>`;
 }
 
-function sourcesHTML(sources) {
+function sourcesHTML(sources, animate) {
   if (!sources?.length) return "";
   return `
-    <div class="sources" data-reveal>
-      <div class="sources-label">Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}</div>
-      ${sources.map(sourceItemHTML).join("")}
+    <div ${revealAttrs("sources", animate)}>
+      <div class="sources-body">
+        <div class="sources-label">Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}</div>
+        ${sources.map(sourceItemHTML).join("")}
+      </div>
     </div>`;
 }
 
@@ -1326,18 +1362,20 @@ async function handleClaimsPaneClick(event) {
 }
 
 /** Past follow-ups, plus one in flight or freshly failed, as a thread under the analysis. */
-function threadHTML(entry) {
+function threadHTML(entry, newestIndex) {
   const settled = entry.followups
-    .map(
-      (f, index) => `
+    .map((f, index) => {
+      // Only the answer that just landed animates; the ones above it are already read.
+      const animate = index === newestIndex;
+      return `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(f.question)}</div>
-          <div class="thread-a claim-text" data-reveal>${renderMarkdown(f.answer, f.sources)}</div>
-          ${incompleteHTML(f.incomplete)}
+          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources)}</div>
+          ${incompleteHTML(f.incomplete, animate)}
           ${actionRowHTML(entry.id, index)}
-          ${sourcesHTML(f.sources)}
-        </div>`,
-    )
+          ${sourcesHTML(f.sources, animate)}
+        </div>`;
+    })
     .join("");
 
   const pending =
@@ -1357,16 +1395,25 @@ function threadHTML(entry) {
   return `<div class="thread">${settled}${pending}</div>`;
 }
 
-function renderResultCard(entry) {
+/**
+ * @param animateAnalysis whether the top half of the card — the analysis text, its
+ *   notice, the verdict badge and the sources — is arriving for the first time. False on
+ *   every re-render of a card already on screen (a settled follow-up, a quote-visibility
+ *   change), where replaying its entrance is the app appearing to re-run a check it
+ *   didn't.
+ * @param newestFollowup index of a follow-up that has just landed and should animate in,
+ *   or -1 for none.
+ */
+function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
-      <div class="claim-text" data-reveal>${renderMarkdown(entry.answer, entry.sources)}</div>
-      ${incompleteHTML(entry.incomplete)}
-      ${verdictHTML(entry)}
+      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources)}</div>
+      ${incompleteHTML(entry.incomplete, animateAnalysis)}
+      ${verdictHTML(entry, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
-      ${sourcesHTML(entry.sources)}
-      ${threadHTML(entry)}
+      ${sourcesHTML(entry.sources, animateAnalysis)}
+      ${threadHTML(entry, newestFollowup)}
     </div>`;
   revealIn(el.claimsPane);
 }
@@ -1550,7 +1597,12 @@ function composeCheckPrompt(url) {
 function historyFor(entry) {
   const history = [
     { role: "user", content: entry.prompt },
-    { role: "assistant", content: entry.rawAnswer },
+    // `rawAnswer` (the answer with its VERDICT line still on) is what history wants, but
+    // entries written before that field existed only have `answer`. Without the fallback
+    // those replay as `content: undefined`, which is not a string the request body can
+    // carry — the first follow-up on any pre-existing check failed on the server's own
+    // message validation.
+    { role: "assistant", content: entry.rawAnswer ?? entry.answer ?? "" },
   ];
   for (const f of entry.followups) {
     history.push({ role: "user", content: f.question }, { role: "assistant", content: f.answer });
@@ -1650,7 +1702,7 @@ async function runFollowup(entry, question) {
   el.linkInput.value = "";
   const image = pendingImage;
   clearPendingImage();
-  renderResultCard(entry);
+  renderResultCard(entry, { animateAnalysis: false });
   updateComposerMode();
 
   const controller = new AbortController();
@@ -1689,7 +1741,12 @@ async function runFollowup(entry, question) {
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
-    if (selectedId === entry.id) renderResultCard(entry);
+    if (selectedId === entry.id) {
+      renderResultCard(entry, {
+        animateAnalysis: false,
+        newestFollowup: settled ? entry.followups.length - 1 : -1,
+      });
+    }
     updateComposerMode();
   }
 }
@@ -1843,8 +1900,15 @@ el.linkConfirmForm.addEventListener("submit", () => {
 });
 
 el.linkConfirmCancel.addEventListener("click", () => {
-  pendingConfirmUrl = null;
   el.linkConfirmDialog.close();
+});
+
+// Esc dismisses a <dialog> without going through either button, so the Cancel handler
+// alone left `pendingConfirmUrl` set. One `close` listener covers every way the dialog
+// can go away, including Cancel — and it runs after `submit`, so "Check anyway" has
+// already consumed the URL by the time this clears it.
+el.linkConfirmDialog.addEventListener("close", () => {
+  pendingConfirmUrl = null;
 });
 
 el.newCheckBtn.addEventListener("click", startNewCheck);
@@ -1866,6 +1930,9 @@ el.videoPlayer.addEventListener("loadedmetadata", () => {
   if (el.videoPlayer.videoWidth && el.videoPlayer.videoHeight) {
     setVideoAspect(`${el.videoPlayer.videoWidth} / ${el.videoPlayer.videoHeight}`);
   }
+  // See `showVideoElement`: the rate set alongside `src` is reset by the load this event
+  // marks the end of, so this is the assignment that actually sticks.
+  el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
 });
 
 el.passForm.addEventListener("submit", () => {
@@ -1922,7 +1989,7 @@ el.settingShowQuotes.addEventListener("change", () => {
   // Re-render whatever's on screen so the toggle takes effect immediately, not on the
   // next navigation.
   const entry = selectedId ? findEntry(selectedId) : null;
-  if (entry?.status === "done") renderResultCard(entry);
+  if (entry?.status === "done") renderResultCard(entry, { animateAnalysis: false });
 });
 el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);
@@ -1950,14 +2017,18 @@ watchDevice(window, applyDevice);
 initSpeechToText();
 
 renderLibrary();
-if (selectedId) {
-  const entry = findEntry(selectedId);
-  if (entry) {
-    renderVideoPane(entry);
-    if (entry.status === "done") renderResultCard(entry);
-    else if (entry.status === "error") renderErrorCard(entry);
-  }
+// `selectedId` comes from `library[0]`, so it names a real entry — but only as long as
+// the parse that produced `library` behaved. A truncated or hand-edited localStorage blob
+// yields entries without ids, and then every branch here was skipped and the claims pane
+// was left literally empty: no card, no placeholder, no way to tell a broken read from a
+// blank app. Falling through to the empty state makes that case say something.
+const startupEntry = selectedId ? findEntry(selectedId) : null;
+if (startupEntry) {
+  renderVideoPane(startupEntry);
+  if (startupEntry.status === "done") renderResultCard(startupEntry);
+  else if (startupEntry.status === "error") renderErrorCard(startupEntry);
 } else {
+  selectedId = null;
   renderEmptyState();
 }
 updateComposerMode();
