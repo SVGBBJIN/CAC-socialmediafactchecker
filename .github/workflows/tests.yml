@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  schedule:
+    # 09:00 UTC daily
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  swift:
+    name: swift test (SeerCore)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - run: swift test
+
+  web:
+    name: npm test (web/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - working-directory: web
+        run: npm test
+
+  worker:
+    name: npm test (worker/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - working-directory: worker
+        # test.js only exercises urls.js, which is pure — no need to install
+        # the playwright dependency (and its browser download) just to run it.
+        run: node --test test.js
