@@ -459,9 +459,27 @@
       /* A grid item's default `min-height` is `auto` — the same trap a flex item's is (see
          `.claims-pane`'s own comment above) — so without this, a box with more in it than
          its row is tall grows the row instead of scrolling inside the height it actually
-         has. */
+         has. `position: relative` gives the fade below a containing block that is this box
+         itself, not the grid — see its own comment for why that specific anchor matters. */
+      position: relative;
       min-height: 0;
       overflow-y: auto;
+    }
+    /* An overflowing box's last line — often the verdict badge, since it's what every box
+       ends on — would otherwise be sliced flat by the box's own edge, reading as a broken
+       layout rather than "there's more, scroll for it". This fades it into the card's own
+       background instead. `position: absolute` inside a `position: relative` scroll
+       container (`.claim-pane` above) is pinned to that box's own visible edge rather than
+       scrolling with the content — the containing block is the scroller itself, not the
+       (taller) content inside it — so it always sits over whatever is currently cut off,
+       never drifting away from the edge as the reader scrolls. Harmless when a box doesn't
+       overflow: fading empty space into a background already that color paints nothing. */
+    .claims-pane.claim-grid .claim-pane::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: 0;
+      height: 28px;
+      background: linear-gradient(to bottom, transparent, var(--surface));
+      pointer-events: none;
     }
   }
 
@@ -578,13 +596,38 @@
     letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
   }
 
+  /* The per-claim position label ("Claim 2 of 4") in a claim-grid box — a pill instead of
+     `.eyebrow`'s plain uppercase line, matching the chip language `.source-pill`/`.badge`
+     already use elsewhere on the same box. `.eyebrow` itself stays as it was for the
+     whole-answer card and the error card, where there's no set of same-shape siblings for a
+     pill to distinguish this box from. `align-self: flex-start` keeps it sized to its own
+     text instead of stretching full width, which is what a block child of a flex column
+     does by default. */
+  .claim-eyebrow {
+    display: inline-flex; align-items: center;
+    align-self: flex-start;
+    margin-bottom: 10px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--muted);
+    font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  /* Still being checked (see `skeletonClaimHTML`) — accent-tinted so a reader scanning the
+     grid can tell a box apart from an already-settled one without reading its text. */
+  .claim-eyebrow.pending { color: var(--accent); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
+
   /* The claim itself, in `claimPanesHTML`'s split-panes layout — one line reproducing the
-     `[[claim: …]]` marker's own text, between the "Claim N of M" eyebrow above it and the
+     `[[claim: …]]` marker's own text, between the `.claim-eyebrow` pill above it and the
      analysis text below. Same reveal-in transition as `.claim-text`, since the two always
-     arrive together. */
+     arrive together. `word-break` matters more here than it did in the old full-width card:
+     a claim box is often under 300px wide, narrow enough that one long unbroken token (a
+     URL, a long number) could force the box wider than its grid cell. */
   .claim-title {
     font-family: var(--font-display); font-size: 15.5px; font-weight: 600; color: var(--ink);
-    line-height: 1.4; margin: 0 0 10px;
+    line-height: 1.4; margin: 0 0 10px; word-break: break-word;
     opacity: 0; transform: translateY(6px);
     transition: opacity 0.4s ease, transform 0.4s ease;
   }
@@ -889,6 +932,23 @@
     margin: 8px 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border);
     color: var(--ink-dim); font-style: italic;
   }
+
+  /* A claim-grid box is a fraction of the width the old single full-page card was — these
+     rules above were sized for that page, and inside a ~300-400px box they read as loose:
+     over-wide list indents, a heading with page-sized margins, a block quote with room to
+     spare. Tightened specifically for `.claim-pane` (never the whole-answer card, which
+     still has the width to spend), on top of the system prompt now asking for shorter
+     claim write-ups in the first place (see verified-chat.js) — the two are meant to work
+     together, not either one compensating alone for a still-long answer. Same reasoning as
+     `.claim-title`'s `word-break` above, so a heading or list item can't force a box wider
+     than its cell either. `[data-font-size="large"]` still wins over this: it's declared
+     later in the file, so a reader who has asked for bigger text gets it here too. */
+  .claim-pane .claim-text { font-size: 14.5px; line-height: 1.5; word-break: break-word; }
+  .claim-pane .claim-text ul, .claim-pane .claim-text ol { margin: 0 0 8px; padding-left: 18px; }
+  .claim-pane .claim-text li { margin: 2px 0; }
+  .claim-pane .claim-text h4 { font-size: 1em; margin: 10px 0 4px; }
+  .claim-pane .claim-text blockquote { margin: 6px 0; padding: 3px 0 3px 10px; }
+  .claim-pane .claim-text pre { font-size: 0.75em; padding: 8px; }
 
   /* iOS Safari's `100%` height resolves against the *largest* viewport (address bar
      collapsed), not the visible one, so a `position: sticky` element pinned to the

@@ -1788,7 +1788,7 @@ function claimGridStatusHTML(stage) {
 function skeletonClaimHTML(title, index, total, spanFull) {
   return `
     <div class="claim-card claim-pane skeleton"${spanFull ? ' style="grid-column:1/-1"' : ""}>
-      <div class="eyebrow">Claim ${index + 1} of ${total} &middot; checking&hellip;</div>
+      <div class="claim-eyebrow pending">Claim ${index + 1} of ${total} &middot; checking&hellip;</div>
       <p class="claim-title in">${escapeHTML(title)}</p>
       <div class="skeleton-body" aria-hidden="true">
         <span class="skeleton-line"></span>
@@ -2067,7 +2067,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       const spanFull = isLast && spanLast;
       return `
         <div class="claim-card claim-pane"${spanFull ? ' style="grid-column:1/-1"' : ""}>
-          <div class="eyebrow">${escapeHTML(eyebrow)}</div>
+          <div class="claim-eyebrow">${escapeHTML(eyebrow)}</div>
           <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
           ${badgeHTML(claim.verdictKey, animate)}
