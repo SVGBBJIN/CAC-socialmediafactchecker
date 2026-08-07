@@ -911,6 +911,10 @@ async function resolveIris() {
   const iris = el.claimsPane.querySelector(".iris-wrap");
   if (!iris) return;
   iris.classList.add("resolved");
+  // The bar's own creep never reaches 100% on its own (see createProgressTicker) — this is
+  // the one moment that's actually true, so it fills the rest of the way in step with the
+  // checkmark sealing rather than just vanishing with the card underneath it.
+  runProgress.finish();
   if (prefersReducedMotion()) return;
   await new Promise((resolve) => setTimeout(resolve, 380));
 }
@@ -938,6 +942,94 @@ function revealIn(root) {
 function revealAttrs(classes, animate) {
   return animate ? `class="${classes}" data-reveal` : `class="${classes} in"`;
 }
+
+/* ---------------------------------------------------------------- perceived-latency helpers
+ *
+ * Two tricks that don't shorten a single request but change how long a wait *reads* as: a
+ * stage label that crossfades instead of jump-cutting, and a progress bar that keeps
+ * creeping forward between those labels instead of sitting on a bare spinner for however
+ * many seconds one stage actually takes. See the `.stage-text` / `.mini-progress` comments
+ * in index.html for the reasoning; this is just the timers behind them.
+ */
+
+/** Crossfades a status span's text instead of replacing it in place. A no-op if the node
+ * isn't on screen (its card has already been swapped out) or the text hasn't actually
+ * changed (skips a pointless flash on a re-render that repeats the same stage). */
+function setStatusText(id, text) {
+  const node = document.getElementById(id);
+  if (!node || node.textContent === text) return;
+  if (prefersReducedMotion()) {
+    node.textContent = text;
+    return;
+  }
+  node.style.opacity = "0";
+  window.setTimeout(() => {
+    // The node may have been unmounted, or replaced by a fresh render, mid-fade.
+    if (document.getElementById(id) !== node) return;
+    node.textContent = text;
+    node.style.opacity = "1";
+  }, 160);
+}
+
+// Rough floors a known stage implies, so a real milestone always reads as at least this much
+// progress even if the elapsed-time curve below hasn't caught up to it yet.
+const STAGE_PROGRESS_FLOOR = { attaching: 10, reading: 15, waiting: 30, thinking: 55, busy: 40, rewriting: 75 };
+
+/**
+ * One eased, stage-aware progress bar. `runCheck`, `runFollowup` and `runChat` each get
+ * their own instance (and their own `<div id="…ProgressBar">` in the markup) since each
+ * drives a different part of the UI, even though only one of them is ever actually running
+ * at a time (see `inFlight`).
+ */
+function createProgressTicker(barId) {
+  let start = 0;
+  let floor = 0;
+  let timer = null;
+
+  function paint(pct) {
+    const node = document.getElementById(barId);
+    if (node) node.style.width = `${pct}%`;
+  }
+
+  return {
+    start() {
+      start = performance.now();
+      floor = 0;
+      paint(0);
+      if (timer) clearInterval(timer);
+      timer = null;
+      if (prefersReducedMotion()) return; // stays put rather than creeping on its own
+      timer = setInterval(() => {
+        const elapsedSeconds = (performance.now() - start) / 1000;
+        // Decays toward 92%, deliberately never arriving there unassisted — a check that
+        // runs long still reads as "still going", not stalled at a false-complete bar.
+        const eased = 92 * (1 - Math.exp(-elapsedSeconds / 4.5));
+        paint(Math.max(eased, floor));
+      }, 200);
+    },
+    /** Pulls the floor forward on a known stage name (from STAGE_PROGRESS_FLOOR) or a raw
+     * percentage — whichever the bar is already past wins, so this only ever moves it ahead. */
+    bump(stageOrPercent) {
+      const next = typeof stageOrPercent === "number" ? stageOrPercent : STAGE_PROGRESS_FLOOR[stageOrPercent];
+      if (next == null) return;
+      floor = Math.max(floor, next);
+      const node = document.getElementById(barId);
+      const current = node ? parseFloat(node.style.width) || 0 : 0;
+      paint(Math.max(floor, current));
+    },
+    finish() {
+      if (timer) { clearInterval(timer); timer = null; }
+      paint(100);
+    },
+    stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+    },
+  };
+}
+
+const runProgress = createProgressTicker("runProgressBar");
+const followupProgress = createProgressTicker("followupProgressBar");
+const chatProgress = createProgressTicker("chatProgressBar");
 
 /* ---------------------------------------------------------------- sidebar */
 
@@ -1071,7 +1163,8 @@ function renderChatPane({ newest = -1 } = {}) {
         ${
           pendingChat.error
             ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
-            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus">Thinking…</span></div>`
+            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span></div>
+               <div class="mini-progress"><div class="mini-progress-bar" id="chatProgressBar"></div></div>`
         }
       </div>`
     : "";
@@ -1102,6 +1195,7 @@ async function runChat(question) {
   const image = pendingImage;
   clearPendingImage();
   renderChatPane();
+  chatProgress.start();
   updateComposerMode();
 
   const controller = new AbortController();
@@ -1119,10 +1213,11 @@ async function runChat(question) {
     const { answer, sources, incomplete } = await streamChat([...history, message], {
       signal: controller.signal,
       onStage: (frame) => {
-        const status = document.getElementById("chatStatus");
-        if (status) status.textContent = stageText(frame);
+        setStatusText("chatStatus", stageText(frame));
+        chatProgress.bump(frame?.stage);
       },
     });
+    chatProgress.finish();
     chatThread.push({ question, answer, sources, incomplete });
     settled = true;
   } catch (error) {
@@ -1134,6 +1229,7 @@ async function runChat(question) {
     // turn with no real answer would corrupt the history the next question replays.
     pendingChat = { question, error: error.message };
   } finally {
+    chatProgress.stop();
     if (settled) pendingChat = null;
     inFlight = null;
     el.checkBtn.disabled = false;
@@ -1613,11 +1709,13 @@ function renderRunningCard() {
     <div class="claim-card">
       <div class="card-loading">
         ${irisMarkup()}
-        <div class="status-text" id="runStatus">Sending to the model…</div>
+        <div class="status-text stage-text" id="runStatus">Sending to the model…</div>
         <div class="source-counter" id="runCounter">&nbsp;</div>
+        <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
       </div>
     </div>`;
   refreshTimeline();
+  runProgress.start();
 }
 
 function renderErrorCard(entry) {
@@ -1870,7 +1968,8 @@ function threadHTML(entry, newestIndex) {
           ${
             pendingFollowup.error
               ? `<div class="thread-error">${escapeHTML(pendingFollowup.error)}</div>`
-              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus">Asking…</span></div>`
+              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span></div>
+                 <div class="mini-progress"><div class="mini-progress-bar" id="followupProgressBar"></div></div>`
           }
         </div>`
       : "";
@@ -2185,12 +2284,16 @@ async function runCheck(url, existingId, hint) {
       signal: controller.signal,
       clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
-        const status = document.getElementById("runStatus");
-        if (status) status.textContent = stageText(frame);
+        setStatusText("runStatus", stageText(frame));
+        runProgress.bump(frame?.stage);
       },
       onSearchCount: (n) => {
         const counter = document.getElementById("runCounter");
         if (counter) counter.textContent = `Source ${n}`;
+        // A growing source count is real, visible progress even between named stages —
+        // nudge the bar rather than let it sit on the last stage's floor while sources
+        // keep arriving.
+        runProgress.bump(Math.min(35 + n * 5, 70));
       },
     });
 
@@ -2227,6 +2330,11 @@ async function runCheck(url, existingId, hint) {
     renderLibrary(el.searchInput.value);
     if (selectedId === id) renderErrorCard(entry);
   } finally {
+    // Guaranteed cleanup, not just the success path's: `resolveIris` (which calls
+    // `runProgress.finish()`) only runs when this entry is still selected, so a check the
+    // reader navigated away from mid-flight would otherwise leave the ticker running against
+    // a bar that's no longer on screen.
+    runProgress.stop();
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
@@ -2242,6 +2350,7 @@ async function runFollowup(entry, question) {
   const image = pendingImage;
   clearPendingImage();
   renderResultCard(entry, { animateAnalysis: false });
+  followupProgress.start();
   updateComposerMode();
 
   const controller = new AbortController();
@@ -2255,10 +2364,11 @@ async function runFollowup(entry, question) {
     const { answer, sources, incomplete } = await streamChat([...historyFor(entry), message], {
       signal: controller.signal,
       onStage: (frame) => {
-        const status = document.getElementById("followupStatus");
-        if (status) status.textContent = stageText(frame);
+        setStatusText("followupStatus", stageText(frame));
+        followupProgress.bump(frame?.stage);
       },
     });
+    followupProgress.finish();
 
     // Kept in the thread even when it came back damaged. A partial answer is text the model
     // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
@@ -2276,6 +2386,7 @@ async function runFollowup(entry, question) {
     // turn with no real answer would corrupt the history the next follow-up replays.
     pendingFollowup = { entryId: entry.id, question, error: error.message };
   } finally {
+    followupProgress.stop();
     if (settled) pendingFollowup = null;
     inFlight = null;
     el.checkBtn.disabled = false;

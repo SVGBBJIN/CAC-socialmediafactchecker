@@ -487,6 +487,31 @@
 
   .status-text { font-size: 13px; color: var(--ink-dim); text-align: center; min-height: 18px; transition: opacity 0.35s ease; }
   .source-counter { font-family: var(--font-mono); font-size: 11px; color: var(--accent); min-height: 14px; }
+  /* Shared by every status label a stream updates in place (`#runStatus`, `#followupStatus`,
+     `#chatStatus`) — an instant textContent swap reads as the label jumping, not updating;
+     `setStatusText` (app.js) fades the opacity down before the swap and back up after, so a
+     stage change reads as motion instead of a jump cut. */
+  .stage-text { opacity: 1; transition: opacity 0.3s ease; }
+
+  /* ---------- Perceived-progress bar ---------- */
+  /* A raw elapsed-time clock is honest about how long a check takes but reads as *slower*
+     than a bar that keeps creeping forward: motion between the (seconds-apart) stage-text
+     swaps is what tells the eye something is still happening. `createProgressTicker` (app.js)
+     eases this toward — never quite to — 92% on a decaying curve, the same "fake progress"
+     trick most CI/upload UIs use, and lets real stage transitions pull it ahead of where
+     elapsed time alone would put it. It only reaches 100% when the turn actually finishes. */
+  .mini-progress {
+    width: 100%; max-width: 200px;
+    height: 3px; border-radius: 999px; overflow: hidden;
+    background: var(--surface-raised);
+  }
+  .mini-progress.wide { max-width: 220px; margin-top: 2px; }
+  .mini-progress-bar {
+    height: 100%; width: 0%; border-radius: inherit;
+    background: var(--accent);
+    transition: width 0.4s cubic-bezier(.4,0,.2,1);
+  }
+  [data-motion="reduced"] .mini-progress-bar { transition: none; }
 
   .eyebrow {
     font-family: var(--font-mono); font-size: 11px; color: var(--muted);
@@ -1196,11 +1221,36 @@
   [data-motion="reduced"] .sources,
   [data-motion="reduced"] .seal-check,
   [data-motion="reduced"] .thread-spinner,
+  [data-motion="reduced"] .stage-text,
   [data-motion="reduced"] .icon-btn.listening { animation: none !important; transition: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .sources, .seal-check, .thread-spinner { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .notice, .sources, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar { animation: none !important; transition: none !important; }
   }
+
+  /* ---------- Instant press feedback ---------- */
+  /* Real work — the fetch, the model call — can't start any sooner than it does, but the
+     *button* can visibly react the instant a finger or pointer lands on it rather than
+     waiting for the click to fully resolve. A system that answers touch immediately reads
+     as faster even when the underlying request takes exactly as long. */
+  .entry-bar button:active,
+  .new-check:active,
+  .icon-btn:active,
+  .action-btn:active,
+  .retry-button:active,
+  .settings-btn:active { transform: scale(0.96); }
+  .entry-bar button,
+  .new-check,
+  .icon-btn,
+  .action-btn,
+  .retry-button,
+  .settings-btn { transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease; }
+  [data-motion="reduced"] .entry-bar button:active,
+  [data-motion="reduced"] .new-check:active,
+  [data-motion="reduced"] .icon-btn:active,
+  [data-motion="reduced"] .action-btn:active,
+  [data-motion="reduced"] .retry-button:active,
+  [data-motion="reduced"] .settings-btn:active { transform: none; }
 </style>
 </head>
 <body>
