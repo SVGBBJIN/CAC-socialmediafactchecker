@@ -436,19 +436,31 @@
        bottom of the pane instead of floating near the top with bare dark space under it
        on a short answer, while still growing past that on a long one, at which point
        `.claims-pane`'s own `overflow-y: auto` above takes over rather than the video
-       pane's height doing anything at all. */
+       pane's height doing anything at all.
+       `display: flex; flex-direction: column` is what lets `.card-loading` below claim
+       the whole of that height instead of just its own content's — a plain block parent
+       has no height to hand a child that wants to fill and center in it. Everything else
+       here (the analysis text, badges, thread, sources) is still a normal vertically
+       stacked block inside a flex column, so nothing else about the card's layout
+       changes. */
     flex: 1 1 auto;
+    display: flex; flex-direction: column;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 14px;
     padding: 20px;
   }
 
+  /* The loading spinner — the only child of `.claim-card` while a check is running, so
+     `flex: 1` lets it claim the card's whole height and `justify-content: center` puts it
+     in the middle of that instead of pinned near the top with the rest of a tall card
+     empty below it. */
   .card-loading {
-    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
     padding: 22px 0;
   }
-  .iris-wrap { position: relative; width: 44px; height: 44px; }
+  .iris-wrap { position: relative; width: 84px; height: 84px; }
   .iris-wrap svg { width: 100%; height: 100%; }
 
   .blade {
@@ -1062,11 +1074,12 @@
     .claim-text { font-size: 16.5px; }
 
     /* The loading iris sits inside the same bottom sheet as everything else here, but it
-       can still afford to be a bigger, more centered moment than the compact inline
-       spinner the desktop card uses — there's a full video behind it and nothing else
-       competing for attention in the sheet while it's the only thing in there. */
+       can still afford to be a bigger, more centered moment than the desktop card uses —
+       there's a full video behind it and nothing else competing for attention in the
+       sheet while it's the only thing in there. Bigger than the desktop/tablet size
+       above for the same reason it always was, just both sides scaled up together. */
     .card-loading { padding: 36px 0 40px; gap: 18px; }
-    .iris-wrap { width: 72px; height: 72px; }
+    .iris-wrap { width: 104px; height: 104px; }
     .status-text { font-size: 14.5px; }
     .source-counter { font-size: 12px; }
 
