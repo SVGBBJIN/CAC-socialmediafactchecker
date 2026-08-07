@@ -430,25 +430,103 @@
      in place. That was the video player visibly resizing itself as an answer streamed in. */
   .claims-pane { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
 
+  /* One box per claim, filling the pane instead of stacking past it — a grid variant of
+     the pane above, stamped on by `setClaimsGridMode` (app.js) whenever there's a set of
+     same-shape boxes to arrange: the finished multi-claim result, or the skeleton boxes it
+     grows out of while still loading (see `renderClaimSkeletons`). `--claim-cols` is set
+     inline per render from `claimGridColumns` — tuned around "about four" fitting as a 2×2
+     without the reader ever having to scroll past one box to reach the next. Desktop/
+     tablet only: on a phone `.claims-pane` is already the bottom sheet over the video (see
+     the phone breakpoint further down), and a dense box grid inside that shorter, narrower
+     surface would just make every box too small to read — the claims there stay a single
+     stacked column, same as before this existed. */
+  @media (min-width: 701px) {
+    .claims-pane.claim-grid {
+      display: grid;
+      grid-template-columns: repeat(var(--claim-cols, 2), 1fr);
+      grid-auto-rows: 1fr;
+      gap: 12px;
+      /* Every box gets its own scroll instead (see `.claim-pane` below) — the one that's
+         taller than its row (usually the last, carrying the sources/thread footer) scrolls
+         in place rather than growing the row and pushing the rest of the grid off screen. */
+      overflow-y: hidden;
+    }
+    /* The loading variant reserves an `auto`-height first row for `claimGridStatusHTML`'s
+       status strip; `grid-auto-rows: 1fr` above still governs every claim-box row after it.
+       The finished result has no such row — every cell there is a claim. */
+    .claims-pane.claim-grid.claim-grid-loading { grid-template-rows: auto; }
+    .claims-pane.claim-grid .claim-pane {
+      /* A grid item's default `min-height` is `auto` — the same trap a flex item's is (see
+         `.claims-pane`'s own comment above) — so without this, a box with more in it than
+         its row is tall grows the row instead of scrolling inside the height it actually
+         has. `position: relative` gives the fade below a containing block that is this box
+         itself, not the grid — see its own comment for why that specific anchor matters. */
+      position: relative;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    /* An overflowing box's last line — often the verdict badge, since it's what every box
+       ends on — would otherwise be sliced flat by the box's own edge, reading as a broken
+       layout rather than "there's more, scroll for it". This fades it into the card's own
+       background instead. `position: absolute` inside a `position: relative` scroll
+       container (`.claim-pane` above) is pinned to that box's own visible edge rather than
+       scrolling with the content — the containing block is the scroller itself, not the
+       (taller) content inside it — so it always sits over whatever is currently cut off,
+       never drifting away from the edge as the reader scrolls. Harmless when a box doesn't
+       overflow: fading empty space into a background already that color paints nothing. */
+    .claims-pane.claim-grid .claim-pane::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: 0;
+      height: 28px;
+      background: linear-gradient(to bottom, transparent, var(--surface));
+      pointer-events: none;
+    }
+  }
+
+  .claim-grid-status {
+    grid-column: 1 / -1;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 4px 0 8px;
+  }
+
   .claim-card {
-    /* The single child `.claims-pane` ever has (every render path replaces the pane's
-       whole `innerHTML` with one card) — `flex: 1 1 auto` is what makes it reach the
-       bottom of the pane instead of floating near the top with bare dark space under it
-       on a short answer, while still growing past that on a long one, at which point
-       `.claims-pane`'s own `overflow-y: auto` above takes over rather than the video
-       pane's height doing anything at all.
+    /* `.claims-pane`'s only child outside grid mode (every render path replaces the pane's
+       whole `innerHTML`) — `flex: 1 1 auto` is what makes it reach the bottom of the pane
+       instead of floating near the top with bare dark space under it on a short answer,
+       while still growing past that on a long one, at which point `.claims-pane`'s own
+       `overflow-y: auto` takes over rather than the video pane's height doing anything at
+       all. In grid mode these `flex` properties are simply unused — the parent is
+       `display: grid`, not `flex` — so nothing here needs to change for a `.claim-pane` box
+       to size from its grid cell instead.
        `display: flex; flex-direction: column` is what lets `.card-loading` below claim
        the whole of that height instead of just its own content's — a plain block parent
        has no height to hand a child that wants to fill and center in it. Everything else
-       here (the analysis text, badges, thread, sources) is still a normal vertically
-       stacked block inside a flex column, so nothing else about the card's layout
-       changes. */
+       here (the analysis text, badges, thread, source pills) is still a normal vertically
+       stacked block inside a flex column, so nothing else about the card's layout changes. */
     flex: 1 1 auto;
     display: flex; flex-direction: column;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 14px;
     padding: 20px;
+  }
+
+  /* ---------- Claim skeleton (loading grid) ---------- */
+  /* `renderClaimSkeletons` (app.js) — a placeholder box for a claim the model has named but
+     not finished checking. The title is real, lifted straight off the `[[claim: …]]` marker
+     that just streamed in; the shimmering lines beneath it stand in for the analysis and
+     verdict still to come. */
+  .skeleton-body { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .skeleton-line {
+    display: block; height: 10px; border-radius: 6px;
+    background: linear-gradient(90deg, var(--surface-raised) 25%, var(--border) 37%, var(--surface-raised) 63%);
+    background-size: 400% 100%;
+    animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  }
+  .skeleton-line.short { width: 55%; }
+  @keyframes skeleton-shimmer {
+    0%   { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
   }
 
   /* The loading spinner — the only child of `.claim-card` while a check is running, so
@@ -487,19 +565,69 @@
 
   .status-text { font-size: 13px; color: var(--ink-dim); text-align: center; min-height: 18px; transition: opacity 0.35s ease; }
   .source-counter { font-family: var(--font-mono); font-size: 11px; color: var(--accent); min-height: 14px; }
+  /* Shared by every status label a stream updates in place (`#runStatus`, `#followupStatus`,
+     `#chatStatus`) — an instant textContent swap reads as the label jumping, not updating;
+     `setStatusText` (app.js) fades the opacity down before the swap and back up after, so a
+     stage change reads as motion instead of a jump cut. */
+  .stage-text { opacity: 1; transition: opacity 0.3s ease; }
+
+  /* ---------- Perceived-progress bar ---------- */
+  /* A raw elapsed-time clock is honest about how long a check takes but reads as *slower*
+     than a bar that keeps creeping forward: motion between the (seconds-apart) stage-text
+     swaps is what tells the eye something is still happening. `createProgressTicker` (app.js)
+     eases this toward — never quite to — 92% on a decaying curve, the same "fake progress"
+     trick most CI/upload UIs use, and lets real stage transitions pull it ahead of where
+     elapsed time alone would put it. It only reaches 100% when the turn actually finishes. */
+  .mini-progress {
+    width: 100%; max-width: 200px;
+    height: 3px; border-radius: 999px; overflow: hidden;
+    background: var(--surface-raised);
+  }
+  .mini-progress.wide { max-width: 220px; margin-top: 2px; }
+  .mini-progress-bar {
+    height: 100%; width: 0%; border-radius: inherit;
+    background: var(--accent);
+    transition: width 0.4s cubic-bezier(.4,0,.2,1);
+  }
+  [data-motion="reduced"] .mini-progress-bar { transition: none; }
 
   .eyebrow {
     font-family: var(--font-mono); font-size: 11px; color: var(--muted);
     letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
   }
 
+  /* The per-claim position label ("Claim 2 of 4") in a claim-grid box — a pill instead of
+     `.eyebrow`'s plain uppercase line, matching the chip language `.source-pill`/`.badge`
+     already use elsewhere on the same box. `.eyebrow` itself stays as it was for the
+     whole-answer card and the error card, where there's no set of same-shape siblings for a
+     pill to distinguish this box from. `align-self: flex-start` keeps it sized to its own
+     text instead of stretching full width, which is what a block child of a flex column
+     does by default. */
+  .claim-eyebrow {
+    display: inline-flex; align-items: center;
+    align-self: flex-start;
+    margin-bottom: 10px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--muted);
+    font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  /* Still being checked (see `skeletonClaimHTML`) — accent-tinted so a reader scanning the
+     grid can tell a box apart from an already-settled one without reading its text. */
+  .claim-eyebrow.pending { color: var(--accent); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
+
   /* The claim itself, in `claimPanesHTML`'s split-panes layout — one line reproducing the
-     `[[claim: …]]` marker's own text, between the "Claim N of M" eyebrow above it and the
+     `[[claim: …]]` marker's own text, between the `.claim-eyebrow` pill above it and the
      analysis text below. Same reveal-in transition as `.claim-text`, since the two always
-     arrive together. */
+     arrive together. `word-break` matters more here than it did in the old full-width card:
+     a claim box is often under 300px wide, narrow enough that one long unbroken token (a
+     URL, a long number) could force the box wider than its grid cell. */
   .claim-title {
     font-family: var(--font-display); font-size: 15.5px; font-weight: 600; color: var(--ink);
-    line-height: 1.4; margin: 0 0 10px;
+    line-height: 1.4; margin: 0 0 10px; word-break: break-word;
     opacity: 0; transform: translateY(6px);
     transition: opacity 0.4s ease, transform 0.4s ease;
   }
@@ -585,36 +713,31 @@
   .badge.verdict.good  { background: rgba(111,169,138,0.15);color: var(--good);  border: 1px solid rgba(111,169,138,0.35); }
   .badge.verdict.muted { background: rgba(138,147,163,0.15);color: var(--muted); border: 1px solid rgba(138,147,163,0.3); }
 
-  /* Revealed by animating `grid-template-rows` from 0fr to 1fr rather than `max-height`
-     from 0 to a guessed pixel value. The guess was 400px, and a check with a dozen
-     sources — or a handful with their quotes expanded, which is what the "Show source
-     quotes" setting does — is taller than that, so the list was silently cut off with no
-     scrollbar and no way to reach the rest. `1fr` is however tall the content is. */
-  .sources {
-    border-top: 1px solid var(--border); padding-top: 12px;
-    display: grid; grid-template-rows: 0fr; opacity: 0;
-    transition: grid-template-rows 0.45s ease, opacity 0.4s ease;
+  /* A row of link pills standing in for the old collapsed "Sources (N)" list — see
+     `sourcePillsHTML` in app.js for why the list (and its per-source quote toggle) is
+     gone: a citation marker in the text already links to the same page, so the list was a
+     second copy of the same information, folded behind a toggle most readers never opened. */
+  .source-pills {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    border-top: 1px solid var(--border); margin-top: 4px; padding-top: 12px;
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
   }
-  /* One wrapper child, because the animated track is the *first* row: leaving the label
-     and each source as separate grid children would collapse only the label. */
-  .sources-body { min-height: 0; overflow: hidden; padding-top: 8px; }
-  .sources.in { grid-template-rows: 1fr; opacity: 1; }
-  /* The fold control — see `sourcesHTML` in app.js for why this is a separate toggle from
-     the grid-rows reveal above rather than built into it. */
-  .sources-toggle {
-    display: flex; align-items: center; gap: 6px;
-    width: 100%; padding: 0; border: 0; background: transparent;
-    font-family: var(--font-mono); font-size: 10.5px; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 0.06em; cursor: pointer;
+  .source-pills.in { opacity: 1; transform: translateY(0); }
+  .source-pill {
+    display: inline-flex; align-items: center;
+    max-width: 170px;
+    padding: 4px 11px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--ink-dim);
+    font-family: var(--font-mono); font-size: 11px;
+    text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .sources-toggle:hover { color: var(--ink-dim); }
-  .sources-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .sources-toggle svg { width: 12px; height: 12px; flex-shrink: 0; transition: transform 0.2s ease; }
-  .sources-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
-  .source-item { font-size: 12.5px; color: var(--ink-dim); padding: 4px 0; display: flex; justify-content: space-between; gap: 10px; }
-  .source-item span:last-child { color: var(--muted); font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
-  .source-item a.citation { color: var(--ink-dim); text-decoration: none; }
-  .source-item a.citation:hover { color: var(--accent); text-decoration: underline; }
+  .source-pill:hover { color: var(--accent); border-color: var(--accent); }
+  .source-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .retry-button {
     padding: 8px 14px;
@@ -767,22 +890,6 @@
   }
   .action-feedback.show { opacity: 1; }
 
-  /* ---------- Citation quotes ---------- */
-  .source-item { flex-direction: column; align-items: stretch; gap: 4px; }
-  .source-item .source-row { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
-  .source-quote-toggle {
-    align-self: flex-start;
-    font-family: var(--font-mono); font-size: 10.5px; color: var(--muted);
-    background: transparent; border: 0; padding: 2px 0; cursor: pointer; text-decoration: underline;
-    text-decoration-style: dotted;
-  }
-  .source-quote-toggle:hover { color: var(--accent); }
-  .source-quote {
-    font-family: var(--font-display); font-style: italic; font-size: 12px; line-height: 1.5;
-    color: var(--ink-dim); border-left: 2px solid var(--border);
-    padding: 4px 0 4px 10px; margin: 0;
-  }
-
   /* ---------- Entry bar extras: mic, plus, image chip ---------- */
   .entry-bar { flex-wrap: wrap; }
   .icon-btn {
@@ -825,6 +932,23 @@
     margin: 8px 0; padding: 4px 0 4px 12px; border-left: 2px solid var(--border);
     color: var(--ink-dim); font-style: italic;
   }
+
+  /* A claim-grid box is a fraction of the width the old single full-page card was — these
+     rules above were sized for that page, and inside a ~300-400px box they read as loose:
+     over-wide list indents, a heading with page-sized margins, a block quote with room to
+     spare. Tightened specifically for `.claim-pane` (never the whole-answer card, which
+     still has the width to spend), on top of the system prompt now asking for shorter
+     claim write-ups in the first place (see verified-chat.js) — the two are meant to work
+     together, not either one compensating alone for a still-long answer. Same reasoning as
+     `.claim-title`'s `word-break` above, so a heading or list item can't force a box wider
+     than its cell either. `[data-font-size="large"]` still wins over this: it's declared
+     later in the file, so a reader who has asked for bigger text gets it here too. */
+  .claim-pane .claim-text { font-size: 14.5px; line-height: 1.5; word-break: break-word; }
+  .claim-pane .claim-text ul, .claim-pane .claim-text ol { margin: 0 0 8px; padding-left: 18px; }
+  .claim-pane .claim-text li { margin: 2px 0; }
+  .claim-pane .claim-text h4 { font-size: 1em; margin: 10px 0 4px; }
+  .claim-pane .claim-text blockquote { margin: 6px 0; padding: 3px 0 3px 10px; }
+  .claim-pane .claim-text pre { font-size: 0.75em; padding: 8px; }
 
   /* iOS Safari's `100%` height resolves against the *largest* viewport (address bar
      collapsed), not the visible one, so a `position: sticky` element pinned to the
@@ -1158,7 +1282,6 @@
   [data-pointer="coarse"] .action-row { gap: 8px; }
   [data-pointer="coarse"] .icon-btn { width: 46px; }
   [data-pointer="coarse"] .lib-item { padding: 12px 10px; }
-  [data-pointer="coarse"] .source-quote-toggle { padding: 8px 0; font-size: 11.5px; }
   /* The strip is swiped, not scrolled with a trackpad — the scrollbar is just noise
      taking 6px off an already-short image. */
   [data-pointer="coarse"] .image-strip::-webkit-scrollbar { display: none; }
@@ -1193,14 +1316,40 @@
   [data-motion="reduced"] .claim-text,
   [data-motion="reduced"] .badge,
   [data-motion="reduced"] .notice,
-  [data-motion="reduced"] .sources,
+  [data-motion="reduced"] .source-pills,
   [data-motion="reduced"] .seal-check,
   [data-motion="reduced"] .thread-spinner,
+  [data-motion="reduced"] .stage-text,
+  [data-motion="reduced"] .skeleton-line,
   [data-motion="reduced"] .icon-btn.listening { animation: none !important; transition: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .sources, .seal-check, .thread-spinner { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .notice, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line { animation: none !important; transition: none !important; }
   }
+
+  /* ---------- Instant press feedback ---------- */
+  /* Real work — the fetch, the model call — can't start any sooner than it does, but the
+     *button* can visibly react the instant a finger or pointer lands on it rather than
+     waiting for the click to fully resolve. A system that answers touch immediately reads
+     as faster even when the underlying request takes exactly as long. */
+  .entry-bar button:active,
+  .new-check:active,
+  .icon-btn:active,
+  .action-btn:active,
+  .retry-button:active,
+  .settings-btn:active { transform: scale(0.96); }
+  .entry-bar button,
+  .new-check,
+  .icon-btn,
+  .action-btn,
+  .retry-button,
+  .settings-btn { transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease; }
+  [data-motion="reduced"] .entry-bar button:active,
+  [data-motion="reduced"] .new-check:active,
+  [data-motion="reduced"] .icon-btn:active,
+  [data-motion="reduced"] .action-btn:active,
+  [data-motion="reduced"] .retry-button:active,
+  [data-motion="reduced"] .settings-btn:active { transform: none; }
 </style>
 </head>
 <body>
@@ -1374,20 +1523,6 @@
             <button type="button" data-value="normal">Normal</button>
             <button type="button" data-value="large">Large</button>
           </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <h3>Citations</h3>
-        <div class="settings-row">
-          <div>
-            <div class="settings-row-label">Show source quotes</div>
-            <div class="settings-row-sub">Reveal the exact sentence a citation rests on, under each source.</div>
-          </div>
-          <label class="switch">
-            <input type="checkbox" id="setting-show-quotes" />
-            <span class="track"></span><span class="thumb"></span>
-          </label>
         </div>
       </div>
 
