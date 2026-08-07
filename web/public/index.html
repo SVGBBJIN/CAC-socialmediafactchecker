@@ -149,8 +149,15 @@
   }
   .entry-bar input::placeholder { color: #616977; }
   .entry-bar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Icon-only square, matching the mic/image icon buttons either side of it at every
+     width — three different shapes doing the same job of "a control in the composer row"
+     used to mean text on desktop/tablet and an icon on phones; now it's one shape
+     everywhere. The label moves to `aria-label`/title (kept live by updateComposerMode in
+     app.js) so "Ask" vs. "Check" is still announced to screen readers even though it's no
+     longer painted on screen. */
   .entry-bar button {
-    padding: 11px 18px;
+    flex: 0 0 auto; width: 42px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
     border-radius: 9px;
     border: 1px solid var(--accent);
     background: rgba(79,209,197,0.12);
@@ -163,9 +170,11 @@
   .entry-bar button:hover { background: rgba(79,209,197,0.2); }
   .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .entry-bar button:disabled { opacity: 0.5; cursor: default; }
-  /* The icon is mobile-only chrome (see the phone breakpoint below) — hidden here so
-     desktop/tablet keep the plain "Check"/"Ask" text button they've always had. */
-  .check-btn-icon { display: none; }
+  .check-btn-icon { display: block; width: 18px; height: 18px; }
+  .check-btn-label {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+  }
 
   .content-grid {
     flex: 1;
@@ -390,6 +399,10 @@
     margin-top: 16px; padding-top: 16px;
     display: flex; flex-direction: column; gap: 16px;
   }
+  /* The free-standing chat surface (see renderChatPane in app.js) reuses this thread
+     markup with nothing above it — an analysis card's worth of margin/border/padding
+     would be a rule dividing the card from itself. */
+  .thread.chat-thread { border-top: 0; margin-top: 0; padding-top: 0; }
   .thread-item { display: flex; flex-direction: column; gap: 8px; }
   .thread-q {
     align-self: flex-start;
@@ -408,13 +421,6 @@
     animation: thread-spin 0.8s linear infinite;
   }
   @keyframes thread-spin { to { transform: rotate(360deg); } }
-
-  .note {
-    padding: 10px 24px;
-    color: #666d7a; font-family: var(--font-body);
-    font-size: 11.5px; text-align: center; line-height: 1.5;
-    border-top: 1px solid var(--border);
-  }
 
   /* ---------- Passphrase dialog ---------- */
   .passphrase {
@@ -848,29 +854,7 @@
        is smaller than that, and never zooms back out — the layout is then wrong for the
        rest of the session. This is a workaround for that, not a type-scale choice. */
     .entry-bar input { font-size: 16px; padding: 12px; min-width: 0; }
-    /* "Check" as a text button is the odd one out next to the mic/image icon buttons on
-       either side of it — three different shapes doing the same job of "a control in the
-       composer row". Collapsed to a matching square icon button here; the label moves to
-       an `aria-label` (kept live by updateComposerMode in app.js) so "Ask" vs. "Check" is
-       still announced to screen readers even though it's no longer painted on screen. */
-    .entry-bar button {
-      flex: 0 0 auto; width: 42px; padding: 0;
-      display: flex; align-items: center; justify-content: center;
-    }
-    .check-btn-icon { display: block; width: 18px; height: 18px; }
-    .check-btn-label {
-      position: absolute; width: 1px; height: 1px;
-      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
-    }
     .image-chip { margin: 0 12px; }
-
-    /* This disclaimer sits outside `.app`, so it was pinned below the composer, eating a
-       fifth of an already-cramped 390px screen for a caveat that reads as legal boilerplate
-       to a phone user mid-check. The bottom sheet already has "Live" framing implicit in the
-       streaming UI, so the line is dropped entirely on phones rather than just tightened —
-       it still renders at desktop/tablet widths, where there's room and it's a fair thing to
-       show alongside the fuller chrome. */
-    .note { display: none; }
 
     /* Dialogs are sheets at this width — a 92vw box floating mid-screen wastes the room
        it is short of. */
@@ -1035,8 +1019,6 @@
       </div>
     </div>
   </div>
-
-  <p class="note">Live — calls the fact-checked /api/chat endpoint. There is no per-claim verdict schema yet, so the badge below is parsed off a one-line summary the model is asked to append, not a structured result.</p>
 
   <dialog class="passphrase" id="passphrase-dialog">
     <form method="dialog" id="passphrase-form">

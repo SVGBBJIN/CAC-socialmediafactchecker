@@ -129,6 +129,14 @@ let videoPaneToken = 0;
 let pendingFollowup = null; // { entryId, question, error? }
 let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check anyway"
 
+// The free-standing conversation shown while nothing is selected — no video, no verdict,
+// just a normal back-and-forth. It exists so the composer works like a chatbot before any
+// link has ever been checked, not only after: a pasted link is intercepted by the regex in
+// confirmAndRunCheck/normalizeLink and starts a real check instead of landing here. Not
+// persisted, same as pendingFollowup above — a reload starts the conversation over.
+let chatThread = []; // { question, answer, sources, incomplete }
+let pendingChat = null; // { question, error? }
+
 /* ---------------------------------------------------------------- settings */
 
 const SETTINGS_KEY = "seer.settings.v1";
@@ -697,8 +705,9 @@ async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
   }
   if (result.notALink && !hasExplicitScheme(raw)) {
     const question = raw.trim();
-    if (entry && question) {
-      runFollowup(entry, question);
+    if (question) {
+      if (entry) runFollowup(entry, question);
+      else runChat(question);
       return;
     }
   }
@@ -973,13 +982,112 @@ function selectEntry(id) {
   updateComposerMode();
 }
 
-/** The un-started state: nothing selected, video pane and claims pane both blank. */
+/** The un-started state: nothing selected, video pane blank. The claims pane isn't
+ * necessarily blank — it shows `chatThread` if a conversation is already under way. */
 function renderEmptyState() {
   el.videoChip.textContent = "No link yet";
   el.videoTitle.textContent = "Paste a link below to start a check.";
   el.videoLink.href = "#";
   clearVideoMedia();
-  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page.</p></div>`;
+  renderChatPane();
+}
+
+/** One chat turn's markup, the same shape as an entry's follow-up thread item — see
+ * `threadHTML` — but with no `entry` behind it. */
+function chatThreadHTML(newestIndex) {
+  return chatThread
+    .map((c, index) => {
+      const animate = index === newestIndex;
+      return `
+        <div class="thread-item">
+          <div class="thread-q">${escapeHTML(c.question)}</div>
+          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
+          ${incompleteHTML(c.incomplete, animate)}
+          ${sourcesHTML(c.sources, animate)}
+        </div>`;
+    })
+    .join("");
+}
+
+/**
+ * The claims pane while nothing is selected: past chat turns, plus one in flight or
+ * freshly failed, or — with no conversation yet — the original placeholder now widened to
+ * mention that a plain question works too.
+ */
+function renderChatPane({ newest = -1 } = {}) {
+  const settled = chatThreadHTML(newest);
+  const pending = pendingChat
+    ? `
+      <div class="thread-item">
+        <div class="thread-q">${escapeHTML(pendingChat.question)}</div>
+        ${
+          pendingChat.error
+            ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
+            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus">Thinking…</span></div>`
+        }
+      </div>`
+    : "";
+
+  if (!settled && !pending) {
+    el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page — or just ask a question.</p></div>`;
+    return;
+  }
+  el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
+}
+
+/**
+ * A conversational turn with no link involved — no video, no verdict, just an answer.
+ * Mirrors `runFollowup`'s shape (history replay, pending/settled bookkeeping) but against
+ * `chatThread` rather than an entry's `followups`, since there is no entry: this is what
+ * "just ask a question" does before any link has ever been checked.
+ */
+async function runChat(question) {
+  if (inFlight) return;
+
+  pendingChat = { question, error: null };
+  el.linkInput.value = "";
+  const image = pendingImage;
+  clearPendingImage();
+  renderChatPane();
+  updateComposerMode();
+
+  const controller = new AbortController();
+  inFlight = controller;
+  el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
+  let settled = false;
+
+  try {
+    const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
+    const history = chatThread.flatMap((c) => [
+      { role: "user", content: c.question },
+      { role: "assistant", content: c.answer },
+    ]);
+    const { answer, sources, incomplete } = await streamChat([...history, message], {
+      signal: controller.signal,
+      onStage: (frame) => {
+        const status = document.getElementById("chatStatus");
+        if (status) status.textContent = stageText(frame);
+      },
+    });
+    chatThread.push({ question, answer, sources, incomplete });
+    settled = true;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      pendingChat = null;
+      return;
+    }
+    // Left as the pending item, with its error — not pushed into `chatThread`, since a
+    // turn with no real answer would corrupt the history the next question replays.
+    pendingChat = { question, error: error.message };
+  } finally {
+    if (settled) pendingChat = null;
+    inFlight = null;
+    el.checkBtn.disabled = false;
+    el.newCheckBtn.disabled = false;
+    if (!selectedId) renderChatPane({ newest: settled ? chatThread.length - 1 : -1 });
+    updateComposerMode();
+  }
 }
 
 /**
@@ -995,6 +1103,8 @@ function startNewCheck() {
   closeDrawer({ restoreFocus: false });
   selectedId = null;
   pendingFollowup = null;
+  chatThread = [];
+  pendingChat = null;
   el.linkInput.value = "";
   renderLibrary(el.searchInput.value);
   renderEmptyState();
@@ -1789,22 +1899,26 @@ async function runFollowup(entry, question) {
  * surprise on submit.
  */
 function setCheckBtnLabel(label) {
-  // The button is icon-only on phones (CSS) but keeps its text — visually on wider
-  // layouts, screen-reader-only via the visually-hidden span on phones — so this one
-  // setter has to reach both without knowing which layout is active.
+  // The button is icon-only at every width (CSS); the text lives on in the visually-hidden
+  // span so "Ask" vs. "Check" still reaches a screen reader.
   el.checkBtn.querySelector(".check-btn-label").textContent = label;
   el.checkBtn.setAttribute("aria-label", label);
+  // A mouse hovering an icon-only button (imageBtn/micBtn get this from a static `title`
+  // in the markup; this one has to stay live) deserves the same tooltip a touch/VO user
+  // gets from aria-label.
+  el.checkBtn.setAttribute("title", label);
 }
 
 function updateComposerMode() {
   const entry = selectedDoneEntry();
-  if (!entry) {
-    setCheckBtnLabel("Check");
-    el.linkInput.placeholder = "Paste a video or article link…";
-    return;
-  }
   const asking = looksLikeFollowup(el.linkInput.value);
   setCheckBtnLabel(asking ? "Ask" : "Check");
+  if (!entry) {
+    el.linkInput.placeholder = asking
+      ? "Ask a question…"
+      : "Paste a video or article link, or just ask a question…";
+    return;
+  }
   el.linkInput.placeholder = asking
     ? "Ask a follow-up…"
     : `Ask a follow-up about "${truncate(entry.title, 44)}", or paste a new link…`;
@@ -1922,13 +2036,17 @@ function initSpeechToText() {
 el.checkBtn.addEventListener("click", () => {
   const entry = selectedDoneEntry();
   const raw = el.linkInput.value;
-  if (entry && looksLikeFollowup(raw)) {
-    const question = raw.trim();
-    if (question) runFollowup(entry, question);
+  const url = normalizeLink(raw);
+  if (url) {
+    confirmAndRunCheck(url, { entry, raw });
     return;
   }
-  const url = normalizeLink(raw);
-  if (url) confirmAndRunCheck(url, { entry, raw });
+  // Not link-shaped: an ordinary chat turn, on the selected check if there is one open,
+  // otherwise the free-standing conversation (see runChat).
+  const question = raw.trim();
+  if (!question) return;
+  if (entry) runFollowup(entry, question);
+  else runChat(question);
 });
 
 el.linkConfirmForm.addEventListener("submit", () => {
