@@ -81,7 +81,6 @@ const el = {
   libList: document.getElementById("libList"),
   searchInput: document.getElementById("searchInput"),
   claimsPane: document.getElementById("claimsPane"),
-  videoChip: document.getElementById("videoChip"),
   videoTitle: document.getElementById("videoTitle"),
   videoLink: document.getElementById("videoLink"),
   videoThumb: document.getElementById("videoThumb"),
@@ -89,6 +88,12 @@ const el = {
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
   videoImages: document.getElementById("videoImages"),
+  videoControls: document.getElementById("videoControls"),
+  muteBtn: document.getElementById("muteBtn"),
+  fullscreenBtn: document.getElementById("fullscreenBtn"),
+  videoTimeline: document.getElementById("videoTimeline"),
+  timelineTrack: document.getElementById("timelineTrack"),
+  timelineProgress: document.getElementById("timelineProgress"),
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
@@ -114,6 +119,7 @@ const el = {
   imageChipRemove: document.getElementById("imageChipRemove"),
   micBtn: document.getElementById("micBtn"),
   sidebar: document.getElementById("sidebar"),
+  sidebarCollapseBtn: document.getElementById("sidebarCollapseBtn"),
   drawerToggle: document.getElementById("drawerToggle"),
   drawerScrim: document.getElementById("drawerScrim"),
   topbarSettingsBtn: document.getElementById("topbarSettingsBtn"),
@@ -154,6 +160,7 @@ const DEFAULT_SETTINGS = {
   fontSize: "normal", // "normal" | "large"
   showQuotes: true, // gates the per-source "Show quote" toggle in sourcesHTML
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
+  sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
 };
 
 function loadSettings() {
@@ -184,6 +191,13 @@ function applySettings() {
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
+  setAttrIf(root, "data-sidebar", settings.sidebarCollapsed, "collapsed");
+  if (el.sidebarCollapseBtn) {
+    const label = settings.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
+    el.sidebarCollapseBtn.setAttribute("aria-label", label);
+    el.sidebarCollapseBtn.setAttribute("aria-expanded", String(!settings.sidebarCollapsed));
+    el.sidebarCollapseBtn.title = label;
+  }
 }
 
 function setAttrIf(node, name, condition, value) {
@@ -1029,9 +1043,10 @@ function selectEntry(id) {
 /** The un-started state: nothing selected, video pane blank. The claims pane isn't
  * necessarily blank — it shows `chatThread` if a conversation is already under way. */
 function renderEmptyState() {
-  el.videoChip.textContent = "No link yet";
   el.videoTitle.textContent = "Paste a link below to start a check.";
   el.videoLink.href = "#";
+  el.videoLink.textContent = "";
+  el.videoLink.hidden = true; // Nothing to open yet — an empty pill would just be a stray bar.
   clearVideoMedia();
   renderChatPane();
   refreshTimeline();
@@ -1192,7 +1207,24 @@ function clearVideoMedia() {
   // A seek asked for against the media being torn down here has nothing left to land on,
   // and the chip it lit belongs to a card that may already have been replaced.
   pendingSeek = null;
+  setPlayerChromeVisible(false);
   syncPlayhead();
+}
+
+/**
+ * The custom mute/fullscreen buttons and the claim timeline both answer to the same
+ * `<video>` element, so both come and go together — visible only for a direct MP4
+ * (TikTok/Instagram), hidden for the YouTube embed (draws its own chrome; its clock isn't
+ * readable from this page either, see `syncPlayhead`), an image carousel (nothing to
+ * play), and the empty/placeholder state.
+ */
+function setPlayerChromeVisible(visible) {
+  el.videoControls.hidden = !visible;
+  el.videoTimeline.hidden = !visible;
+  if (!visible) {
+    el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+    el.timelineProgress.style.width = "0%";
+  }
 }
 
 /**
@@ -1250,6 +1282,15 @@ function showVideoElement(media) {
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
   el.videoPlayer.hidden = false;
   el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
+  setPlayerChromeVisible(true);
+  // Muted is the element's own starting attribute and this button's assumed starting
+  // state (see the CSS) — a new entry's video should never inherit "unmuted" from
+  // whatever the reader last clicked on a different check.
+  el.videoPlayer.muted = true;
+  el.muteBtn.classList.remove("unmuted");
+  el.muteBtn.setAttribute("aria-pressed", "false");
+  el.muteBtn.setAttribute("aria-label", "Unmute");
+  el.muteBtn.title = "Unmute";
 }
 
 /** Shorts are vertical, everything else on YouTube is 16:9 — there's no dimension field
@@ -1294,7 +1335,7 @@ async function loadDirectMedia(entry, token) {
       body: JSON.stringify({ url: entry.url }),
     });
     if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
-    const { mediaURL, images, width, height } = await response.json();
+    const { mediaURL, images, width, height, caption, authorName } = await response.json();
     // A photo post has no single URL to play; it has a list of stills. Either way the
     // fact-check itself already has what it needs — this pane is only the picture of it.
     const media = images?.length
@@ -1305,10 +1346,47 @@ async function loadDirectMedia(entry, token) {
     if (!media) return;
     mediaCache.set(entry.id, media);
     if (token === videoPaneToken) showResolvedMedia(media);
+    applyPostTitle(entry, titleFromMetadata(caption, authorName), token);
   } catch {
     // Network hiccup or the passphrase dialog intercepting — the rest of the pane (title,
     // link, and the fact-check itself) doesn't depend on this succeeding.
   }
+}
+
+/** How much of a caption reads as a title rather than a wall of text — long enough to be
+ * a real sentence, short enough not to dominate a pane that also has an analysis to show. */
+const MAX_TITLE_CHARS = 140;
+
+/**
+ * What the post is actually called, so the pane can stop naming it by the link that was
+ * pasted the moment the resolve gives us something better.
+ *
+ * The caption's first non-blank line, not the whole thing: TikTok and Instagram captions
+ * commonly run a sentence into a paragraph of hashtags on the next line, and a heading
+ * that included those would read as noise, not a title. Falls back to the creator's handle
+ * when there's no caption at all (plenty of posts have none), and to `null` — meaning
+ * "nothing better than the URL" — only when neither is available, which leaves
+ * `entry.title` exactly as `runCheck` set it.
+ */
+function titleFromMetadata(caption, authorName) {
+  const firstLine = caption
+    ?.split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstLine) return truncate(firstLine, MAX_TITLE_CHARS);
+  return authorName ? `A post by @${authorName}` : null;
+}
+
+/** Swaps a checked entry's title for the one its own metadata gave it, everywhere the old
+ * one (the pasted URL) was showing: the pane heading, the "open original" link, and the
+ * library row. A no-op when the resolve had nothing better, or when the pane has since
+ * moved on to a different entry. */
+function applyPostTitle(entry, title, token) {
+  if (!title || title === entry.title) return;
+  entry.title = title;
+  persistLibrary();
+  renderLibrary(el.searchInput.value);
+  if (token === videoPaneToken) renderVideoTitle(entry);
 }
 
 /**
@@ -1321,10 +1399,19 @@ async function loadDirectMedia(entry, token) {
 const PLAY_GLYPH = "M8 5v14l11-7z";
 const PAGE_GLYPH = "M14 2H7a1 1 0 00-1 1v18a1 1 0 001 1h10a1 1 0 001-1V6zm-1 5V3l5 5h-4a1 1 0 01-1-1z";
 
-function renderVideoPane(entry) {
-  el.videoChip.textContent = entry.platform;
+/** The heading and the "open original" link both read off `entry.title` — the platform
+ * pill used to carry the "what is this" job on its own; now that it's gone (see
+ * renderVideoPane), the title is the only label the pane gives the post, so both places
+ * that show one show the same text. */
+function renderVideoTitle(entry) {
   el.videoTitle.textContent = entry.title;
   el.videoLink.href = entry.url;
+  el.videoLink.textContent = `${truncate(entry.title, 60)} ↗`;
+  el.videoLink.hidden = false;
+}
+
+function renderVideoPane(entry) {
+  renderVideoTitle(entry);
   el.videoPlaceholder
     .querySelector("path")
     ?.setAttribute("d", SUPPORTED_PLATFORMS.has(entry.platform) ? PLAY_GLYPH : PAGE_GLYPH);
@@ -1385,23 +1472,63 @@ function refreshTimeline() {
     })),
   );
   activeWindow = null;
+  renderTimelineTrack();
   syncPlayhead();
 }
 
 /**
- * Light up the claim the video is currently on, and only that one.
+ * The yellow bands on the scrubber, one per claim window — the same `claimWindows`
+ * `refreshTimeline` just rebuilt from the in-text `[t=…]` chips, laid out on the track by
+ * fraction of `duration` instead of by fraction of the answer's text. Needs a real,
+ * finite `duration` to place anything on a 0–100% scale, which for a freshly-resolved clip
+ * isn't known yet — `loadedmetadata` calls this again once it is.
+ */
+function renderTimelineTrack() {
+  el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+  const duration = el.videoPlayer.duration;
+  if (el.videoTimeline.hidden || !Number.isFinite(duration) || duration <= 0) return;
+
+  for (const window of claimWindows) {
+    const mark = document.createElement("div");
+    mark.className = "video-timeline-mark";
+    const left = Math.min(100, (window.from / duration) * 100);
+    const width = Math.max(0.6, ((Math.min(window.to, duration) - window.from) / duration) * 100);
+    mark.style.left = `${left}%`;
+    mark.style.width = `${width}%`;
+    // Carries the same node the in-text chip highlighting already tracks, so a claim
+    // lighting up moves both the chip in the answer and its band on the scrubber from one
+    // `activeWindow` assignment in `syncPlayhead` — never two sources of "which claim".
+    window.trackNode = mark;
+    el.timelineTrack.appendChild(mark);
+  }
+}
+
+/**
+ * Light up the claim the video is currently on — its chip in the answer text and its band
+ * on the scrubber, both — and only that one. Also keeps the scrubber's progress fill
+ * moving; called on every `timeupdate`, so this is the one place both live.
  *
  * Direct MP4 only. A YouTube post plays inside an `<iframe>` whose current time this page
  * cannot read without loading YouTube's own player script, and that is a third-party script
  * on every check for one highlight — the chips there still seek (`seekTo` via postMessage),
- * they just don't light up on their own.
+ * they just don't light up on their own, and the scrubber doesn't appear at all (see
+ * `setPlayerChromeVisible`).
  */
 function syncPlayhead() {
   const playing = !el.videoPlayer.hidden && el.videoPlayer.src;
+  const duration = el.videoPlayer.duration;
+  if (playing && Number.isFinite(duration) && duration > 0) {
+    const percent = Math.min(100, (el.videoPlayer.currentTime / duration) * 100);
+    el.timelineProgress.style.width = `${percent}%`;
+    el.timelineTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+  }
+
   const next = playing ? activeAt(claimWindows, el.videoPlayer.currentTime) : null;
   if (next === activeWindow) return;
   activeWindow?.node.classList.remove("playing");
+  activeWindow?.trackNode?.classList.remove("playing");
   next?.node.classList.add("playing");
+  next?.trackNode?.classList.add("playing");
   activeWindow = next;
 }
 
@@ -1568,12 +1695,30 @@ function sourceItemHTML(s) {
     </div>`;
 }
 
+/**
+ * The sources block, collapsed by default behind a "Sources (N)" toggle — same idea as a
+ * per-source "Show quote" (see `sourceItemHTML`), one level up. A dozen sources printed in
+ * full under every answer was the thing most likely to push the answer itself below the
+ * fold; folded by default, the count is still the first thing read, and the list is one
+ * click away rather than gone.
+ *
+ * `.sources`'s own grid-rows animation (via `revealAttrs`) is the *arrival* transition —
+ * it plays once, when the turn first lands. This toggle is a second, independent state
+ * layered on top of that, which is why it's a plain `hidden` attribute on `.sources-body`
+ * rather than folded into the same animation: the two have nothing to do with each other,
+ * and conflating them would mean an already-read answer replaying its entrance every time
+ * a reader opens the list.
+ */
 function sourcesHTML(sources, animate) {
   if (!sources?.length) return "";
+  const count = `${sources.length} source${sources.length === 1 ? "" : "s"}`;
   return `
     <div ${revealAttrs("sources", animate)}>
-      <div class="sources-body">
-        <div class="sources-label">Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}</div>
+      <button type="button" class="sources-toggle" data-sources-toggle aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Checked against ${count}</span>
+      </button>
+      <div class="sources-body" hidden>
         ${sources.map(sourceItemHTML).join("")}
       </div>
     </div>`;
@@ -1637,6 +1782,15 @@ async function handleClaimsPaneClick(event) {
     const show = quote.hidden;
     quote.hidden = !show;
     quoteToggle.textContent = show ? "Hide quote" : "Show quote";
+    return;
+  }
+
+  const sourcesToggle = event.target.closest("[data-sources-toggle]");
+  if (sourcesToggle) {
+    const body = sourcesToggle.nextElementSibling;
+    const show = body.hidden;
+    body.hidden = !show;
+    sourcesToggle.setAttribute("aria-expanded", String(show));
     return;
   }
 
@@ -2277,6 +2431,12 @@ el.linkConfirmDialog.addEventListener("close", () => {
 
 el.newCheckBtn.addEventListener("click", startNewCheck);
 
+el.sidebarCollapseBtn?.addEventListener("click", () => {
+  settings.sidebarCollapsed = !settings.sidebarCollapsed;
+  persistSettings();
+  applySettings();
+});
+
 el.linkInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -2297,6 +2457,9 @@ el.videoPlayer.addEventListener("loadedmetadata", () => {
   // See `showVideoElement`: the rate set alongside `src` is reset by the load this event
   // marks the end of, so this is the assignment that actually sticks.
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
+  // `duration` — what the timeline's bands are laid out against — is only known from this
+  // point on; see `renderTimelineTrack`'s doc comment.
+  renderTimelineTrack();
   // A chip clicked while the CDN was still resolving. Now there is a clock to seek on.
   if (pendingSeek != null) {
     const target = pendingSeek;
@@ -2313,6 +2476,70 @@ el.videoPlayer.addEventListener("timeupdate", syncPlayhead);
 // somewhere `timeupdate` may not report before the reader notices the stale highlight.
 el.videoPlayer.addEventListener("seeked", syncPlayhead);
 el.videoPlayer.addEventListener("ended", syncPlayhead);
+
+// The unmute button. Muted is where every clip starts (autoplay only works muted, and a
+// reader who wants sound asks for it) — see `showVideoElement` for where that gets reset
+// on every new entry, so this toggle never inherits "on" from a previous check.
+el.muteBtn.addEventListener("click", () => {
+  const unmuted = el.videoPlayer.muted;
+  el.videoPlayer.muted = !unmuted;
+  el.muteBtn.classList.toggle("unmuted", unmuted);
+  el.muteBtn.setAttribute("aria-pressed", String(unmuted));
+  const label = unmuted ? "Mute" : "Unmute";
+  el.muteBtn.setAttribute("aria-label", label);
+  el.muteBtn.title = label;
+});
+
+// Fullscreens `.video-thumb` rather than the bare `<video>`, so the custom controls and
+// the timeline stay on screen and usable — the browser's native video fullscreen would
+// take just the element itself, chrome and all, out of the page.
+el.fullscreenBtn.addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else el.videoThumb.requestFullscreen?.().catch(() => {}); // Refused (no gesture, disabled) — the button just does nothing.
+});
+
+// The class/label answer to `fullscreenElement` rather than being set at the click above,
+// so they're also right when fullscreen ends some other way — Esc, the system's own exit
+// gesture — that this page gets no click for.
+document.addEventListener("fullscreenchange", () => {
+  const active = document.fullscreenElement === el.videoThumb;
+  el.fullscreenBtn.classList.toggle("fs-active", active);
+  const label = active ? "Exit fullscreen" : "Fullscreen";
+  el.fullscreenBtn.setAttribute("aria-label", label);
+  el.fullscreenBtn.title = label;
+});
+
+/** Where a click (or a tap, or an arrow key) on the track lands, in seconds. */
+function timelineSeekTarget(clientX) {
+  const duration = el.videoPlayer.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  const rect = el.timelineTrack.getBoundingClientRect();
+  if (!rect.width) return null;
+  const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  return fraction * duration;
+}
+
+el.timelineTrack.addEventListener("click", (event) => {
+  const target = timelineSeekTarget(event.clientX);
+  if (target != null) seekVideoTo(target);
+});
+
+// A slider in everything but name — see the `role="slider"` set alongside `tabindex` on
+// the element itself — so the usual left/right (and up/down, for a vertical-video reader
+// used to a volume-style control) step it, Home/End jump to the ends.
+el.timelineTrack.addEventListener("keydown", (event) => {
+  const duration = el.videoPlayer.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const step = 5;
+  let target = null;
+  if (event.key === "ArrowRight" || event.key === "ArrowUp") target = el.videoPlayer.currentTime + step;
+  else if (event.key === "ArrowLeft" || event.key === "ArrowDown") target = el.videoPlayer.currentTime - step;
+  else if (event.key === "Home") target = 0;
+  else if (event.key === "End") target = duration;
+  if (target == null) return;
+  event.preventDefault();
+  seekVideoTo(Math.min(duration, Math.max(0, target)));
+});
 
 el.passForm.addEventListener("submit", () => {
   const value = el.passInput.value.trim();
