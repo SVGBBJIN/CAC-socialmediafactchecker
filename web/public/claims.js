@@ -17,7 +17,43 @@ export const VERDICTS = {
   insufficient: { label: "Insufficient evidence", css: "muted" },
 };
 
-const VERDICT_LINE = /\n?VERDICT:\s*(contradicted|disputed|corroborated|insufficient(?:\s+evidence)?)\.?\s*$/i;
+/**
+ * The system prompt asks for exactly one of the four `VERDICTS` labels, and that is what a
+ * compliant answer writes. This is the net under that, not a replacement for it: a model
+ * that drifts to a close synonym — "False" instead of "Contradicted", "Unverified" instead
+ * of "Insufficient evidence" — still means one of the four things this app knows how to
+ * badge, and losing the badge over word choice would be the app being pickier than the
+ * fact it's rendering. Nothing here widens *what* can be reported, only how it can be
+ * spelled; a verdict that isn't one of these four keys still parses to `null`, same as
+ * before.
+ */
+const VERDICT_ALIASES = {
+  contradicted: ["contradicted", "false", "incorrect", "untrue"],
+  disputed: ["disputed", "misleading", "mixed", "partly true", "partially true"],
+  corroborated: ["corroborated", "true", "accurate", "confirmed"],
+  insufficient: [
+    "insufficient",
+    "insufficient evidence",
+    "unverified",
+    "unproven",
+    "unclear",
+    "cannot verify",
+    "no evidence",
+  ],
+};
+
+const VERDICT_KEY_BY_ALIAS = new Map(
+  Object.entries(VERDICT_ALIASES).flatMap(([key, aliases]) => aliases.map((alias) => [alias, key])),
+);
+
+// Longest alias first, so "insufficient evidence" matches whole rather than stopping at
+// "insufficient" and leaving " evidence" dangling in the text.
+const ALIAS_PATTERN = [...VERDICT_KEY_BY_ALIAS.keys()]
+  .sort((a, b) => b.length - a.length)
+  .map((alias) => alias.replace(/\s+/g, "\\s+"))
+  .join("|");
+
+const VERDICT_LINE = new RegExp(`\\n?VERDICT:\\s*(${ALIAS_PATTERN})\\.?\\s*$`, "i");
 
 /**
  * Pulls the trailing `VERDICT: …` line off a block of answer text.
@@ -30,8 +66,9 @@ export function splitVerdict(answer) {
   const text = String(answer ?? "");
   const match = text.match(VERDICT_LINE);
   if (!match) return { text, verdictKey: null };
-  const key = match[1].toLowerCase().replace(/\s+evidence$/, "");
-  return { text: text.slice(0, match.index).trimEnd(), verdictKey: VERDICTS[key] ? key : null };
+  const alias = match[1].toLowerCase().replace(/\s+/g, " ").trim();
+  const key = VERDICT_KEY_BY_ALIAS.get(alias) ?? null;
+  return { text: text.slice(0, match.index).trimEnd(), verdictKey: key };
 }
 
 /**

@@ -42,6 +42,18 @@ test("splitVerdict only matches a VERDICT line at the very end of the given text
   assert.equal(text, "VERDICT: Contradicted is mentioned mid-sentence here.");
 });
 
+test("splitVerdict accepts a close synonym and maps it to the canonical key", () => {
+  assert.equal(splitVerdict("x\nVERDICT: False").verdictKey, "contradicted");
+  assert.equal(splitVerdict("x\nVERDICT: Misleading").verdictKey, "disputed");
+  assert.equal(splitVerdict("x\nVERDICT: True").verdictKey, "corroborated");
+  assert.equal(splitVerdict("x\nVERDICT: Unverified").verdictKey, "insufficient");
+  assert.equal(splitVerdict("x\nVERDICT: Partly true.").verdictKey, "disputed");
+});
+
+test("splitVerdict rejects a verdict word that maps to nothing", () => {
+  assert.equal(splitVerdict("x\nVERDICT: Satire").verdictKey, null);
+});
+
 test("every VERDICTS key round-trips through splitVerdict", () => {
   for (const key of Object.keys(VERDICTS)) {
     const label = VERDICTS[key].label; // e.g. "Insufficient evidence"
