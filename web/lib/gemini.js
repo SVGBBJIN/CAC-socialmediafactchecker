@@ -1897,7 +1897,11 @@ export async function* streamChat({
       // now cost one search's worth of waiting rather than four. Results are still consumed
       // in call order, so the numbering in the ledger doesn't depend on which search won.
       const running = calls.map((call) => {
-        const pending = Promise.resolve(toolRunner(call, { signal }));
+        // The round number goes with the call because the runner bounds some work *per
+        // round* rather than per call — a search still outstanding once its siblings have
+        // answered is a straggler, and "its siblings" is a fact about the round it was
+        // dispatched in. See `SEARCH_STRAGGLER_MS` in lib/verified-chat.js.
+        const pending = Promise.resolve(toolRunner(call, { signal, round }));
         // A sibling failing first must not turn the rest of the round into unhandled
         // rejections; the real handling is the `await` below, which still throws.
         pending.catch(() => {});

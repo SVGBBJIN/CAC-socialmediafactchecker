@@ -1622,3 +1622,201 @@ test("a fabricated marker is deleted from the answer the reader is shown", async
   const sources = frames.filter((f) => f.type === "sources").at(-1);
   assert.deepEqual(sources.sources.map((s) => s.n), [1]);
 });
+
+/* ---------------- the straggler cutoff ---------------- */
+
+/**
+ * A round of four searches where one never answers.
+ *
+ * `searchImpl` resolves three of them at once and leaves `slow` hanging on its signal, the
+ * way a real provider that has accepted the connection and stopped talking does. Whether
+ * the turn finishes quickly is therefore entirely a question of whether anything abandons
+ * that fourth search — nothing else in the test can.
+ */
+function roundWithOneHang({ hangingQuery = "slow", stragglerMs = 20 } = {}) {
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: ["fast-a", "fast-b", "fast-c", hangingQuery].map((query) => ({
+        name: "web_search",
+        args: { query, claim: `A claim about ${query}` },
+      })),
+    },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  const searchImpl = async (args, { signal }) => {
+    if (args.query !== hangingQuery) return searchResult(args.claim, ["https://a.example/1"]);
+    await new Promise((_, reject) => {
+      if (signal?.aborted) return reject(new Error("aborted"));
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  };
+
+  return { fetchImpl, searchImpl, stragglerMs };
+}
+
+test("a search still running once its siblings answered is dropped, and the model is told", async () => {
+  const { fetchImpl, searchImpl, stragglerMs } = roundWithOneHang();
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl,
+      stragglerMs,
+    }),
+  );
+
+  const searches = frames.filter((f) => f.type === "search");
+  assert.equal(searches.length, 4, "every search is still reported, dropped or not");
+  const dropped = searches.filter((f) => f.error);
+  assert.equal(dropped.length, 1);
+  assert.equal(dropped[0].query, "slow");
+  // Worded as something the model can act on rather than as an abort, and it says the query
+  // may be run again — the turn still has rounds left.
+  assert.match(dropped[0].error, /still running after the others/);
+  assert.match(dropped[0].error, /Run it again/);
+
+  // The three that answered are in the ledger and the turn reached its answer.
+  const sources = frames.findLast((f) => f.type === "sources");
+  assert.ok(sources.sources.length >= 1);
+  assert.match(readerSees(frames), /\$2\.1 billion/);
+});
+
+test("the cutoff is never armed by a round where nothing succeeded", async () => {
+  // Every search in the round hangs, so there is no evidence the provider is answering at
+  // all — the case the conditional exists to protect. Each keeps its own full timeout, and
+  // here that means the round only ends because the caller gives up, not because one
+  // sibling's success cut the others short.
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: ["a", "b"].map((query) => ({
+        name: "web_search",
+        args: { query, claim: `A claim about ${query}` },
+      })),
+    },
+    { text: "done" },
+  ]);
+
+  const started = [];
+  const controller = new AbortController();
+  const searchImpl = async (args, { signal }) => {
+    started.push(args.query);
+    // Once both are in flight, nothing has succeeded and nothing may be cut off. The abort
+    // below is the caller's, which is the only thing entitled to end this round.
+    if (started.length === 2) setTimeout(() => controller.abort(), 20);
+    await new Promise((_, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  };
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl,
+      signal: controller.signal,
+      stragglerMs: 20,
+    }),
+  );
+
+  // The caller aborted, so the turn yields nothing — and crucially no search was reported
+  // as a straggler, because no sibling ever came back to arm the clock.
+  assert.ok(!frames.some((f) => f.type === "search" && /still running after/.test(f.error ?? "")));
+});
+
+test("the cutoff is per round, so a later round's search gets its own full wait", async () => {
+  const { fetchImpl } = fakeGemini([
+    {
+      calls: ["fast", "slow"].map((query) => ({
+        name: "web_search",
+        args: { query, claim: `A claim about ${query}` },
+      })),
+    },
+    { calls: [{ name: "web_search", args: { query: "second-round", claim: "A later claim" } }] },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  let secondRoundSignal = null;
+  const searchImpl = async (args, { signal }) => {
+    if (args.query === "second-round") {
+      secondRoundSignal = signal;
+      // Slow enough that a clock left running from round one would have fired by now.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return searchResult(args.claim, ["https://c.example/3"]);
+    }
+    if (args.query === "slow") {
+      await new Promise((_, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    }
+    return searchResult(args.claim, ["https://a.example/1"]);
+  };
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl,
+      stragglerMs: 20,
+    }),
+  );
+
+  const searches = frames.filter((f) => f.type === "search");
+  assert.equal(searches.filter((f) => f.error).length, 1, "only round one's straggler was cut");
+  // Matched on the claim, not the query: a successful search frame carries the query the
+  // *provider* answered, and only a failed one echoes back the query that was asked for.
+  const later = searches.find((f) => f.claim === "A later claim");
+  assert.ok(later && !later.error, "a lone search in the next round runs to completion");
+  assert.ok(!secondRoundSignal?.aborted, "round one's clock never reached round two");
+});
+
+test("a repeat query served from the turn cache does not arm the straggler clock", async () => {
+  // Round one runs `repeated` and caches it. Round two asks for it again alongside a real
+  // search that takes longer than the cutoff — and the cached repeat returns instantly. If
+  // an instant cache hit could start the clock, the genuine search beside it would be cut
+  // off on the strength of a result retrieved a round ago.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "repeated", claim: "The first claim" } }] },
+    {
+      calls: [
+        { name: "web_search", args: { query: "repeated", claim: "The first claim" } },
+        { name: "web_search", args: { query: "genuine", claim: "A second claim" } },
+      ],
+    },
+    { text: "The bridge cost $2.1 billion [1]." },
+  ]);
+
+  let requests = 0;
+  const searchImpl = async (args) => {
+    requests += 1;
+    if (args.query === "genuine") await new Promise((resolve) => setTimeout(resolve, 60));
+    return searchResult(args.claim, ["https://a.example/1"]);
+  };
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl,
+      stragglerMs: 20,
+    }),
+  );
+
+  assert.equal(requests, 2, "the repeat was served from the cache, not run again");
+  const searches = frames.filter((f) => f.type === "search");
+  assert.equal(searches.filter((f) => f.error).length, 0, "nothing was cut off");
+  assert.ok(searches.some((f) => f.claim === "A second claim"));
+});

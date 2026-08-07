@@ -305,6 +305,36 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
 export const PREFETCH_PER_SEARCH = 3;
 export const PREFETCH_PER_TURN = 9;
 
+/**
+ * How long a round waits for its slowest search once the others have come back.
+ *
+ * A round's searches are dispatched together and the round ends when the *last* of them
+ * does, so the reader waits out the slowest one every time. `SEARCH_TIMEOUT_MS` bounds that
+ * at fifteen seconds, which is the right ceiling for a search running on its own and far too
+ * generous for one running beside three that already answered: a provider that has served
+ * three queries in a second and a half is not about to spend thirteen more on the fourth, so
+ * those thirteen seconds buy a result that has already stopped being likely and are spent in
+ * front of the model call the whole round is waiting to make.
+ *
+ * So the ceiling becomes conditional. Nothing changes until a search in the round *succeeds*
+ * — that is the evidence that the provider is answering at all, and it is what makes a
+ * sibling still running a straggler rather than simply a search in progress. From that
+ * moment the rest of the round has this long, and a search still outstanding is abandoned
+ * and reported to the model the way any other failed search is: as a query that did not come
+ * back, which it may run again next round.
+ *
+ * The condition is what keeps this safe in the case it would otherwise ruin. A round where
+ * every search is slow — a provider having a bad minute, a cold connection — never arms the
+ * cutoff at all, because there is no success to arm it, and the full `SEARCH_TIMEOUT_MS`
+ * still applies to each. This only ever shortens the wait for a straggler among siblings that
+ * worked, which is the case where the wait is least likely to be repaid.
+ *
+ * Four seconds, against a keyed provider's typical second or two: long enough that a search
+ * merely running slower than its siblings still lands, short enough that the tail stops being
+ * the thing that decides how long a fact-check takes.
+ */
+export const SEARCH_STRAGGLER_MS = 4_000;
+
 export function searchEnabled(env = process.env) {
   // Read case-insensitively, like the provider keys: an operator who typed
   // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
@@ -332,6 +362,7 @@ function makeToolRunner({
   pages,
   prefetchPerSearch = PREFETCH_PER_SEARCH,
   prefetchPerTurn = PREFETCH_PER_TURN,
+  stragglerMs = SEARCH_STRAGGLER_MS,
 }) {
   // Every search this turn has already run, by the query it ran. A model that asks the
   // same question twice — the same round, having listed a claim twice, or a later round
@@ -363,7 +394,64 @@ function makeToolRunner({
     }
   };
 
-  return async (call, { signal: callSignal } = {}) => {
+  /**
+   * The straggler cutoff, one per round — see `SEARCH_STRAGGLER_MS`.
+   *
+   * A round's searches share an `AbortController` that nothing arms until one of them
+   * succeeds. `enter` hands a search the round's signal and returns the two callbacks that
+   * drive it: `succeeded`, which starts the clock the first time a search in this round
+   * comes back with results, and `left`, which cancels the clock once nothing in the round
+   * is still outstanding, so a finished round leaves no timer behind.
+   *
+   * Keyed by round number, which `streamChat` passes with each call. A caller that doesn't
+   * pass one — the CLI, a test calling the runner directly — gets no cutoff rather than one
+   * shared by every call it ever makes: without rounds there are no siblings, and a lone
+   * search is exactly the case `SEARCH_TIMEOUT_MS` is already the right bound for.
+   */
+  const rounds = new Map();
+  const enter = (round, callSignal) => {
+    if (stragglerMs <= 0 || round == null) return { signal: callSignal ?? signal };
+
+    let state = rounds.get(round);
+    if (!state) {
+      state = { controller: new AbortController(), timer: null, outstanding: 0 };
+      rounds.set(round, state);
+    }
+    state.outstanding += 1;
+
+    // The round's own deadline and whatever the caller already carries, as one signal. The
+    // caller's is linked in rather than replaced so a closed tab still stops everything at
+    // once, and so the two reasons for stopping stay tellable apart below.
+    const outer = callSignal ?? signal;
+    const onOuterAbort = () => state.controller.abort();
+    if (outer?.aborted) state.controller.abort();
+    else outer?.addEventListener("abort", onOuterAbort, { once: true });
+
+    return {
+      signal: state.controller.signal,
+      cutoff: state.controller.signal,
+      succeeded: () => {
+        if (state.timer) return;
+        // Deliberately not `unref`'d. The clock is the only thing that ends a round holding
+        // a search that will never answer, and an unreferenced timer is one the runtime is
+        // entitled to skip on its way to an empty event loop — which is precisely the state
+        // a hung search leaves it in. `left` clears it the moment the round drains, so it
+        // cannot outlive the work it bounds.
+        state.timer = setTimeout(() => state.controller.abort(), stragglerMs);
+      },
+      left: () => {
+        outer?.removeEventListener("abort", onOuterAbort);
+        state.outstanding -= 1;
+        // Nothing in this round is still waiting, so the clock has nothing left to cut off.
+        if (state.outstanding <= 0 && state.timer) {
+          clearTimeout(state.timer);
+          state.timer = null;
+        }
+      },
+    };
+  };
+
+  return async (call, { signal: callSignal, round } = {}) => {
     if (call.name === "find_in_page") {
       return runFind(call, {
         ledger,
@@ -382,17 +470,24 @@ function makeToolRunner({
       };
     }
 
+    const { signal: searchSignal, cutoff, succeeded, left } = enter(round, callSignal);
+
     try {
       const key = cacheKey(call.args);
       // The *promise* is cached, not the result: two identical queries in one round are
       // dispatched together, so caching only on completion would let both through.
       let pending = seen.get(key);
+      // Whether this call is the one that actually goes to the provider. A repeat served
+      // from the cache above returns without touching the network, and an instant return is
+      // no evidence that the provider is answering *now* — arming the straggler clock off
+      // one would put a four-second ceiling on the round's real searches on the strength of
+      // a result retrieved a round ago. Only a search that made the request can start it.
+      const fresh = !pending;
       if (!pending) {
-        pending = Promise.resolve(
-          searchImpl(call.args, { env, fetchImpl, signal: callSignal ?? signal }),
-        );
+        pending = Promise.resolve(searchImpl(call.args, { env, fetchImpl, signal: searchSignal }));
         // A failure must not be remembered as one — the model is told what went wrong and
-        // is entitled to try the same query again once.
+        // is entitled to try the same query again once. That covers a straggler too: the
+        // query it abandoned is one the model may legitimately ask for again next round.
         pending.catch(() => seen.delete(key));
         seen.set(key, pending);
       }
@@ -401,6 +496,10 @@ function makeToolRunner({
       // queries, and the ledger attaches each claim to the sources retrieved for it.
       // Filing it again re-uses the numbers those sources already have.
       const base = await pending;
+      // This round has a working provider, so anything still running beside it is a
+      // straggler and the clock starts. Deliberately after the await and before the ledger
+      // work, which is synchronous and local.
+      if (fresh) succeeded?.();
       const result = { ...base, claim: String(call.args?.claim ?? base.claim) };
       const entries = ledger.record(result);
       prefetch(entries);
@@ -415,6 +514,20 @@ function makeToolRunner({
         },
       };
     } catch (error) {
+      // Cut off as a straggler rather than having genuinely failed. `search` re-throws the
+      // raw abort when the signal it was handed is the one that fired, so this is where it
+      // becomes something the model can act on — the same shape as any other failed search,
+      // because that is what it is from the model's side: a query that did not come back.
+      // Told apart from the caller abandoning the turn, which is nobody's to report.
+      if (cutoff?.aborted && !(callSignal ?? signal)?.aborted) {
+        const message =
+          "this search was still running after the others in this round came back, so it " +
+          "was dropped to get on with the answer. Run it again if the claim still needs it.";
+        return {
+          response: { error: message },
+          frame: { type: "search", query: String(call.args?.query ?? ""), error: message },
+        };
+      }
       if (error instanceof SearchQueryError || error instanceof SearchError) {
         return {
           response: { error: error.message },
@@ -422,6 +535,8 @@ function makeToolRunner({
         };
       }
       throw error;
+    } finally {
+      left?.();
     }
   };
 }
@@ -589,6 +704,7 @@ export async function* verifiedChat({
   signal,
   prefetchPerSearch = PREFETCH_PER_SEARCH,
   prefetchPerTurn = PREFETCH_PER_TURN,
+  stragglerMs = SEARCH_STRAGGLER_MS,
   ...geminiOptions
 }) {
   const enabled = searchEnabled(env);
@@ -609,6 +725,7 @@ export async function* verifiedChat({
         pages,
         prefetchPerSearch,
         prefetchPerTurn,
+        stragglerMs,
       })
     : null;
 

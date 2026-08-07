@@ -97,6 +97,27 @@ entirely). `lib/browser-resolve.js` is the last resort, escalating to `worker/` 
 closed set of failure kinds (`rateLimited`, `forbidden`, `malformed`, `upstream`) and only
 for video posts.
 
+**Between turns, a clip and a page are cached; on the wire to Gemini, nothing is.** Two
+caches exist and are both process-global, in-memory, opt-in from `api/chat.js`, and there to
+stop the same fetch being paid for on every turn of a conversation that replays the whole
+history: `clipCache` in `lib/gemini.js` (bounded by bytes) and the article cache in
+`lib/article.js` (bounded by count, successes only). Like the rate limiter, they reset on a
+cold start — a latency optimisation, never a correctness assumption.
+
+What is deliberately **not** cached is the media in the request body. An attached clip under
+`INLINE_BYTE_LIMIT` rides as inline base64 in every round of the turn, so a three-round
+fact-check uploads the same megabytes three times, and the video's frame tokens are
+re-prefilled each round on top of that. The obvious fix — push every clip through the Files
+API so later rounds send a `file_uri` instead — was considered and rejected: the Files API
+makes video wait in `PROCESSING` before it can be referenced at all (see
+`lib/gemini-files.js`), which moves the cost from rounds 2-3, where it overlaps nothing, to
+in front of round 1, where the reader is already watching the longest silence in the request.
+It also would not touch the prefill, which is the larger half. Past the inline limit the
+Files API is used because there is no alternative, and that is the only reason it is used.
+Don't reach for it as a speed measure without a measurement saying the trade inverted — and
+note that `GEMINI_MEDIA_RESOLUTION` is the lever that actually addresses prefill, kept off by
+default for the reason documented at `MEDIA_RESOLUTIONS`.
+
 **Citations are enforced by a ledger, not a heuristic.** The model has two tools:
 `web_search` (`lib/search.js`, schema in `lib/search-schema.js`) and `find_in_page`
 (`lib/page-find.js`, hybrid lexical (`lib/fuzzy.js`) + optional semantic
@@ -147,6 +168,15 @@ near what they bound: two attached clips per message, 120s stall timeout reset p
 separate from `THINKING_BUDGET_TOKENS` (the latter reserves room for the visible answer on
 thinking models — capping total output tokens alone doesn't do that, since reasoning and
 reply share one pool).
+
+One of those bounds is conditional and worth knowing about before you touch the tool loop.
+A round ends when its *slowest* search does, so `SEARCH_STRAGGLER_MS` (`lib/verified-chat.js`)
+shortens the wait for a search still running once a sibling in the same round has come back:
+the successful sibling is the evidence that the provider is answering, and only then does the
+straggler get a few more seconds before it is abandoned and reported to the model as a query
+that didn't come back. A round where *nothing* succeeded never arms it and keeps the full
+`SEARCH_TIMEOUT_MS` per search — the cutoff is about tails, not about a slow provider. This
+is why `toolRunner` is called with a round number: "its siblings" is a fact about the round.
 
 ### `Sources/` (Swift, frozen — read `docs/EXTRACTION_PIPELINE.md` before touching)
 

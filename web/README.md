@@ -771,6 +771,15 @@ looks like "search is broken" rather than "the key wasn't picked up". For the sa
   that — a full second answer, for a verdict the reader had already watched arrive.
 - **A 15s ceiling on each search**, independent of the Gemini timeouts. A hung search
   otherwise holds the whole chat request open behind it.
+- **A 4s ceiling on a straggler**, which is the same bound made conditional. A round's
+  searches go out together and the round ends when the last of them lands, so the reader
+  waits out the slowest every time — and fifteen seconds is the right ceiling for a search
+  running alone, not for one running beside three that already answered in a second and a
+  half. So once a search in the round *succeeds*, the rest get four seconds; anything still
+  outstanding is dropped and reported to the model as a query that did not come back, which
+  it may ask for again next round. The condition is the safety: a round where nothing
+  succeeded never arms the clock and keeps the full 15s per search, so a provider having a
+  bad minute is never cut short — only a tail among siblings that worked.
 - **Replies are capped in tokens, not just requests in messages.** Every other cap in
   `guard.js` bounds input; `MAX_OUTPUT_TOKENS` (default 4096) bounds the one thing that
   wasn't bounded at all — a single reply could otherwise run until the model stopped on
