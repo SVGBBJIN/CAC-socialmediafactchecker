@@ -305,6 +305,19 @@ in process memory, bounded by `CLIP_CACHE_MAX_BYTES` and evicted oldest-first. T
 clip stage also runs under a two-minute budget: past it, the remaining links become notes
 rather than holding the request open.
 
+**Pages are kept between turns too**, for the same reason and on the same ten-minute clock —
+see `ARTICLE_CACHE_MAX_ENTRIES`. Bounded by count rather than by bytes, since a page is at
+most 12k characters of extracted text. Only successes are held: a page that would not open
+is re-tried on the next turn, because a timeout on one turn says nothing about the next.
+Both caches are process memory on a warm instance, so like the rate-limit counters they are
+a latency optimisation and never a correctness assumption — a cold start simply fetches
+again.
+
+**The clip stage and the page stage run at the same time.** A message rarely holds both, but
+the case where it does — a clip and the page it is arguing about — is the expensive one, and
+it used to pay for them end to end. They share nothing but the clock, so they overlap; each
+still records its own failures, and neither can fail the other.
+
 ## How a pasted page reaches the model
 
 Anything that is not a TikTok, YouTube or Instagram link is a **page**, and a page is now a

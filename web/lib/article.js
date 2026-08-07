@@ -290,6 +290,79 @@ export async function fetchArticle(
   }
 }
 
+/* ---------------- Article cache ---------------- */
+
+/**
+ * How long a fetched page is kept for the next turn of the same conversation.
+ *
+ * The same problem the clip cache in lib/gemini.js exists to solve, in the cheaper half of
+ * the pipeline. Gemini has no memory between requests, so every turn replays the whole
+ * conversation, and `resolveArticles` walks every user turn — which means a five-turn
+ * thread about one article fetched that article five times. Every follow-up question paid a
+ * fresh redirect chain, TLS handshake and HTML parse before the first model token could
+ * exist, for text that had not changed and is capped at `MAX_ARTICLE_CHARS` anyway.
+ *
+ * Ten minutes, matching `CLIP_CACHE_TTL_MS`: it covers a conversation while it is happening
+ * and expires long before a page is stale in a way a fact-check would notice.
+ */
+export const ARTICLE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * How many pages are held at once.
+ *
+ * A page is at most `MAX_ARTICLE_CHARS` of extracted text — tens of KB, not the megabytes a
+ * clip costs — so this is bounded by count rather than by bytes. Thirty-two entries is a
+ * busy warm instance's worth of concurrent conversations; the oldest is dropped to make
+ * room rather than the newest refused. Set `ARTICLE_CACHE_MAX_ENTRIES=0` to turn it off.
+ */
+export const ARTICLE_CACHE_MAX_ENTRIES = 32;
+
+export function articleCacheLimitFromEnv(env = process.env) {
+  const raw = Number(env?.ARTICLE_CACHE_MAX_ENTRIES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : ARTICLE_CACHE_MAX_ENTRIES;
+}
+
+/**
+ * Keyed by the pasted link, which is what the next turn replays verbatim.
+ *
+ * Insertion order is eviction order and a hit re-inserts, so this is an LRU without a
+ * second structure to keep in step — the same shape as `clipCache`.
+ *
+ * **Only successes are cached.** A page that would not open is a page worth trying again:
+ * a timeout, a 503 or a blip on one turn says nothing about the next, and remembering the
+ * failure would turn one bad second into ten minutes of a page the model is told it cannot
+ * read. Failures are already reported rather than thrown, so nothing is lost by re-trying.
+ */
+const articleCache = new Map();
+
+/** Drops everything cached. Exported for tests, and for a caller that wants a cold read. */
+export function resetArticleCache() {
+  articleCache.clear();
+}
+
+function articleCacheGet(link) {
+  const hit = articleCache.get(link);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    articleCache.delete(link);
+    return null;
+  }
+  articleCache.delete(link);
+  articleCache.set(link, hit);
+  return hit;
+}
+
+function articleCachePut(link, page, maxEntries, ttlMs) {
+  if (maxEntries <= 0) return;
+  articleCache.delete(link);
+  articleCache.set(link, { page, expiresAt: Date.now() + ttlMs });
+  for (const oldest of articleCache.keys()) {
+    if (articleCache.size <= maxEntries) break;
+    if (oldest === link) break;
+    articleCache.delete(oldest);
+  }
+}
+
 /**
  * Read every page mentioned in a conversation's user turns, once each.
  *
@@ -305,7 +378,17 @@ export async function fetchArticle(
  */
 export async function resolveArticles(
   messages,
-  { maxArticles = MAX_ARTICLES, ...options } = {},
+  {
+    maxArticles = MAX_ARTICLES,
+    // Off by default, and opted into by the API route, for the same reason the clip cache
+    // is: this is process-global state shared by every request a warm instance handles, and
+    // a test that stubs the network must not quietly be answered from a previous test's
+    // fetch. Turning it on is a deployment decision. See `ARTICLE_CACHE_TTL_MS`.
+    cache = false,
+    cacheTTLMs = ARTICLE_CACHE_TTL_MS,
+    cacheMaxEntries = articleCacheLimitFromEnv(),
+    ...options
+  } = {},
 ) {
   const links = [];
   for (const message of messages ?? []) {
@@ -315,11 +398,19 @@ export async function resolveArticles(
     }
   }
 
+  const caching = Boolean(cache) && cacheTTLMs > 0 && cacheMaxEntries > 0;
   const pages = new Map();
   await Promise.all(
     links.slice(0, maxArticles).map(async (link) => {
+      const hit = caching ? articleCacheGet(link) : null;
+      if (hit) {
+        pages.set(link, hit.page);
+        return;
+      }
       try {
-        pages.set(link, await fetchArticle(link, options));
+        const page = await fetchArticle(link, options);
+        if (caching) articleCachePut(link, page, cacheMaxEntries, cacheTTLMs);
+        pages.set(link, page);
       } catch (error) {
         // `ProbeRefused` and `ArticleError` both arrive here already worded as a reason;
         // anything else is unexpected and is reported in the same shape rather than thrown.

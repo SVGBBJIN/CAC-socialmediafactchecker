@@ -14,6 +14,7 @@ import {
   resolveArticles,
   describeArticle,
   trimBoilerplate,
+  resetArticleCache,
   ArticleError,
   MAX_ARTICLES,
 } from "./lib/article.js";
@@ -242,6 +243,76 @@ test("resolveArticles caps how many pages one request reads", async () => {
   assert.equal(MAX_ARTICLES, 2);
 });
 
+/* ------------------------------------------------------------- the article cache */
+
+test("resolveArticles re-reads a page on every turn when the cache is off", async () => {
+  const fetchImpl = stubFetch({ "https://news.test/story": page(ARTICLE_HTML) });
+  const messages = [{ role: "user", content: "Check https://news.test/story" }];
+
+  await resolveArticles(messages, { fetchImpl, lookupImpl: publicLookup });
+  await resolveArticles(messages, { fetchImpl, lookupImpl: publicLookup });
+
+  assert.equal(fetchImpl.calls.length, 2);
+});
+
+test("resolveArticles serves a follow-up turn from the cache instead of re-fetching", async () => {
+  resetArticleCache();
+  const fetchImpl = stubFetch({ "https://news.test/story": page(ARTICLE_HTML) });
+  const messages = [{ role: "user", content: "Check https://news.test/story" }];
+  const options = { fetchImpl, lookupImpl: publicLookup, cache: true };
+
+  const first = await resolveArticles(messages, options);
+  // The follow-up replays the whole conversation, which is what used to re-fetch the page.
+  const second = await resolveArticles(
+    [...messages, { role: "assistant", content: "Here is the check." }, { role: "user", content: "and the second claim?" }],
+    options,
+  );
+
+  assert.equal(fetchImpl.calls.length, 1);
+  assert.deepEqual(second.pages.get("https://news.test/story"), first.pages.get("https://news.test/story"));
+  resetArticleCache();
+});
+
+test("the article cache expires, and never remembers a failure", async () => {
+  resetArticleCache();
+  const fetchImpl = stubFetch({ "https://news.test/story": page(ARTICLE_HTML) });
+  const messages = [{ role: "user", content: "Check https://news.test/story" }];
+
+  await resolveArticles(messages, { fetchImpl, lookupImpl: publicLookup, cache: true, cacheTTLMs: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await resolveArticles(messages, { fetchImpl, lookupImpl: publicLookup, cache: true, cacheTTLMs: 1 });
+  assert.equal(fetchImpl.calls.length, 2);
+
+  // A page that would not open is worth trying again — a timeout on one turn says nothing
+  // about the next, and remembering it would pin a readable page shut for the whole TTL.
+  resetArticleCache();
+  const flaky = stubFetch({ "https://flaky.test/story": page("", { status: 503 }) });
+  const flakyMessages = [{ role: "user", content: "Check https://flaky.test/story" }];
+  await resolveArticles(flakyMessages, { fetchImpl: flaky, lookupImpl: publicLookup, cache: true });
+  await resolveArticles(flakyMessages, { fetchImpl: flaky, lookupImpl: publicLookup, cache: true });
+  assert.equal(flaky.calls.length, 2);
+  resetArticleCache();
+});
+
+test("the article cache evicts the oldest entry to stay under its ceiling", async () => {
+  resetArticleCache();
+  const links = ["a", "b", "c"].map((slug) => `https://news.test/${slug}`);
+  const fetchImpl = stubFetch(Object.fromEntries(links.map((link) => [link, page(ARTICLE_HTML)])));
+  const options = { fetchImpl, lookupImpl: publicLookup, cache: true, cacheMaxEntries: 2 };
+
+  for (const link of links) {
+    await resolveArticles([{ role: "user", content: link }], options);
+  }
+  assert.equal(fetchImpl.calls.length, 3);
+
+  // `a` was pushed out by `c`; `b` and `c` are still held.
+  await resolveArticles([{ role: "user", content: links[1] }], options);
+  assert.equal(fetchImpl.calls.length, 3);
+  await resolveArticles([{ role: "user", content: links[0] }], options);
+  assert.equal(fetchImpl.calls.length, 4);
+  resetArticleCache();
+});
+
 /* -------------------------------------------------------------- into the prompt */
 
 test("describeArticle fences the text and disclaims it as a source", () => {
@@ -320,6 +391,71 @@ test("streamChat reads a pasted page only when the caller asked for it", async (
     on.frames.some((f) => f.type === "stage" && f.stage === "reading"),
     "the fetch is announced — it happens before the first token, in silence",
   );
+});
+
+test("a clip and a page in one message are fetched at the same time, not one after the other", async () => {
+  let releaseClip;
+  const clipResolved = new Promise((resolve) => {
+    releaseClip = resolve;
+  });
+  // The clip only finishes once the page fetch has started, so an overlap is the only way
+  // this turn completes at all — except for the timer, which is here so a serial pipeline
+  // fails the assertion below instead of hanging the suite forever.
+  const escapeHatch = setTimeout(() => releaseClip(), 1_000);
+  escapeHatch.unref?.();
+  let overlapped = false;
+
+  const fetchImpl = async (url, init) => {
+    if (String(url).startsWith("https://news.test/")) {
+      // The clip is still in flight at the moment the page fetch starts — which is the whole
+      // claim of this test. Asserted by construction rather than by a sleep: if the two
+      // stages were serial, this line would only run after the clip had already finished.
+      overlapped = true;
+      releaseClip();
+      return page(ARTICLE_HTML);
+    }
+    return {
+      ok: true,
+      status: 200,
+      body: (async function* () {
+        yield new TextEncoder().encode(
+          `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })}\n\n`,
+        );
+      })(),
+    };
+  };
+
+  const frames = [];
+  for await (const frame of streamChat({
+    apiKey: "k",
+    models: ["m"],
+    messages: [
+      {
+        role: "user",
+        content:
+          "Does https://www.tiktok.com/@a/video/7101234567890123456 match https://news.test/story ?",
+      },
+    ],
+    fetchImpl,
+    attachMedia: true,
+    attachPages: true,
+    articleOptions: { lookupImpl: publicLookup },
+    clipOptions: {
+      resolveImpl: async () => {
+        await clipResolved;
+        throw new ArticleError("the clip stage is not what this test is about.");
+      },
+    },
+  })) {
+    frames.push(frame);
+  }
+
+  clearTimeout(escapeHatch);
+  assert.ok(overlapped, "the page fetch began while the clip was still resolving");
+  const stages = frames.filter((f) => f.type === "stage").map((f) => f.stage);
+  // Both are still announced, and in the same order as before — the overlap is in when the
+  // work runs, not in what the reader is told about it.
+  assert.deepEqual(stages.slice(0, 2), ["attaching", "reading"]);
 });
 
 test("toGeminiContents relays a page that could not be read", () => {

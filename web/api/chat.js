@@ -180,6 +180,12 @@ export default async function handler(req, res) {
       // fetch safe and the fencing that keeps the page's own words from being read as
       // instructions.
       attachPages: true,
+      // Off by default in the library for the same reason the clip cache is — it is
+      // process-global state a stubbed test must not be answered from — and switched on
+      // here, where the deployment decision belongs. Without it a follow-up question about
+      // a pasted article re-fetched that article on every turn, because the conversation
+      // that mentions it is replayed on every request. See `ARTICLE_CACHE_TTL_MS`.
+      articleOptions: { cache: true },
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);

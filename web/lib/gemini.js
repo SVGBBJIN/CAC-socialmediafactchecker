@@ -1710,6 +1710,17 @@ export async function* streamChat({
     // Clips are fetched before the first model call, not per model: the bytes are the same
     // whichever model answers, and re-downloading them on each fall-through would turn one
     // slow link into four.
+    //
+    // Clips and pages are started together and awaited together. They used to run one after
+    // the other on the grounds that a message rarely holds both — but "rarely" is not
+    // "never", and the case where it does is exactly the expensive one: a reader pasting a
+    // clip *and* the page it is arguing about paid the download and then the page fetch end
+    // to end, in front of the first token, for two pieces of work that share nothing but the
+    // clock. Overlapping them costs the arrangement below and nothing else; each still
+    // records its own failures, and neither can fail the other.
+    let clipsPending = null;
+    let articlesPending = null;
+
     if (attachMedia) {
       // Announced before it starts, because it is the longest silence in the request and
       // the one the user has least reason to expect: resolving a post, downloading a clip
@@ -1722,19 +1733,17 @@ export async function* streamChat({
       ) {
         yield { type: "stage", stage: "attaching" };
       }
-      clips = await resolveClipParts(messages, {
+      clipsPending = resolveClipParts(messages, {
         apiKey,
         fetchImpl,
         signal,
         ...clipOptions,
       });
+      // A rejection reaching the event loop before the `await` below is an unhandled one,
+      // and the `await` is where it is actually reported. Same shape as the tool round.
+      clipsPending.catch(() => {});
     }
-    if (deadline.callerAborted) return;
 
-    // Pages are read after the clips rather than alongside them, and the ordering is not
-    // arbitrary: a message rarely contains both, and when it does the clip is the slow one
-    // — running them together would only overlap a two-second fetch with a thirty-second
-    // download while making the failure of either harder to read in the stage line.
     if (attachPages) {
       if (
         messages.some(
@@ -1743,8 +1752,15 @@ export async function* streamChat({
       ) {
         yield { type: "stage", stage: "reading" };
       }
-      articles = await resolveArticles(messages, { fetchImpl, signal, ...articleOptions });
+      articlesPending = resolveArticles(messages, { fetchImpl, signal, ...articleOptions });
+      articlesPending.catch(() => {});
     }
+
+    // Awaited in the order the stage lines were emitted, so a throw from either surfaces the
+    // way it did when they ran in series.
+    if (clipsPending) clips = await clipsPending;
+    if (deadline.callerAborted) return;
+    if (articlesPending) articles = await articlesPending;
     if (deadline.callerAborted) return;
 
     const contents = toGeminiContents(messages, { clips, articles, attachVideos: attachMedia });
