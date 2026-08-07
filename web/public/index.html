@@ -390,18 +390,54 @@
   [hidden] { display: none !important; }
   /* The platform pill that used to sit here (TikTok/Instagram/YouTube, badge-style) is
      gone — `.video-title` carries the post's own title now (see `titleFromMetadata` in
-     app.js), which says more about what's being checked than which app it came from did. */
-  .video-title { font-family: var(--font-display); font-size: 14.5px; color: var(--ink); line-height: 1.4; margin: 0 0 6px; word-break: break-word; }
-  .video-link { font-size: 11.5px; color: var(--accent); text-decoration: none; }
+     app.js), which says more about what's being checked than which app it came from did.
+
+     Its box is a fixed two lines regardless of what's actually in it — `-webkit-line-clamp`
+     stops a long caption from wrapping past that, `min-height` stops a short one (or the
+     pasted URL, before a caption has resolved) from taking less. `.video-thumb` below
+     derives its height from whatever's left over in the pane after this and `.video-link`
+     are laid out (see its own comment), so a title box that grew or shrank with its text
+     would mean the video visibly resizing every time the title changed under it — first
+     from the URL to a caption once one resolves, and there is no version of that
+     transition a reader should be able to see happen to the video. */
+  .video-title {
+    font-family: var(--font-display); font-size: 14.5px; color: var(--ink);
+    line-height: 1.4; margin: 0 0 6px; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; min-height: calc(1.4em * 2);
+  }
+  /* Same reasoning, one line instead of two — and kept in the flow even with nothing in
+     it (`.video-link.empty`, toggled in app.js) rather than `hidden`, which would remove
+     its box from layout and be one more way the space around the video changes size. */
+  .video-link {
+    display: block; font-size: 11.5px; color: var(--accent); text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-height: 1.4em;
+  }
   .video-link:hover { text-decoration: underline; }
+  .video-link.empty { visibility: hidden; }
 
   /* ---------- Claims feed ---------- */
   /* Its own scroll container now that `.content-grid` no longer is one (see that rule's
      comment) — `min-width: 0` is the usual flex-row fix so a long unbroken source URL
-     can't force this column wider than the video pane beside it. */
-  .claims-pane { flex: 1 1 auto; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+     can't force this column wider than the video pane beside it.
+     `min-height: 0` is the other half of making that scroll container actually scroll
+     instead of grow: a flex item's default `min-height` is `auto`, which means "at least
+     as tall as my content" — so without this, a long analysis would push `.claims-pane`
+     (and, since `align-items: stretch` on `.content-grid` ties the two together, the
+     video pane's own height and therefore its width, since the video derives width from
+     height — see `.video-thumb`) taller every time the answer grew, instead of scrolling
+     in place. That was the video player visibly resizing itself as an answer streamed in. */
+  .claims-pane { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
 
   .claim-card {
+    /* The single child `.claims-pane` ever has (every render path replaces the pane's
+       whole `innerHTML` with one card) — `flex: 1 1 auto` is what makes it reach the
+       bottom of the pane instead of floating near the top with bare dark space under it
+       on a short answer, while still growing past that on a long one, at which point
+       `.claims-pane`'s own `overflow-y: auto` above takes over rather than the video
+       pane's height doing anything at all. */
+    flex: 1 1 auto;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 14px;
@@ -979,6 +1015,7 @@
     .video-link {
       position: relative; z-index: 1;
       display: inline-block;
+      max-width: calc(100% - 28px); /* the base rule's ellipsis needs a bound to clip against */
       margin: 0 14px;
       padding: 3px 10px;
       border-radius: 100px;

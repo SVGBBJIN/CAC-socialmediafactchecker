@@ -1047,7 +1047,10 @@ function renderEmptyState() {
   el.videoTitle.textContent = "Paste a link below to start a check.";
   el.videoLink.href = "#";
   el.videoLink.textContent = "";
-  el.videoLink.hidden = true; // Nothing to open yet — an empty pill would just be a stray bar.
+  // `.empty` (visibility: hidden), not the `hidden` attribute — nothing to open yet, but
+  // its box still needs to hold the line's worth of height it always does, or that's one
+  // more way the space around the video pane's placeholder changes size. See the CSS.
+  el.videoLink.classList.add("empty");
   clearVideoMedia();
   renderChatPane();
   refreshTimeline();
@@ -1408,7 +1411,7 @@ function renderVideoTitle(entry) {
   el.videoTitle.textContent = entry.title;
   el.videoLink.href = entry.url;
   el.videoLink.textContent = `${truncate(entry.title, 60)} ↗`;
-  el.videoLink.hidden = false;
+  el.videoLink.classList.remove("empty");
 }
 
 function renderVideoPane(entry) {
