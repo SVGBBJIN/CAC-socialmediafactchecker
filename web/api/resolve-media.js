@@ -132,6 +132,13 @@ export default async function handler(req, res) {
         mimeType: resolved.mimeType,
         width: resolved.width,
         height: resolved.height,
+        // The post's own caption/author, same fields lib/tiktok.js and lib/instagram.js
+        // already resolve for the fact-check itself (see their `common` objects) — handed
+        // back here too so the video pane can title the post by what it actually is
+        // instead of by the link that was pasted. Either can be null; the client falls
+        // back to the URL exactly as it did before this field existed.
+        caption: resolved.caption ?? null,
+        authorName: resolved.authorName ?? null,
         // Handed back so the fact-check does not have to run this same resolve again a
         // second later. Opaque to the client: it is passed through untouched, and vetted
         // from scratch on the way in. See lib/resolve-hint.js.
@@ -151,6 +158,8 @@ export default async function handler(req, res) {
       width: resolved.width,
       height: resolved.height,
       // See the images branch above.
+      caption: resolved.caption ?? null,
+      authorName: resolved.authorName ?? null,
       hint: hintFromResolved({ ...resolved, mediaURL }),
     });
   } catch (error) {

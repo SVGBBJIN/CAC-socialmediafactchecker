@@ -17,6 +17,15 @@
 // of scrolling.
 
 import { watchDevice } from "./device.js";
+import {
+  TIMESTAMP_MARKER,
+  parseClock,
+  formatClock,
+  plainTimestamps,
+  timeline,
+  activeAt,
+} from "./timestamps.js";
+import { VERDICTS, splitVerdict, splitClaims, aggregateVerdictKey } from "./claims.js";
 
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
@@ -57,15 +66,6 @@ function youTubeVideoID(urlString) {
   return null;
 }
 
-const VERDICTS = {
-  contradicted: { label: "Contradicted", css: "bad" },
-  disputed: { label: "Disputed", css: "warn" },
-  corroborated: { label: "Corroborated", css: "good" },
-  insufficient: { label: "Insufficient evidence", css: "muted" },
-};
-
-const VERDICT_LINE = /\n?VERDICT:\s*(contradicted|disputed|corroborated|insufficient(?:\s+evidence)?)\.?\s*$/i;
-
 const el = {
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
@@ -73,7 +73,6 @@ const el = {
   libList: document.getElementById("libList"),
   searchInput: document.getElementById("searchInput"),
   claimsPane: document.getElementById("claimsPane"),
-  videoChip: document.getElementById("videoChip"),
   videoTitle: document.getElementById("videoTitle"),
   videoLink: document.getElementById("videoLink"),
   videoThumb: document.getElementById("videoThumb"),
@@ -81,6 +80,13 @@ const el = {
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
   videoImages: document.getElementById("videoImages"),
+  videoControls: document.getElementById("videoControls"),
+  playBtn: document.getElementById("playBtn"),
+  muteBtn: document.getElementById("muteBtn"),
+  fullscreenBtn: document.getElementById("fullscreenBtn"),
+  videoTimeline: document.getElementById("videoTimeline"),
+  timelineTrack: document.getElementById("timelineTrack"),
+  timelineProgress: document.getElementById("timelineProgress"),
   passDialog: document.getElementById("passphrase-dialog"),
   passForm: document.getElementById("passphrase-form"),
   passInput: document.getElementById("passphrase-input"),
@@ -106,6 +112,7 @@ const el = {
   imageChipRemove: document.getElementById("imageChipRemove"),
   micBtn: document.getElementById("micBtn"),
   sidebar: document.getElementById("sidebar"),
+  sidebarCollapseBtn: document.getElementById("sidebarCollapseBtn"),
   drawerToggle: document.getElementById("drawerToggle"),
   drawerScrim: document.getElementById("drawerScrim"),
   topbarSettingsBtn: document.getElementById("topbarSettingsBtn"),
@@ -129,6 +136,14 @@ let videoPaneToken = 0;
 let pendingFollowup = null; // { entryId, question, error? }
 let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check anyway"
 
+// The free-standing conversation shown while nothing is selected — no video, no verdict,
+// just a normal back-and-forth. It exists so the composer works like a chatbot before any
+// link has ever been checked, not only after: a pasted link is intercepted by the regex in
+// confirmAndRunCheck/normalizeLink and starts a real check instead of landing here. Not
+// persisted, same as pendingFollowup above — a reload starts the conversation over.
+let chatThread = []; // { question, answer, sources, incomplete }
+let pendingChat = null; // { question, error? }
+
 /* ---------------------------------------------------------------- settings */
 
 const SETTINGS_KEY = "seer.settings.v1";
@@ -138,6 +153,7 @@ const DEFAULT_SETTINGS = {
   fontSize: "normal", // "normal" | "large"
   showQuotes: true, // gates the per-source "Show quote" toggle in sourcesHTML
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
+  sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
 };
 
 function loadSettings() {
@@ -168,6 +184,13 @@ function applySettings() {
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
+  setAttrIf(root, "data-sidebar", settings.sidebarCollapsed, "collapsed");
+  if (el.sidebarCollapseBtn) {
+    const label = settings.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
+    el.sidebarCollapseBtn.setAttribute("aria-label", label);
+    el.sidebarCollapseBtn.setAttribute("aria-expanded", String(!settings.sidebarCollapsed));
+    el.sidebarCollapseBtn.title = label;
+  }
 }
 
 function setAttrIf(node, name, condition, value) {
@@ -697,8 +720,9 @@ async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
   }
   if (result.notALink && !hasExplicitScheme(raw)) {
     const question = raw.trim();
-    if (entry && question) {
-      runFollowup(entry, question);
+    if (question) {
+      if (entry) runFollowup(entry, question);
+      else runChat(question);
       return;
     }
   }
@@ -729,16 +753,50 @@ function linkCitations(html, sources) {
   });
 }
 
-/** Inline spans within one line: code, bold, italic, then citation markers. Order matters
- * — bold is matched before italic so a `**bold**` pair never leaves a stray `*` for the
- * italic pass to misfire on, and citations run last since `[n]` can sit inside any of the
- * above. */
-function renderInline(text, sources) {
+/**
+ * `[t=0:12]` and `[t=1:05-1:20]` as buttons that seek the video pane to that moment.
+ *
+ * `seekable` is what the pane can actually do with a click, decided once per card by
+ * `renderResultCard`: a TikTok/Instagram MP4 or a YouTube embed can be seeked, an article
+ * has nothing to seek. When it can't, the marker still renders — the model observed
+ * something at that moment and saying so is useful even with no player — it just renders as
+ * the plain clock `plainTimestamps` writes rather than as a control that would do nothing.
+ *
+ * `data-start`/`data-end` are the raw seconds, kept on the element because the playback
+ * highlight reads its windows straight back off the DOM (see `refreshTimeline`) rather than
+ * threading ids through the markup.
+ */
+function linkTimestamps(html, seekable) {
+  return html.replace(TIMESTAMP_MARKER, (raw, start, end) => {
+    const from = parseClock(start);
+    if (from == null) return raw;
+    const to = end == null ? null : parseClock(end);
+    const label = to != null && to > from ? `${formatClock(from)}–${formatClock(to)}` : formatClock(from);
+    if (!seekable) return `<span class="ts-chip static">${label}</span>`;
+    const endAttr = to != null && to > from ? ` data-end="${to}"` : "";
+    return (
+      `<button type="button" class="ts-chip" data-seek="${from}" data-start="${from}"${endAttr}` +
+      ` title="Play the video from ${formatClock(from)}" aria-label="Play the video from ${formatClock(from)}">` +
+      `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>` +
+      `${label}</button>`
+    );
+  });
+}
+
+/** Inline spans within one line: code, bold, italic, then timestamp and citation markers.
+ * Order matters — bold is matched before italic so a `**bold**` pair never leaves a stray
+ * `*` for the italic pass to misfire on, and the two marker passes run last since `[n]` and
+ * `[t=…]` can sit inside any of the above. The marker passes can't collide with each other:
+ * one matches digits alone, the other only a `t=` clock. */
+function renderInline(text, sources, seekable) {
   return linkCitations(
-    escapeHTML(text)
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>"),
+    linkTimestamps(
+      escapeHTML(text)
+        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>"),
+      seekable,
+    ),
     sources,
   );
 }
@@ -753,7 +811,7 @@ function renderInline(text, sources) {
  * real `<ul>`/`<ol>`, `#`-prefixed lines into a small heading, and `> ` lines into a
  * blockquote, while leaving ordinary prose exactly as it rendered before.
  */
-function renderBlock(text, sources) {
+function renderBlock(text, sources, seekable) {
   const lines = text.split("\n");
   const html = [];
   let list = null; // { tag: "ul" | "ol", items: string[] }
@@ -761,12 +819,14 @@ function renderBlock(text, sources) {
 
   const flushPara = () => {
     if (para.length === 0) return;
-    html.push(renderInline(para.join("\n"), sources).replace(/\n/g, "<br>"));
+    html.push(renderInline(para.join("\n"), sources, seekable).replace(/\n/g, "<br>"));
     para = [];
   };
   const flushList = () => {
     if (!list) return;
-    html.push(`<${list.tag}>${list.items.map((item) => `<li>${renderInline(item, sources)}</li>`).join("")}</${list.tag}>`);
+    html.push(
+      `<${list.tag}>${list.items.map((item) => `<li>${renderInline(item, sources, seekable)}</li>`).join("")}</${list.tag}>`,
+    );
     list = null;
   };
 
@@ -788,13 +848,13 @@ function renderBlock(text, sources) {
     const header = /^#{1,4}\s+(.*)$/.exec(line);
     if (header) {
       flushPara();
-      html.push(`<h4>${renderInline(header[1], sources)}</h4>`);
+      html.push(`<h4>${renderInline(header[1], sources, seekable)}</h4>`);
       continue;
     }
     const quote = /^>\s?(.*)$/.exec(line);
     if (quote) {
       flushPara();
-      html.push(`<blockquote>${renderInline(quote[1], sources)}</blockquote>`);
+      html.push(`<blockquote>${renderInline(quote[1], sources, seekable)}</blockquote>`);
       continue;
     }
     if (line.trim() === "") {
@@ -808,7 +868,7 @@ function renderBlock(text, sources) {
   return html.join("");
 }
 
-function renderMarkdown(text, sources) {
+function renderMarkdown(text, sources, seekable = false) {
   const segments = text.split(/```/);
   return segments
     .map((segment, index) => {
@@ -819,17 +879,9 @@ function renderMarkdown(text, sources) {
       let plain = segment;
       if (index > 0) plain = plain.replace(/^\n+/, "");
       if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
-      return renderBlock(plain, sources);
+      return renderBlock(plain, sources, seekable);
     })
     .join("");
-}
-
-/** Pulls the trailing `VERDICT: …` line the initial prompt asks for off the answer text. */
-function splitVerdict(answer) {
-  const match = answer.match(VERDICT_LINE);
-  if (!match) return { text: answer, verdictKey: null };
-  const key = match[1].toLowerCase().replace(/\s+evidence$/, "");
-  return { text: answer.slice(0, match.index).trimEnd(), verdictKey: VERDICTS[key] ? key : null };
 }
 
 /**
@@ -973,13 +1025,122 @@ function selectEntry(id) {
   updateComposerMode();
 }
 
-/** The un-started state: nothing selected, video pane and claims pane both blank. */
+/** The un-started state: nothing selected, video pane blank. The claims pane isn't
+ * necessarily blank — it shows `chatThread` if a conversation is already under way. */
 function renderEmptyState() {
-  el.videoChip.textContent = "No link yet";
   el.videoTitle.textContent = "Paste a link below to start a check.";
   el.videoLink.href = "#";
+  el.videoLink.textContent = "";
+  // `.empty` (visibility: hidden), not the `hidden` attribute — nothing to open yet, but
+  // its box still needs to hold the line's worth of height it always does, or that's one
+  // more way the space around the video pane's placeholder changes size. See the CSS.
+  el.videoLink.classList.add("empty");
   clearVideoMedia();
-  el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page.</p></div>`;
+  renderChatPane();
+  refreshTimeline();
+}
+
+/** One chat turn's markup, the same shape as an entry's follow-up thread item — see
+ * `threadHTML` — but with no `entry` behind it. */
+function chatThreadHTML(newestIndex) {
+  return chatThread
+    .map((c, index) => {
+      const animate = index === newestIndex;
+      return `
+        <div class="thread-item">
+          <div class="thread-q">${escapeHTML(c.question)}</div>
+          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
+          ${incompleteHTML(c.incomplete, animate)}
+          ${sourcesHTML(c.sources, animate)}
+        </div>`;
+    })
+    .join("");
+}
+
+/**
+ * The claims pane while nothing is selected: past chat turns, plus one in flight or
+ * freshly failed, or — with no conversation yet — the original placeholder now widened to
+ * mention that a plain question works too.
+ */
+function renderChatPane({ newest = -1 } = {}) {
+  const settled = chatThreadHTML(newest);
+  const pending = pendingChat
+    ? `
+      <div class="thread-item">
+        <div class="thread-q">${escapeHTML(pendingChat.question)}</div>
+        ${
+          pendingChat.error
+            ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
+            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus">Thinking…</span></div>`
+        }
+      </div>`
+    : "";
+
+  if (!settled && !pending) {
+    el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page — or just ask a question.</p></div>`;
+    return;
+  }
+  el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
+  // Each answer's own markup carries `data-reveal` (see chatThreadHTML/revealAttrs) rather
+  // than a baked-in `.in` class, same as renderResultCard's — so it needs the same call to
+  // actually fade in instead of sitting at the `opacity: 0` `.claim-text`/`.thread-a` starts
+  // at.
+  revealIn(el.claimsPane);
+}
+
+/**
+ * A conversational turn with no link involved — no video, no verdict, just an answer.
+ * Mirrors `runFollowup`'s shape (history replay, pending/settled bookkeeping) but against
+ * `chatThread` rather than an entry's `followups`, since there is no entry: this is what
+ * "just ask a question" does before any link has ever been checked.
+ */
+async function runChat(question) {
+  if (inFlight) return;
+
+  pendingChat = { question, error: null };
+  el.linkInput.value = "";
+  const image = pendingImage;
+  clearPendingImage();
+  renderChatPane();
+  updateComposerMode();
+
+  const controller = new AbortController();
+  inFlight = controller;
+  el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
+  let settled = false;
+
+  try {
+    const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
+    const history = chatThread.flatMap((c) => [
+      { role: "user", content: c.question },
+      { role: "assistant", content: c.answer },
+    ]);
+    const { answer, sources, incomplete } = await streamChat([...history, message], {
+      signal: controller.signal,
+      onStage: (frame) => {
+        const status = document.getElementById("chatStatus");
+        if (status) status.textContent = stageText(frame);
+      },
+    });
+    chatThread.push({ question, answer, sources, incomplete });
+    settled = true;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      pendingChat = null;
+      return;
+    }
+    // Left as the pending item, with its error — not pushed into `chatThread`, since a
+    // turn with no real answer would corrupt the history the next question replays.
+    pendingChat = { question, error: error.message };
+  } finally {
+    if (settled) pendingChat = null;
+    inFlight = null;
+    el.checkBtn.disabled = false;
+    el.newCheckBtn.disabled = false;
+    if (!selectedId) renderChatPane({ newest: settled ? chatThread.length - 1 : -1 });
+    updateComposerMode();
+  }
 }
 
 /**
@@ -995,6 +1156,8 @@ function startNewCheck() {
   closeDrawer({ restoreFocus: false });
   selectedId = null;
   pendingFollowup = null;
+  chatThread = [];
+  pendingChat = null;
   el.linkInput.value = "";
   renderLibrary(el.searchInput.value);
   renderEmptyState();
@@ -1034,6 +1197,27 @@ function clearVideoMedia() {
   el.videoThumb.querySelector(".image-count")?.remove();
   el.videoPlaceholder.hidden = false;
   setVideoAspect(DEFAULT_VIDEO_ASPECT);
+  // A seek asked for against the media being torn down here has nothing left to land on,
+  // and the chip it lit belongs to a card that may already have been replaced.
+  pendingSeek = null;
+  setPlayerChromeVisible(false);
+  syncPlayhead();
+}
+
+/**
+ * The custom mute/fullscreen buttons and the claim timeline both answer to the same
+ * `<video>` element, so both come and go together — visible only for a direct MP4
+ * (TikTok/Instagram), hidden for the YouTube embed (draws its own chrome; its clock isn't
+ * readable from this page either, see `syncPlayhead`), an image carousel (nothing to
+ * play), and the empty/placeholder state.
+ */
+function setPlayerChromeVisible(visible) {
+  el.videoControls.hidden = !visible;
+  el.videoTimeline.hidden = !visible;
+  if (!visible) {
+    el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+    el.timelineProgress.style.width = "0%";
+  }
 }
 
 /**
@@ -1091,6 +1275,15 @@ function showVideoElement(media) {
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
   el.videoPlayer.hidden = false;
   el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
+  setPlayerChromeVisible(true);
+  // Muted is the element's own starting attribute and this button's assumed starting
+  // state (see the CSS) — a new entry's video should never inherit "unmuted" from
+  // whatever the reader last clicked on a different check.
+  el.videoPlayer.muted = true;
+  el.muteBtn.classList.remove("unmuted");
+  el.muteBtn.setAttribute("aria-pressed", "false");
+  el.muteBtn.setAttribute("aria-label", "Unmute");
+  el.muteBtn.title = "Unmute";
 }
 
 /** Shorts are vertical, everything else on YouTube is 16:9 — there's no dimension field
@@ -1108,7 +1301,12 @@ function showYouTubeEmbed(videoID, aspect) {
   setVideoAspect(aspect);
   // youtube-nocookie.com: this is a fact-check tool, not a place that should be dropping
   // YouTube's regular tracking cookies on every pasted link.
-  el.videoEmbed.src = `https://www.youtube-nocookie.com/embed/${videoID}?rel=0`;
+  //
+  // `enablejsapi=1` is what lets a claim's timestamp chip seek this embed: it opens the
+  // `postMessage` command channel `seekVideoTo` uses. It does not load any YouTube script
+  // into this page — the API surface it enables lives inside the iframe, which is the whole
+  // reason the chips can drive the embed without a third-party script tag on every check.
+  el.videoEmbed.src = `https://www.youtube-nocookie.com/embed/${videoID}?rel=0&enablejsapi=1`;
   el.videoEmbed.hidden = false;
 }
 
@@ -1130,7 +1328,7 @@ async function loadDirectMedia(entry, token) {
       body: JSON.stringify({ url: entry.url }),
     });
     if (!response.ok) return; // Placeholder icon stands in — a dead CDN link isn't fatal to the check.
-    const { mediaURL, images, width, height } = await response.json();
+    const { mediaURL, images, width, height, caption, authorName } = await response.json();
     // A photo post has no single URL to play; it has a list of stills. Either way the
     // fact-check itself already has what it needs — this pane is only the picture of it.
     const media = images?.length
@@ -1141,10 +1339,47 @@ async function loadDirectMedia(entry, token) {
     if (!media) return;
     mediaCache.set(entry.id, media);
     if (token === videoPaneToken) showResolvedMedia(media);
+    applyPostTitle(entry, titleFromMetadata(caption, authorName), token);
   } catch {
     // Network hiccup or the passphrase dialog intercepting — the rest of the pane (title,
     // link, and the fact-check itself) doesn't depend on this succeeding.
   }
+}
+
+/** How much of a caption reads as a title rather than a wall of text — long enough to be
+ * a real sentence, short enough not to dominate a pane that also has an analysis to show. */
+const MAX_TITLE_CHARS = 140;
+
+/**
+ * What the post is actually called, so the pane can stop naming it by the link that was
+ * pasted the moment the resolve gives us something better.
+ *
+ * The caption's first non-blank line, not the whole thing: TikTok and Instagram captions
+ * commonly run a sentence into a paragraph of hashtags on the next line, and a heading
+ * that included those would read as noise, not a title. Falls back to the creator's handle
+ * when there's no caption at all (plenty of posts have none), and to `null` — meaning
+ * "nothing better than the URL" — only when neither is available, which leaves
+ * `entry.title` exactly as `runCheck` set it.
+ */
+function titleFromMetadata(caption, authorName) {
+  const firstLine = caption
+    ?.split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstLine) return truncate(firstLine, MAX_TITLE_CHARS);
+  return authorName ? `A post by @${authorName}` : null;
+}
+
+/** Swaps a checked entry's title for the one its own metadata gave it, everywhere the old
+ * one (the pasted URL) was showing: the pane heading, the "open original" link, and the
+ * library row. A no-op when the resolve had nothing better, or when the pane has since
+ * moved on to a different entry. */
+function applyPostTitle(entry, title, token) {
+  if (!title || title === entry.title) return;
+  entry.title = title;
+  persistLibrary();
+  renderLibrary(el.searchInput.value);
+  if (token === videoPaneToken) renderVideoTitle(entry);
 }
 
 /**
@@ -1157,10 +1392,19 @@ async function loadDirectMedia(entry, token) {
 const PLAY_GLYPH = "M8 5v14l11-7z";
 const PAGE_GLYPH = "M14 2H7a1 1 0 00-1 1v18a1 1 0 001 1h10a1 1 0 001-1V6zm-1 5V3l5 5h-4a1 1 0 01-1-1z";
 
-function renderVideoPane(entry) {
-  el.videoChip.textContent = entry.platform;
+/** The heading and the "open original" link both read off `entry.title` — the platform
+ * pill used to carry the "what is this" job on its own; now that it's gone (see
+ * renderVideoPane), the title is the only label the pane gives the post, so both places
+ * that show one show the same text. */
+function renderVideoTitle(entry) {
   el.videoTitle.textContent = entry.title;
   el.videoLink.href = entry.url;
+  el.videoLink.textContent = `${truncate(entry.title, 60)} ↗`;
+  el.videoLink.classList.remove("empty");
+}
+
+function renderVideoPane(entry) {
+  renderVideoTitle(entry);
   el.videoPlaceholder
     .querySelector("path")
     ?.setAttribute("d", SUPPORTED_PLATFORMS.has(entry.platform) ? PLAY_GLYPH : PAGE_GLYPH);
@@ -1179,6 +1423,170 @@ function renderVideoPane(entry) {
     mediaCache.set(entry.id, { kind: "youtube", videoID, aspect });
     showYouTubeEmbed(videoID, aspect);
   }
+}
+
+/* ------------------------------------------------- timestamps ⟷ the video pane */
+
+// The claim chips currently on screen, as playback windows sorted by start — the output of
+// `timeline`, with each item carrying the chip element it came from. Rebuilt from the DOM
+// every time the card is re-rendered, because a re-render replaces every node and any
+// element held from before it is a reference to something no longer in the document.
+let claimWindows = [];
+// The window whose chip is lit right now, so `timeupdate` — which fires several times a
+// second — only touches the DOM when the answer actually changes.
+let activeWindow = null;
+// A seek asked for before the media could accept one. Setting `currentTime` on an element
+// that hasn't loaded metadata yet is either ignored or an InvalidStateError depending on
+// the engine, and the click that asked for it is exactly the click most likely to land
+// early: the reader hit a chip the moment the answer appeared, while the CDN is still
+// being resolved. Applied by the `loadedmetadata` handler instead.
+let pendingSeek = null;
+
+/** Whether a chip clicked in this entry's answer has anywhere to seek to. */
+function seekableEntry(entry) {
+  return Boolean(entry && SUPPORTED_PLATFORMS.has(entry.platform));
+}
+
+/**
+ * Re-read the claim chips out of the card and rebuild the playback windows.
+ *
+ * The DOM is the source of truth here rather than a parallel array built at render time:
+ * the chips are written by `linkTimestamps` from inside a string of markup, they appear in
+ * the analysis *and* in every follow-up, and reading them back is the one way to be sure
+ * the windows and the elements can't drift apart.
+ */
+function refreshTimeline() {
+  const chips = [...el.claimsPane.querySelectorAll(".ts-chip[data-start]")];
+  claimWindows = timeline(
+    chips.map((node) => ({
+      node,
+      start: Number(node.dataset.start),
+      end: node.dataset.end ? Number(node.dataset.end) : null,
+    })),
+  );
+  activeWindow = null;
+  renderTimelineTrack();
+  syncPlayhead();
+}
+
+/**
+ * The yellow bands on the scrubber, one per claim window — the same `claimWindows`
+ * `refreshTimeline` just rebuilt from the in-text `[t=…]` chips, laid out on the track by
+ * fraction of `duration` instead of by fraction of the answer's text. Needs a real,
+ * finite `duration` to place anything on a 0–100% scale, which for a freshly-resolved clip
+ * isn't known yet — `loadedmetadata` calls this again once it is.
+ */
+function renderTimelineTrack() {
+  el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+  const duration = el.videoPlayer.duration;
+  if (el.videoTimeline.hidden || !Number.isFinite(duration) || duration <= 0) return;
+
+  for (const window of claimWindows) {
+    const mark = document.createElement("div");
+    mark.className = "video-timeline-mark";
+    const left = Math.min(100, (window.from / duration) * 100);
+    const width = Math.max(0.6, ((Math.min(window.to, duration) - window.from) / duration) * 100);
+    mark.style.left = `${left}%`;
+    mark.style.width = `${width}%`;
+    // Carries the same node the in-text chip highlighting already tracks, so a claim
+    // lighting up moves both the chip in the answer and its band on the scrubber from one
+    // `activeWindow` assignment in `syncPlayhead` — never two sources of "which claim".
+    window.trackNode = mark;
+    el.timelineTrack.appendChild(mark);
+  }
+}
+
+/**
+ * Light up the claim the video is currently on — its chip in the answer text and its band
+ * on the scrubber, both — and only that one. Also keeps the scrubber's progress fill
+ * moving; called on every `timeupdate`, so this is the one place both live.
+ *
+ * Direct MP4 only. A YouTube post plays inside an `<iframe>` whose current time this page
+ * cannot read without loading YouTube's own player script, and that is a third-party script
+ * on every check for one highlight — the chips there still seek (`seekTo` via postMessage),
+ * they just don't light up on their own, and the scrubber doesn't appear at all (see
+ * `setPlayerChromeVisible`).
+ */
+function syncPlayhead() {
+  const playing = !el.videoPlayer.hidden && el.videoPlayer.src;
+  const duration = el.videoPlayer.duration;
+  if (playing && Number.isFinite(duration) && duration > 0) {
+    const percent = Math.min(100, (el.videoPlayer.currentTime / duration) * 100);
+    el.timelineProgress.style.width = `${percent}%`;
+    el.timelineTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+  }
+
+  const next = playing ? activeAt(claimWindows, el.videoPlayer.currentTime) : null;
+  if (next === activeWindow) return;
+  activeWindow?.node.classList.remove("playing");
+  activeWindow?.trackNode?.classList.remove("playing");
+  next?.node.classList.add("playing");
+  next?.trackNode?.classList.add("playing");
+  activeWindow = next;
+}
+
+/**
+ * Send the video pane to a moment in the post.
+ *
+ * The two players answer to different things and neither is optional: TikTok and Instagram
+ * are a plain MP4 in our own `<video>`, and YouTube is an embed that only takes commands
+ * over `postMessage`. A photo carousel and an article have no clock at all, so the chips
+ * were never rendered as buttons for them — this only ever runs for a post that has one.
+ */
+function seekVideoTo(seconds) {
+  const target = Math.max(0, Number(seconds) || 0);
+
+  if (!el.videoPlayer.hidden && el.videoPlayer.src) {
+    // `duration` is NaN until metadata lands, which is the same moment `readyState` stops
+    // being 0 — so the clamp and the deferral are the same condition seen twice.
+    if (el.videoPlayer.readyState === 0 || !Number.isFinite(el.videoPlayer.duration)) {
+      pendingSeek = target;
+      return true;
+    }
+    applySeek(target);
+    return true;
+  }
+
+  if (!el.videoEmbed.hidden && el.videoEmbed.src && el.videoEmbed.src !== "about:blank") {
+    // The embed is loaded with `enablejsapi=1` (see `showYouTubeEmbed`), which is what makes
+    // this command channel exist. Origin-targeted rather than `*`: this is a seek, not a
+    // secret, but there is no reason to broadcast it to whatever else might be listening.
+    el.videoEmbed.contentWindow?.postMessage(
+      JSON.stringify({ event: "command", func: "seekTo", args: [target, true] }),
+      "https://www.youtube-nocookie.com",
+    );
+    el.videoEmbed.contentWindow?.postMessage(
+      JSON.stringify({ event: "command", func: "playVideo", args: [] }),
+      "https://www.youtube-nocookie.com",
+    );
+    return true;
+  }
+
+  return false;
+}
+
+function applySeek(seconds) {
+  const duration = el.videoPlayer.duration;
+  // A model that timestamps past the end of the clip (it happens — it is reading its own
+  // sense of the video's length, not a clock) would otherwise seek to the end and stop.
+  // Landing just inside the last second at least plays something.
+  el.videoPlayer.currentTime = Number.isFinite(duration) ? Math.min(seconds, Math.max(0, duration - 0.1)) : seconds;
+  el.videoPlayer.play().catch(() => {}); // Same as autoplay: a refusal is not an error here.
+  syncPlayhead();
+}
+
+/**
+ * Bring the player into view before it starts playing at the moment that was asked for.
+ *
+ * On the phone layout the video is a full-bleed backdrop behind a bottom sheet (see the CSS)
+ * and a chip tapped low in a long answer can be scrolled well past it — seeking a player
+ * that is off screen looks like the tap did nothing at all.
+ */
+function revealPlayer() {
+  el.videoThumb.scrollIntoView({
+    behavior: prefersReducedMotion() ? "auto" : "smooth",
+    block: "nearest",
+  });
 }
 
 /* ---------------------------------------------------------------- claim card */
@@ -1209,6 +1617,7 @@ function renderRunningCard() {
         <div class="source-counter" id="runCounter">&nbsp;</div>
       </div>
     </div>`;
+  refreshTimeline();
 }
 
 function renderErrorCard(entry) {
@@ -1218,6 +1627,7 @@ function renderErrorCard(entry) {
       <p class="claim-text in">${escapeHTML(entry.error || "Something went wrong.")}</p>
       <button type="button" class="retry-button" id="retryBtn">Try again</button>
     </div>`;
+  refreshTimeline();
   document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
 }
 
@@ -1237,20 +1647,27 @@ function incompleteHTML(incomplete, animate) {
     </div>`;
 }
 
-/**
- * The verdict badge, or nothing.
- *
- * Nothing when the turn is incomplete and no `VERDICT:` line was parsed off it — see the
- * note in `runCheck`. A badge is the app asserting the check's finding, and there is no
- * finding to assert when the answer stopped before it got to one.
- */
-function verdictHTML(entry, animate) {
-  if (entry.incomplete && !entry.verdictKey) return "";
-  const verdict = VERDICTS[entry.verdictKey] ?? VERDICTS.insufficient;
+/** The badge markup for one verdict key, or nothing for a key with no matching verdict —
+ * shared by the whole-answer badge below and each claim's own badge in the split-panes
+ * layout (see `claimPanesHTML`). */
+function badgeHTML(verdictKey, animate) {
+  const verdict = VERDICTS[verdictKey];
+  if (!verdict) return "";
   return `
     <div class="badges">
       <span ${revealAttrs(`badge verdict ${verdict.css}`, animate)}>${escapeHTML(verdict.label)}</span>
     </div>`;
+}
+
+/**
+ * The whole-answer verdict badge, for a check `splitClaims` found no claim blocks in — see
+ * `renderResultCard`. Nothing when the turn is incomplete and no `VERDICT:` line was parsed
+ * off it — see the note in `runCheck`. A badge is the app asserting the check's finding, and
+ * there is no finding to assert when the answer stopped before it got to one.
+ */
+function verdictHTML(entry, animate) {
+  if (entry.incomplete && !entry.verdictKey) return "";
+  return badgeHTML(entry.verdictKey ?? "insufficient", animate);
 }
 
 /**
@@ -1278,12 +1695,30 @@ function sourceItemHTML(s) {
     </div>`;
 }
 
+/**
+ * The sources block, collapsed by default behind a "Sources (N)" toggle — same idea as a
+ * per-source "Show quote" (see `sourceItemHTML`), one level up. A dozen sources printed in
+ * full under every answer was the thing most likely to push the answer itself below the
+ * fold; folded by default, the count is still the first thing read, and the list is one
+ * click away rather than gone.
+ *
+ * `.sources`'s own grid-rows animation (via `revealAttrs`) is the *arrival* transition —
+ * it plays once, when the turn first lands. This toggle is a second, independent state
+ * layered on top of that, which is why it's a plain `hidden` attribute on `.sources-body`
+ * rather than folded into the same animation: the two have nothing to do with each other,
+ * and conflating them would mean an already-read answer replaying its entrance every time
+ * a reader opens the list.
+ */
 function sourcesHTML(sources, animate) {
   if (!sources?.length) return "";
+  const count = `${sources.length} source${sources.length === 1 ? "" : "s"}`;
   return `
     <div ${revealAttrs("sources", animate)}>
-      <div class="sources-body">
-        <div class="sources-label">Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}</div>
+      <button type="button" class="sources-toggle" data-sources-toggle aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Checked against ${count}</span>
+      </button>
+      <div class="sources-body" hidden>
         ${sources.map(sourceItemHTML).join("")}
       </div>
     </div>`;
@@ -1329,6 +1764,18 @@ function flashActionFeedback(row, message) {
 /** One delegated handler for everything a reader can click inside a rendered answer:
  * expanding a citation quote, or acting on the answer itself. */
 async function handleClaimsPaneClick(event) {
+  const chip = event.target.closest(".ts-chip[data-seek]");
+  if (chip) {
+    revealPlayer();
+    // A chip that can't reach a player says so on itself rather than in a status line
+    // somewhere else — most often the CDN URL never resolved, so the pane is still the
+    // placeholder triangle and there is nothing to seek.
+    const ok = seekVideoTo(Number(chip.dataset.seek));
+    chip.classList.toggle("dead", !ok);
+    if (!ok) chip.title = "The video isn't loaded, so there's nothing to jump to";
+    return;
+  }
+
   const quoteToggle = event.target.closest("[data-quote-toggle]");
   if (quoteToggle) {
     const quote = quoteToggle.nextElementSibling;
@@ -1338,14 +1785,26 @@ async function handleClaimsPaneClick(event) {
     return;
   }
 
+  const sourcesToggle = event.target.closest("[data-sources-toggle]");
+  if (sourcesToggle) {
+    const body = sourcesToggle.nextElementSibling;
+    const show = body.hidden;
+    body.hidden = !show;
+    sourcesToggle.setAttribute("aria-expanded", String(show));
+    return;
+  }
+
   const btn = event.target.closest(".action-btn");
   if (!btn) return;
   const row = btn.closest(".action-row");
   const entry = row ? findEntry(row.dataset.entryId) : null;
   if (!entry) return;
   const followupIndex = row.dataset.followupIndex != null ? Number(row.dataset.followupIndex) : null;
-  const text = followupIndex == null ? entry.answer : entry.followups[followupIndex]?.answer;
-  if (text == null) return;
+  const stored = followupIndex == null ? entry.answer : entry.followups[followupIndex]?.answer;
+  if (stored == null) return;
+  // `[t=0:12]` is this app's own syntax for a control that exists on this screen and
+  // nowhere else. Copied or shared, it should read as what it means: a moment in the clip.
+  const text = plainTimestamps(stored);
 
   const action = btn.dataset.action;
   if (action === "copy") {
@@ -1387,6 +1846,7 @@ async function handleClaimsPaneClick(event) {
 
 /** Past follow-ups, plus one in flight or freshly failed, as a thread under the analysis. */
 function threadHTML(entry, newestIndex) {
+  const seekable = seekableEntry(entry);
   const settled = entry.followups
     .map((f, index) => {
       // Only the answer that just landed animates; the ones above it are already read.
@@ -1394,7 +1854,7 @@ function threadHTML(entry, newestIndex) {
       return `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(f.question)}</div>
-          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources)}</div>
+          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
           ${incompleteHTML(f.incomplete, animate)}
           ${actionRowHTML(entry.id, index)}
           ${sourcesHTML(f.sources, animate)}
@@ -1428,11 +1888,44 @@ function threadHTML(entry, newestIndex) {
  * @param newestFollowup index of a follow-up that has just landed and should animate in,
  *   or -1 for none.
  */
+/**
+ * One `.claim-card` per claim `entry.claims` holds, instead of the single card every
+ * answer used to be — see `splitClaims`. The parts of the check that aren't per-claim data
+ * (the incomplete notice, copy/share/like, the sources ledger, the follow-up thread) aren't
+ * given a card of their own; they're appended to the last claim's pane, the same place
+ * they'd read as "the end of the analysis" when there was only one card to put them in.
+ */
+function claimPanesHTML(entry, animate, newestFollowup) {
+  const { claims } = entry;
+  return claims
+    .map((claim, index) => {
+      const isLast = index === claims.length - 1;
+      const eyebrow = claims.length > 1 ? `Claim ${index + 1} of ${claims.length}` : "Claim checked";
+      const footer = isLast
+        ? `${incompleteHTML(entry.incomplete, animate)}
+           ${actionRowHTML(entry.id, null)}
+           ${sourcesHTML(entry.sources, animate)}
+           ${threadHTML(entry, newestFollowup)}`
+        : "";
+      return `
+        <div class="claim-card claim-pane">
+          <div class="eyebrow">${escapeHTML(eyebrow)}</div>
+          <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+          <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
+          ${badgeHTML(claim.verdictKey, animate)}
+          ${footer}
+        </div>`;
+    })
+    .join("");
+}
+
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
-  el.claimsPane.innerHTML = `
+  el.claimsPane.innerHTML = entry.claims
+    ? claimPanesHTML(entry, animateAnalysis, newestFollowup)
+    : `
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
-      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources)}</div>
+      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
@@ -1440,6 +1933,9 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       ${threadHTML(entry, newestFollowup)}
     </div>`;
   revealIn(el.claimsPane);
+  // After the markup, not before: the windows are read back off the chips this render just
+  // wrote, and the ones from the previous render point at nodes that no longer exist.
+  refreshTimeline();
 }
 
 /* ---------------------------------------------------------------- streaming */
@@ -1607,12 +2103,21 @@ function incompleteFrom({ truncated, failure }) {
  * noun — the job, and the verdict line the app parses, are the same either way.
  */
 function composeCheckPrompt(url) {
-  const subject = SUPPORTED_PLATFORMS.has(platformFor(url)) ? "video" : "page";
+  const isVideo = SUPPORTED_PLATFORMS.has(platformFor(url));
+  const subject = isVideo ? "video" : "page";
+  // Asked for only when there is a player to seek. On an article the marker would be a
+  // timestamp of nothing — the model has no clock to read, so inviting one is inviting an
+  // invented one.
+  const timestamps = isVideo
+    ? "Mark each claim with when it happens in the video, as `[t=M:SS]` (or `[t=M:SS-M:SS]` " +
+      "for a stretch) written immediately after the claim. Use the video's own clock, and " +
+      "only for moments you actually observed — no guesses.\n\n"
+    : "";
   return withCustomInstructions(
     `Fact-check this ${subject}: ${url}\n\n` +
-      "List the distinct factual claims it makes, check each one, and explain what the evidence " +
-      "shows. Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
-      "|Insufficient evidence>` summarizing the main claim — no other text on that line.",
+      "List the distinct factual claims it makes and check each one, using the CLAIM " +
+      `STRUCTURE from the system prompt — one \`[[claim: …]]\` block per claim, each ` +
+      `ending in its own VERDICT line. ${timestamps}`,
   );
 }
 
@@ -1690,17 +2195,22 @@ async function runCheck(url, existingId, hint) {
     });
 
     const { text, verdictKey } = splitVerdict(answer);
+    const claims = splitClaims(answer);
     entry.status = "done";
-    entry.rawAnswer = answer; // kept whole, VERDICT line included — history needs it verbatim
+    entry.rawAnswer = answer; // kept whole, VERDICT line(s) included — history needs it verbatim
     entry.answer = text;
+    entry.claims = claims; // null (render as one card, see renderResultCard), or one block per claim
     entry.sources = sources;
     entry.incomplete = incomplete;
     // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
     // would then stamp it "Insufficient evidence" — a finding, in the app's own voice, that
     // the model never made and the reader has no way to tell from one it did. Left null when
     // the turn is known to be incomplete; the notice above the card says what happened
-    // instead, which is the true answer to "why is there no verdict".
-    entry.verdictKey = verdictKey ?? (incomplete ? null : "insufficient");
+    // instead, which is the true answer to "why is there no verdict". Same reasoning for the
+    // aggregate: see `aggregateVerdictKey`.
+    entry.verdictKey = claims
+      ? aggregateVerdictKey(claims) ?? (incomplete ? null : "insufficient")
+      : verdictKey ?? (incomplete ? null : "insufficient");
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) {
@@ -1789,22 +2299,26 @@ async function runFollowup(entry, question) {
  * surprise on submit.
  */
 function setCheckBtnLabel(label) {
-  // The button is icon-only on phones (CSS) but keeps its text — visually on wider
-  // layouts, screen-reader-only via the visually-hidden span on phones — so this one
-  // setter has to reach both without knowing which layout is active.
+  // The button is icon-only at every width (CSS); the text lives on in the visually-hidden
+  // span so "Ask" vs. "Check" still reaches a screen reader.
   el.checkBtn.querySelector(".check-btn-label").textContent = label;
   el.checkBtn.setAttribute("aria-label", label);
+  // A mouse hovering an icon-only button (imageBtn/micBtn get this from a static `title`
+  // in the markup; this one has to stay live) deserves the same tooltip a touch/VO user
+  // gets from aria-label.
+  el.checkBtn.setAttribute("title", label);
 }
 
 function updateComposerMode() {
   const entry = selectedDoneEntry();
-  if (!entry) {
-    setCheckBtnLabel("Check");
-    el.linkInput.placeholder = "Paste a video or article link…";
-    return;
-  }
   const asking = looksLikeFollowup(el.linkInput.value);
   setCheckBtnLabel(asking ? "Ask" : "Check");
+  if (!entry) {
+    el.linkInput.placeholder = asking
+      ? "Ask a question…"
+      : "Paste a video or article link, or just ask a question…";
+    return;
+  }
   el.linkInput.placeholder = asking
     ? "Ask a follow-up…"
     : `Ask a follow-up about "${truncate(entry.title, 44)}", or paste a new link…`;
@@ -1922,13 +2436,17 @@ function initSpeechToText() {
 el.checkBtn.addEventListener("click", () => {
   const entry = selectedDoneEntry();
   const raw = el.linkInput.value;
-  if (entry && looksLikeFollowup(raw)) {
-    const question = raw.trim();
-    if (question) runFollowup(entry, question);
+  const url = normalizeLink(raw);
+  if (url) {
+    confirmAndRunCheck(url, { entry, raw });
     return;
   }
-  const url = normalizeLink(raw);
-  if (url) confirmAndRunCheck(url, { entry, raw });
+  // Not link-shaped: an ordinary chat turn, on the selected check if there is one open,
+  // otherwise the free-standing conversation (see runChat).
+  const question = raw.trim();
+  if (!question) return;
+  if (entry) runFollowup(entry, question);
+  else runChat(question);
 });
 
 el.linkConfirmForm.addEventListener("submit", () => {
@@ -1950,6 +2468,12 @@ el.linkConfirmDialog.addEventListener("close", () => {
 
 el.newCheckBtn.addEventListener("click", startNewCheck);
 
+el.sidebarCollapseBtn?.addEventListener("click", () => {
+  settings.sidebarCollapsed = !settings.sidebarCollapsed;
+  persistSettings();
+  applySettings();
+});
+
 el.linkInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -1970,6 +2494,123 @@ el.videoPlayer.addEventListener("loadedmetadata", () => {
   // See `showVideoElement`: the rate set alongside `src` is reset by the load this event
   // marks the end of, so this is the assignment that actually sticks.
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
+  // `duration` — what the timeline's bands are laid out against — is only known from this
+  // point on; see `renderTimelineTrack`'s doc comment.
+  renderTimelineTrack();
+  // A chip clicked while the CDN was still resolving. Now there is a clock to seek on.
+  if (pendingSeek != null) {
+    const target = pendingSeek;
+    pendingSeek = null;
+    applySeek(target);
+  }
+});
+
+// Which claim the clip is on, tracked as it plays. `timeupdate` fires roughly 4–66 times a
+// second depending on the engine; `syncPlayhead` compares against the window already lit and
+// returns without touching the DOM unless it has genuinely changed.
+el.videoPlayer.addEventListener("timeupdate", syncPlayhead);
+// Seeking with the native controls, and the end of the clip, both move the playhead
+// somewhere `timeupdate` may not report before the reader notices the stale highlight.
+el.videoPlayer.addEventListener("seeked", syncPlayhead);
+el.videoPlayer.addEventListener("ended", syncPlayhead);
+
+// The play/pause button. Toggles the element directly rather than tracking state of its
+// own — the `play`/`pause` listeners below are what actually keep the icon and label
+// right, from this click or any other way playback starts or stops.
+el.playBtn.addEventListener("click", () => {
+  if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
+  else el.videoPlayer.pause();
+});
+
+// A tap anywhere else on the video does the same thing — the button is there for
+// discoverability and for a screen reader, not because the video itself shouldn't work
+// the way every short-form player's does. Excludes the control buttons themselves (they're
+// inside `.video-thumb` too, so this handler would otherwise fire a second time on top of
+// theirs) and anywhere there's no direct MP4 loaded to toggle in the first place.
+el.videoThumb.addEventListener("click", (event) => {
+  if (el.videoControls.hidden || event.target.closest(".video-controls")) return;
+  if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
+  else el.videoPlayer.pause();
+});
+
+// The single source of truth for the play/pause icon and label — set from the element's
+// own state, not assumed at whichever click asked for it, so it's still right when
+// autoplay is silently refused or playback stops some way neither handler above covers.
+el.videoPlayer.addEventListener("play", () => {
+  el.playBtn.classList.add("playing");
+  el.playBtn.setAttribute("aria-pressed", "true");
+  el.playBtn.setAttribute("aria-label", "Pause");
+  el.playBtn.title = "Pause";
+});
+el.videoPlayer.addEventListener("pause", () => {
+  el.playBtn.classList.remove("playing");
+  el.playBtn.setAttribute("aria-pressed", "false");
+  el.playBtn.setAttribute("aria-label", "Play");
+  el.playBtn.title = "Play";
+});
+
+// The unmute button. Muted is where every clip starts (autoplay only works muted, and a
+// reader who wants sound asks for it) — see `showVideoElement` for where that gets reset
+// on every new entry, so this toggle never inherits "on" from a previous check.
+el.muteBtn.addEventListener("click", () => {
+  const unmuted = el.videoPlayer.muted;
+  el.videoPlayer.muted = !unmuted;
+  el.muteBtn.classList.toggle("unmuted", unmuted);
+  el.muteBtn.setAttribute("aria-pressed", String(unmuted));
+  const label = unmuted ? "Mute" : "Unmute";
+  el.muteBtn.setAttribute("aria-label", label);
+  el.muteBtn.title = label;
+});
+
+// Fullscreens `.video-thumb` rather than the bare `<video>`, so the custom controls and
+// the timeline stay on screen and usable — the browser's native video fullscreen would
+// take just the element itself, chrome and all, out of the page.
+el.fullscreenBtn.addEventListener("click", () => {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else el.videoThumb.requestFullscreen?.().catch(() => {}); // Refused (no gesture, disabled) — the button just does nothing.
+});
+
+// The class/label answer to `fullscreenElement` rather than being set at the click above,
+// so they're also right when fullscreen ends some other way — Esc, the system's own exit
+// gesture — that this page gets no click for.
+document.addEventListener("fullscreenchange", () => {
+  const active = document.fullscreenElement === el.videoThumb;
+  el.fullscreenBtn.classList.toggle("fs-active", active);
+  const label = active ? "Exit fullscreen" : "Fullscreen";
+  el.fullscreenBtn.setAttribute("aria-label", label);
+  el.fullscreenBtn.title = label;
+});
+
+/** Where a click (or a tap, or an arrow key) on the track lands, in seconds. */
+function timelineSeekTarget(clientX) {
+  const duration = el.videoPlayer.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  const rect = el.timelineTrack.getBoundingClientRect();
+  if (!rect.width) return null;
+  const fraction = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  return fraction * duration;
+}
+
+el.timelineTrack.addEventListener("click", (event) => {
+  const target = timelineSeekTarget(event.clientX);
+  if (target != null) seekVideoTo(target);
+});
+
+// A slider in everything but name — see the `role="slider"` set alongside `tabindex` on
+// the element itself — so the usual left/right (and up/down, for a vertical-video reader
+// used to a volume-style control) step it, Home/End jump to the ends.
+el.timelineTrack.addEventListener("keydown", (event) => {
+  const duration = el.videoPlayer.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const step = 5;
+  let target = null;
+  if (event.key === "ArrowRight" || event.key === "ArrowUp") target = el.videoPlayer.currentTime + step;
+  else if (event.key === "ArrowLeft" || event.key === "ArrowDown") target = el.videoPlayer.currentTime - step;
+  else if (event.key === "Home") target = 0;
+  else if (event.key === "End") target = duration;
+  if (target == null) return;
+  event.preventDefault();
+  seekVideoTo(Math.min(duration, Math.max(0, target)));
 });
 
 el.passForm.addEventListener("submit", () => {
