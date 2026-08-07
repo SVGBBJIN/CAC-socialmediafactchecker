@@ -101,7 +101,6 @@ const el = {
   settingReducedMotion: document.getElementById("setting-reduced-motion"),
   settingHighContrast: document.getElementById("setting-high-contrast"),
   settingFontSize: document.getElementById("setting-font-size"),
-  settingShowQuotes: document.getElementById("setting-show-quotes"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
   searchStatus: document.getElementById("searchStatus"),
   imageBtn: document.getElementById("imageBtn"),
@@ -151,7 +150,6 @@ const DEFAULT_SETTINGS = {
   reducedMotion: false,
   highContrast: false,
   fontSize: "normal", // "normal" | "large"
-  showQuotes: true, // gates the per-source "Show quote" toggle in sourcesHTML
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
 };
@@ -985,8 +983,14 @@ function createProgressTicker(barId) {
   let start = 0;
   let floor = 0;
   let timer = null;
+  // The source of truth for "how far along is this bar", independent of the DOM — the
+  // loading grid rebuilds its markup from scratch every time a new claim is discovered
+  // (see renderClaimSkeletons), which would otherwise read back a fresh 0%-width node and
+  // make the bar visibly snap backward on every claim found.
+  let lastPct = 0;
 
   function paint(pct) {
+    lastPct = pct;
     const node = document.getElementById(barId);
     if (node) node.style.width = `${pct}%`;
   }
@@ -1013,13 +1017,17 @@ function createProgressTicker(barId) {
       const next = typeof stageOrPercent === "number" ? stageOrPercent : STAGE_PROGRESS_FLOOR[stageOrPercent];
       if (next == null) return;
       floor = Math.max(floor, next);
-      const node = document.getElementById(barId);
-      const current = node ? parseFloat(node.style.width) || 0 : 0;
-      paint(Math.max(floor, current));
+      paint(Math.max(floor, lastPct));
     },
     finish() {
       if (timer) { clearInterval(timer); timer = null; }
       paint(100);
+    },
+    /** Re-applies the last known width to whatever node currently owns this id — a plain
+     * `paint(lastPct)` rather than a fresh computation, so a markup rebuild mid-run (the
+     * loading grid growing a new skeleton box) doesn't cost the bar its progress. */
+    resync() {
+      paint(lastPct);
     },
     stop() {
       if (timer) { clearInterval(timer); timer = null; }
@@ -1030,6 +1038,46 @@ function createProgressTicker(barId) {
 const runProgress = createProgressTicker("runProgressBar");
 const followupProgress = createProgressTicker("followupProgressBar");
 const chatProgress = createProgressTicker("chatProgressBar");
+
+/* ---------------------------------------------------------------- claim grid */
+/*
+ * The claims pane used to be one card, or several stacked vertically with a scrollbar to
+ * reach the later ones. It's a grid now — every claim on screen at once, sized to the
+ * pane's own height instead of its own content's, on the theory that "around four claims"
+ * (the common case for a short-form post) should just fit. `.claim-pane` gets its own
+ * `overflow-y: auto` in CSS for the rare box whose content — usually the last one, which
+ * carries the sources/thread footer — is taller than its cell: that box scrolls in place
+ * rather than the grid growing a row to fit it or the pane growing a scrollbar of its own.
+ */
+
+/** Column count for a given claim count — tuned around "about four" fitting as a 2×2
+ * grid, one column above that for a single claim (nothing to arrange), and one column
+ * wider again past six so a long list doesn't turn into a single sliver-thin row. */
+function claimGridColumns(count) {
+  if (count <= 1) return 1;
+  if (count <= 4) return 2;
+  return 3;
+}
+
+/** Whether the last item should span the full row width — only the specific case of a
+ * 2-column grid with an odd count, where the last claim would otherwise sit alone against
+ * a bare gap beside it. Left alone (a normal trailing gap) for the 3-column case, since
+ * spanning a partial remainder there gets visually uneven fast and six-plus claims is
+ * already the overflow case, not the one this layout is tuned for. */
+function claimGridSpanLast(count, cols) {
+  return cols === 2 && count > 1 && count % 2 === 1;
+}
+
+/** Stamps (or clears) the grid layout on the claims pane itself. `null` is every other view
+ * the pane renders — the empty state, an error card, the free-standing chat thread, a
+ * whole-answer check with no `[[claim: …]]` markers — none of which are a set of same-shape
+ * boxes to arrange. `"grid-loading"` adds a full-width first row for the status strip
+ * (`claimGridStatusHTML`) that `"grid"` (the finished result) has no use for. */
+function setClaimsGridMode(mode, cols) {
+  el.claimsPane.classList.toggle("claim-grid", mode === "grid" || mode === "grid-loading");
+  el.claimsPane.classList.toggle("claim-grid-loading", mode === "grid-loading");
+  if (cols) el.claimsPane.style.setProperty("--claim-cols", cols);
+}
 
 /* ---------------------------------------------------------------- sidebar */
 
@@ -1143,7 +1191,7 @@ function chatThreadHTML(newestIndex) {
           <div class="thread-q">${escapeHTML(c.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
           ${incompleteHTML(c.incomplete, animate)}
-          ${sourcesHTML(c.sources, animate)}
+          ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
     .join("");
@@ -1169,6 +1217,7 @@ function renderChatPane({ newest = -1 } = {}) {
       </div>`
     : "";
 
+  setClaimsGridMode(null);
   if (!settled && !pending) {
     el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page — or just ask a question.</p></div>`;
     return;
@@ -1705,6 +1754,7 @@ function irisMarkup() {
 }
 
 function renderRunningCard() {
+  setClaimsGridMode(null);
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="card-loading">
@@ -1718,7 +1768,60 @@ function renderRunningCard() {
   runProgress.start();
 }
 
+/** The status strip `renderClaimSkeletons` puts above the growing grid of skeleton boxes —
+ * the same `#runStatus`/`#runCounter`/`#runProgressBar` ids `renderRunningCard` uses, so
+ * `setStatusText`/`runProgress` keep working across the swap from one loading view to the
+ * other without either of them needing to know it happened. */
+function claimGridStatusHTML(stage) {
+  return `
+    <div class="claim-grid-status">
+      <div class="status-text stage-text" id="runStatus">${escapeHTML(stage.text)}</div>
+      <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
+      <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
+    </div>`;
+}
+
+/** One placeholder box for a claim the model has named but not finished checking — the
+ * title is real (lifted straight off the `[[claim: …]]` marker that just streamed in), the
+ * body underneath it is not: a shimmer standing in for the analysis and verdict still to
+ * come, in the same shape `claimPanesHTML` below renders once they're real. */
+function skeletonClaimHTML(title, index, total, spanFull) {
+  return `
+    <div class="claim-card claim-pane skeleton"${spanFull ? ' style="grid-column:1/-1"' : ""}>
+      <div class="eyebrow">Claim ${index + 1} of ${total} &middot; checking&hellip;</div>
+      <p class="claim-title in">${escapeHTML(title)}</p>
+      <div class="skeleton-body" aria-hidden="true">
+        <span class="skeleton-line"></span>
+        <span class="skeleton-line"></span>
+        <span class="skeleton-line short"></span>
+      </div>
+    </div>`;
+}
+
+/**
+ * The loading card growing into the claim grid it's about to become, one box at a time.
+ *
+ * `runCheck`'s `onDelta` calls this every time `splitClaims` finds a new `[[claim: …]]`
+ * marker in the text streaming in — the model writes one per claim well before the full
+ * answer (and its citations) are finished. There's no separate "how many claims" signal to
+ * wait for; the marker *is* the count, arriving incrementally, so the grid is built the same
+ * way the finished result reads it (see `claimGridColumns`/`claimPanesHTML`), just with each
+ * box showing its title over a shimmer where the analysis and verdict will land.
+ */
+function renderClaimSkeletons(titles, stage) {
+  const count = titles.length;
+  const cols = claimGridColumns(count);
+  const spanLast = claimGridSpanLast(count, cols);
+  setClaimsGridMode("grid-loading", cols);
+  el.claimsPane.innerHTML =
+    claimGridStatusHTML(stage) +
+    titles.map((title, i) => skeletonClaimHTML(title, i, count, i === count - 1 && spanLast)).join("");
+  refreshTimeline();
+  runProgress.resync();
+}
+
 function renderErrorCard(entry) {
+  setClaimsGridMode(null);
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="eyebrow">Check failed</div>
@@ -1769,56 +1872,23 @@ function verdictHTML(entry, animate) {
 }
 
 /**
- * One source row, with the exact passage a citation rests on when there is one.
- *
- * `s.quote` is the best passage `find_in_page` pulled off that source (see `sourceRows`
- * in verified-chat.js) — it already reaches the browser today, just unrendered. Gated by
- * the settings-panel toggle: off means the row looks exactly as it always has, on means a
- * "Show quote" control appears per source, collapsed by default so a long thread doesn't
- * turn into a wall of blockquotes.
+ * The sources a check was run against, as a row of link pills — one per source, each just
+ * its domain, linking straight out. Replaces the old collapsed "Sources (N)" list with its
+ * per-source quote toggles: a citation marker in the text (`[3]`) already links to the same
+ * page, so that list was a second copy of information the reader could already reach, and
+ * folding it behind a toggle just meant most readers never saw it at all. A pill needs
+ * neither — it's small enough to sit in the open, and there's nothing under it to expand.
  */
-function sourceItemHTML(s) {
-  const quoteToggle =
-    settings.showQuotes && s.quote
-      ? `<button type="button" class="source-quote-toggle" data-quote-toggle>Show quote</button>
-         <blockquote class="source-quote" hidden>&ldquo;${escapeHTML(s.quote)}&rdquo;</blockquote>`
-      : "";
-  return `
-    <div class="source-item">
-      <div class="source-row">
-        <span><a class="citation" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.title)}</a></span>
-        <span>${escapeHTML(s.domain)}</span>
-      </div>
-      ${quoteToggle}
-    </div>`;
-}
-
-/**
- * The sources block, collapsed by default behind a "Sources (N)" toggle — same idea as a
- * per-source "Show quote" (see `sourceItemHTML`), one level up. A dozen sources printed in
- * full under every answer was the thing most likely to push the answer itself below the
- * fold; folded by default, the count is still the first thing read, and the list is one
- * click away rather than gone.
- *
- * `.sources`'s own grid-rows animation (via `revealAttrs`) is the *arrival* transition —
- * it plays once, when the turn first lands. This toggle is a second, independent state
- * layered on top of that, which is why it's a plain `hidden` attribute on `.sources-body`
- * rather than folded into the same animation: the two have nothing to do with each other,
- * and conflating them would mean an already-read answer replaying its entrance every time
- * a reader opens the list.
- */
-function sourcesHTML(sources, animate) {
+function sourcePillsHTML(sources, animate) {
   if (!sources?.length) return "";
-  const count = `${sources.length} source${sources.length === 1 ? "" : "s"}`;
   return `
-    <div ${revealAttrs("sources", animate)}>
-      <button type="button" class="sources-toggle" data-sources-toggle aria-expanded="false">
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span>Checked against ${count}</span>
-      </button>
-      <div class="sources-body" hidden>
-        ${sources.map(sourceItemHTML).join("")}
-      </div>
+    <div ${revealAttrs("source-pills", animate)} aria-label="Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}">
+      ${sources
+        .map(
+          (s) =>
+            `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(s.title)}">${escapeHTML(s.domain)}</a>`,
+        )
+        .join("")}
     </div>`;
 }
 
@@ -1859,8 +1929,9 @@ function flashActionFeedback(row, message) {
   if (message) row._feedbackTimer = setTimeout(() => span.classList.remove("show"), 1800);
 }
 
-/** One delegated handler for everything a reader can click inside a rendered answer:
- * expanding a citation quote, or acting on the answer itself. */
+/** One delegated handler for everything a reader can click inside a rendered answer: a
+ * timestamp chip, or acting on the answer itself. Source pills need no handler of their
+ * own here — they're plain links, opened by the browser like any other `<a>`. */
 async function handleClaimsPaneClick(event) {
   const chip = event.target.closest(".ts-chip[data-seek]");
   if (chip) {
@@ -1871,24 +1942,6 @@ async function handleClaimsPaneClick(event) {
     const ok = seekVideoTo(Number(chip.dataset.seek));
     chip.classList.toggle("dead", !ok);
     if (!ok) chip.title = "The video isn't loaded, so there's nothing to jump to";
-    return;
-  }
-
-  const quoteToggle = event.target.closest("[data-quote-toggle]");
-  if (quoteToggle) {
-    const quote = quoteToggle.nextElementSibling;
-    const show = quote.hidden;
-    quote.hidden = !show;
-    quoteToggle.textContent = show ? "Hide quote" : "Show quote";
-    return;
-  }
-
-  const sourcesToggle = event.target.closest("[data-sources-toggle]");
-  if (sourcesToggle) {
-    const body = sourcesToggle.nextElementSibling;
-    const show = body.hidden;
-    body.hidden = !show;
-    sourcesToggle.setAttribute("aria-expanded", String(show));
     return;
   }
 
@@ -1955,7 +2008,7 @@ function threadHTML(entry, newestIndex) {
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
           ${incompleteHTML(f.incomplete, animate)}
           ${actionRowHTML(entry.id, index)}
-          ${sourcesHTML(f.sources, animate)}
+          ${sourcePillsHTML(f.sources, animate)}
         </div>`;
     })
     .join("");
@@ -1996,6 +2049,8 @@ function threadHTML(entry, newestIndex) {
  */
 function claimPanesHTML(entry, animate, newestFollowup) {
   const { claims } = entry;
+  const cols = claimGridColumns(claims.length);
+  const spanLast = claimGridSpanLast(claims.length, cols);
   return claims
     .map((claim, index) => {
       const isLast = index === claims.length - 1;
@@ -2003,11 +2058,15 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
            ${actionRowHTML(entry.id, null)}
-           ${sourcesHTML(entry.sources, animate)}
+           ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
+      // The last box spans the full row when it would otherwise sit alone against a bare
+      // gap beside it — see `claimGridSpanLast`. It's also, not coincidentally, the one
+      // carrying the footer above, so the extra width goes to the box that needs it most.
+      const spanFull = isLast && spanLast;
       return `
-        <div class="claim-card claim-pane">
+        <div class="claim-card claim-pane"${spanFull ? ' style="grid-column:1/-1"' : ""}>
           <div class="eyebrow">${escapeHTML(eyebrow)}</div>
           <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
@@ -2019,18 +2078,22 @@ function claimPanesHTML(entry, animate, newestFollowup) {
 }
 
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
-  el.claimsPane.innerHTML = entry.claims
-    ? claimPanesHTML(entry, animateAnalysis, newestFollowup)
-    : `
+  if (entry.claims) {
+    setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
+    el.claimsPane.innerHTML = claimPanesHTML(entry, animateAnalysis, newestFollowup);
+  } else {
+    setClaimsGridMode(null);
+    el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
-      ${sourcesHTML(entry.sources, animateAnalysis)}
+      ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
     </div>`;
+  }
   revealIn(el.claimsPane);
   // After the markup, not before: the windows are read back off the chips this render just
   // wrote, and the ones from the previous render point at nodes that no longer exist.
@@ -2093,7 +2156,7 @@ function requestHeaders() {
  * An error with *no* text before it is unchanged: there is nothing to preserve, so it
  * throws and the caller reports it as the whole outcome of the turn.
  */
-async function streamChat(messages, { signal, onStage, onSearchCount, clipHints } = {}) {
+async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, clipHints } = {}) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
@@ -2140,10 +2203,15 @@ async function streamChat(messages, { signal, onStage, onSearchCount, clipHints 
       }
 
       if (frame.type === "stage") onStage?.(frame);
-      else if (frame.type === "delta") answer += frame.text;
-      else if (frame.type === "break") answer += "\n\n";
-      else if (frame.type === "answer") answer = frame.text;
-      else if (frame.type === "search") onSearchCount?.(++searchCount);
+      else if (frame.type === "delta") {
+        answer += frame.text;
+        onDelta?.(answer);
+      } else if (frame.type === "break") {
+        answer += "\n\n";
+      } else if (frame.type === "answer") {
+        answer = frame.text;
+        onDelta?.(answer);
+      } else if (frame.type === "search") onSearchCount?.(++searchCount);
       else if (frame.type === "truncated") truncated = true;
       else if (frame.type === "sources") {
         if (!frame.provisional) sources = frame.sources;
@@ -2278,22 +2346,44 @@ async function runCheck(url, existingId, hint) {
   el.checkBtn.disabled = true;
   el.newCheckBtn.disabled = true;
 
+  // What the loading view currently shows, kept outside the callbacks below so
+  // `onDelta` — which rebuilds the whole loading view from scratch the moment a new claim
+  // is discovered (see renderClaimSkeletons) — can carry the stage label and source count
+  // forward into the rebuilt markup instead of them resetting to their initial text.
+  const stage = { text: "Sending to the model…", searchCount: 0 };
+  let discoveredTitles = [];
+
   try {
     const message = { role: "user", content: prompt, ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([message], {
       signal: controller.signal,
       clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
-        setStatusText("runStatus", stageText(frame));
+        stage.text = stageText(frame);
+        setStatusText("runStatus", stage.text);
         runProgress.bump(frame?.stage);
       },
       onSearchCount: (n) => {
+        stage.searchCount = n;
         const counter = document.getElementById("runCounter");
         if (counter) counter.textContent = `Source ${n}`;
         // A growing source count is real, visible progress even between named stages —
         // nudge the bar rather than let it sit on the last stage's floor while sources
         // keep arriving.
         runProgress.bump(Math.min(35 + n * 5, 70));
+      },
+      // The model writes one `[[claim: …]]` marker per claim as it drafts the answer,
+      // well before the full answer (and its citations) are finished — there's no
+      // separate "how many claims" signal to wait for, the marker *is* the count,
+      // arriving incrementally. The single loading card grows into a grid of skeleton
+      // boxes the first time this finds one, and adds another box each time it finds the
+      // next — see renderClaimSkeletons.
+      onDelta: (text) => {
+        if (selectedId !== id) return; // navigated away — nothing to rebuild
+        const titles = (splitClaims(text) ?? []).map((c) => c.title);
+        if (titles.length === discoveredTitles.length) return;
+        discoveredTitles = titles;
+        renderClaimSkeletons(discoveredTitles, stage);
       },
     });
 
@@ -2486,7 +2576,6 @@ function updateFontSizeButtons() {
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
-  el.settingShowQuotes.checked = settings.showQuotes;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   renderSearchStatus();
@@ -2771,14 +2860,6 @@ el.settingFontSize.addEventListener("click", (event) => {
   persistSettings();
   applySettings();
   updateFontSizeButtons();
-});
-el.settingShowQuotes.addEventListener("change", () => {
-  settings.showQuotes = el.settingShowQuotes.checked;
-  persistSettings();
-  // Re-render whatever's on screen so the toggle takes effect immediately, not on the
-  // next navigation.
-  const entry = selectedId ? findEntry(selectedId) : null;
-  if (entry?.status === "done") renderResultCard(entry, { animateAnalysis: false });
 });
 el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);
