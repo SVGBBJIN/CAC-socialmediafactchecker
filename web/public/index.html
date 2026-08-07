@@ -292,11 +292,16 @@
   .video-control-btn:hover { border-color: var(--accent); color: var(--accent); }
   .video-control-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* Two icons per button, one shown at a time, toggled by a state class app.js sets
-     (`unmuted`/`fs-active`) rather than by rewriting a path's `d` at runtime — cheaper and
-     it keeps both glyphs inspectable in the markup. Muted and non-fullscreen, matching the
-     `<video muted>` default and the page's own starting state, is the unstated default:
-     only the *other* icon needs a rule to hide itself. */
-  .icon-vol-on, .icon-fs-exit { display: none; }
+     (`playing`/`unmuted`/`fs-active`) rather than by rewriting a path's `d` at runtime —
+     cheaper and it keeps both glyphs inspectable in the markup. Paused, muted and
+     non-fullscreen — matching the `<video muted>` default and the page's own starting
+     state — is the unstated default: only each *other* icon needs a rule to hide itself.
+     `playBtn`'s state class is set from the `<video>` element's own `play`/`pause` events
+     rather than assumed at the click that asked for it, so it's still right if autoplay
+     is refused, or a reader pauses some other way headers don't cover. */
+  .icon-pause, .icon-vol-on, .icon-fs-exit { display: none; }
+  #playBtn.playing .icon-play { display: none; }
+  #playBtn.playing .icon-pause { display: block; }
   #muteBtn.unmuted .icon-vol-on { display: block; }
   #muteBtn.unmuted .icon-vol-off { display: none; }
   #fullscreenBtn.fs-active .icon-fs-enter { display: none; }
@@ -1190,11 +1195,19 @@
             <div class="video-media image-strip" id="videoImages" hidden></div>
 
             <!-- Native `controls` is gone from the <video> above — this is the whole
-                 control surface now, kept minimal on purpose: unmute (autoplay only works
-                 muted, so the default state is always "muted" and this is how a reader
-                 leaves it) and fullscreen. Play/pause is a tap on the video itself, same
-                 as before. -->
+                 control surface now: play/pause, unmute (autoplay only works muted, so
+                 the default state is always "muted" and this is how a reader leaves it),
+                 and fullscreen. Play/pause is also a tap anywhere else on the video
+                 itself — see the `videoThumb` click handler in app.js. -->
             <div class="video-controls" id="videoControls" hidden>
+              <button type="button" class="video-control-btn" id="playBtn" aria-pressed="false" aria-label="Play" title="Play">
+                <svg class="icon-play" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M7 5.5v13l11-6.5-11-6.5z" fill="currentColor"/>
+                </svg>
+                <svg class="icon-pause" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M7.5 5h3v14h-3zM13.5 5h3v14h-3z" fill="currentColor"/>
+                </svg>
+              </button>
               <button type="button" class="video-control-btn" id="muteBtn" aria-pressed="false" aria-label="Unmute" title="Unmute">
                 <svg class="icon-vol-on" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <path d="M4 9.3v5.4h3.3l4.7 3.9V5.4l-4.7 3.9H4z" fill="currentColor"/>

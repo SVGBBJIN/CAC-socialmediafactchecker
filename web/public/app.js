@@ -89,6 +89,7 @@ const el = {
   videoEmbed: document.getElementById("videoEmbed"),
   videoImages: document.getElementById("videoImages"),
   videoControls: document.getElementById("videoControls"),
+  playBtn: document.getElementById("playBtn"),
   muteBtn: document.getElementById("muteBtn"),
   fullscreenBtn: document.getElementById("fullscreenBtn"),
   videoTimeline: document.getElementById("videoTimeline"),
@@ -2476,6 +2477,41 @@ el.videoPlayer.addEventListener("timeupdate", syncPlayhead);
 // somewhere `timeupdate` may not report before the reader notices the stale highlight.
 el.videoPlayer.addEventListener("seeked", syncPlayhead);
 el.videoPlayer.addEventListener("ended", syncPlayhead);
+
+// The play/pause button. Toggles the element directly rather than tracking state of its
+// own — the `play`/`pause` listeners below are what actually keep the icon and label
+// right, from this click or any other way playback starts or stops.
+el.playBtn.addEventListener("click", () => {
+  if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
+  else el.videoPlayer.pause();
+});
+
+// A tap anywhere else on the video does the same thing — the button is there for
+// discoverability and for a screen reader, not because the video itself shouldn't work
+// the way every short-form player's does. Excludes the control buttons themselves (they're
+// inside `.video-thumb` too, so this handler would otherwise fire a second time on top of
+// theirs) and anywhere there's no direct MP4 loaded to toggle in the first place.
+el.videoThumb.addEventListener("click", (event) => {
+  if (el.videoControls.hidden || event.target.closest(".video-controls")) return;
+  if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
+  else el.videoPlayer.pause();
+});
+
+// The single source of truth for the play/pause icon and label — set from the element's
+// own state, not assumed at whichever click asked for it, so it's still right when
+// autoplay is silently refused or playback stops some way neither handler above covers.
+el.videoPlayer.addEventListener("play", () => {
+  el.playBtn.classList.add("playing");
+  el.playBtn.setAttribute("aria-pressed", "true");
+  el.playBtn.setAttribute("aria-label", "Pause");
+  el.playBtn.title = "Pause";
+});
+el.videoPlayer.addEventListener("pause", () => {
+  el.playBtn.classList.remove("playing");
+  el.playBtn.setAttribute("aria-pressed", "false");
+  el.playBtn.setAttribute("aria-label", "Play");
+  el.playBtn.title = "Play";
+});
 
 // The unmute button. Muted is where every clip starts (autoplay only works muted, and a
 // reader who wants sound asks for it) — see `showVideoElement` for where that gets reset
