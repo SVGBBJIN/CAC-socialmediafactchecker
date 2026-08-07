@@ -493,6 +493,18 @@
     letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
   }
 
+  /* The claim itself, in `claimPanesHTML`'s split-panes layout — one line reproducing the
+     `[[claim: …]]` marker's own text, between the "Claim N of M" eyebrow above it and the
+     analysis text below. Same reveal-in transition as `.claim-text`, since the two always
+     arrive together. */
+  .claim-title {
+    font-family: var(--font-display); font-size: 15.5px; font-weight: 600; color: var(--ink);
+    line-height: 1.4; margin: 0 0 10px;
+    opacity: 0; transform: translateY(6px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .claim-title.in { opacity: 1; transform: translateY(0); }
+
   .claim-text {
     font-family: var(--font-display); font-size: 16.5px; line-height: 1.55; color: var(--ink);
     margin: 0 0 16px;
@@ -1156,6 +1168,7 @@
     --claim-scale: 1.16;
   }
   [data-font-size="large"] .claim-text { font-size: calc(16.5px * 1.16); }
+  [data-font-size="large"] .claim-title { font-size: calc(15.5px * 1.16); }
   [data-font-size="large"] .thread-a.claim-text { font-size: calc(14.5px * 1.16); }
   [data-font-size="large"] body, [data-font-size="large"] .entry-bar input, [data-font-size="large"] .lib-title { font-size: 1.1em; }
 

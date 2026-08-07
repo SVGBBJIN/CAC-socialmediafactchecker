@@ -25,6 +25,7 @@ import {
   timeline,
   activeAt,
 } from "./timestamps.js";
+import { VERDICTS, splitVerdict, splitClaims, aggregateVerdictKey } from "./claims.js";
 
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
@@ -64,15 +65,6 @@ function youTubeVideoID(urlString) {
   }
   return null;
 }
-
-const VERDICTS = {
-  contradicted: { label: "Contradicted", css: "bad" },
-  disputed: { label: "Disputed", css: "warn" },
-  corroborated: { label: "Corroborated", css: "good" },
-  insufficient: { label: "Insufficient evidence", css: "muted" },
-};
-
-const VERDICT_LINE = /\n?VERDICT:\s*(contradicted|disputed|corroborated|insufficient(?:\s+evidence)?)\.?\s*$/i;
 
 const el = {
   linkInput: document.getElementById("linkInput"),
@@ -892,14 +884,6 @@ function renderMarkdown(text, sources, seekable = false) {
     .join("");
 }
 
-/** Pulls the trailing `VERDICT: …` line the initial prompt asks for off the answer text. */
-function splitVerdict(answer) {
-  const match = answer.match(VERDICT_LINE);
-  if (!match) return { text: answer, verdictKey: null };
-  const key = match[1].toLowerCase().replace(/\s+evidence$/, "");
-  return { text: answer.slice(0, match.index).trimEnd(), verdictKey: VERDICTS[key] ? key : null };
-}
-
 /**
  * Turns on the `.in` transitions a beat after the markup lands, instead of baking the
  * class into the HTML string. Baked-in means the element's first paint *is* its final
@@ -1097,6 +1081,11 @@ function renderChatPane({ newest = -1 } = {}) {
     return;
   }
   el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
+  // Each answer's own markup carries `data-reveal` (see chatThreadHTML/revealAttrs) rather
+  // than a baked-in `.in` class, same as renderResultCard's — so it needs the same call to
+  // actually fade in instead of sitting at the `opacity: 0` `.claim-text`/`.thread-a` starts
+  // at.
+  revealIn(el.claimsPane);
 }
 
 /**
@@ -1658,20 +1647,27 @@ function incompleteHTML(incomplete, animate) {
     </div>`;
 }
 
-/**
- * The verdict badge, or nothing.
- *
- * Nothing when the turn is incomplete and no `VERDICT:` line was parsed off it — see the
- * note in `runCheck`. A badge is the app asserting the check's finding, and there is no
- * finding to assert when the answer stopped before it got to one.
- */
-function verdictHTML(entry, animate) {
-  if (entry.incomplete && !entry.verdictKey) return "";
-  const verdict = VERDICTS[entry.verdictKey] ?? VERDICTS.insufficient;
+/** The badge markup for one verdict key, or nothing for a key with no matching verdict —
+ * shared by the whole-answer badge below and each claim's own badge in the split-panes
+ * layout (see `claimPanesHTML`). */
+function badgeHTML(verdictKey, animate) {
+  const verdict = VERDICTS[verdictKey];
+  if (!verdict) return "";
   return `
     <div class="badges">
       <span ${revealAttrs(`badge verdict ${verdict.css}`, animate)}>${escapeHTML(verdict.label)}</span>
     </div>`;
+}
+
+/**
+ * The whole-answer verdict badge, for a check `splitClaims` found no claim blocks in — see
+ * `renderResultCard`. Nothing when the turn is incomplete and no `VERDICT:` line was parsed
+ * off it — see the note in `runCheck`. A badge is the app asserting the check's finding, and
+ * there is no finding to assert when the answer stopped before it got to one.
+ */
+function verdictHTML(entry, animate) {
+  if (entry.incomplete && !entry.verdictKey) return "";
+  return badgeHTML(entry.verdictKey ?? "insufficient", animate);
 }
 
 /**
@@ -1892,8 +1888,41 @@ function threadHTML(entry, newestIndex) {
  * @param newestFollowup index of a follow-up that has just landed and should animate in,
  *   or -1 for none.
  */
+/**
+ * One `.claim-card` per claim `entry.claims` holds, instead of the single card every
+ * answer used to be — see `splitClaims`. The parts of the check that aren't per-claim data
+ * (the incomplete notice, copy/share/like, the sources ledger, the follow-up thread) aren't
+ * given a card of their own; they're appended to the last claim's pane, the same place
+ * they'd read as "the end of the analysis" when there was only one card to put them in.
+ */
+function claimPanesHTML(entry, animate, newestFollowup) {
+  const { claims } = entry;
+  return claims
+    .map((claim, index) => {
+      const isLast = index === claims.length - 1;
+      const eyebrow = claims.length > 1 ? `Claim ${index + 1} of ${claims.length}` : "Claim checked";
+      const footer = isLast
+        ? `${incompleteHTML(entry.incomplete, animate)}
+           ${actionRowHTML(entry.id, null)}
+           ${sourcesHTML(entry.sources, animate)}
+           ${threadHTML(entry, newestFollowup)}`
+        : "";
+      return `
+        <div class="claim-card claim-pane">
+          <div class="eyebrow">${escapeHTML(eyebrow)}</div>
+          <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+          <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
+          ${badgeHTML(claim.verdictKey, animate)}
+          ${footer}
+        </div>`;
+    })
+    .join("");
+}
+
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
-  el.claimsPane.innerHTML = `
+  el.claimsPane.innerHTML = entry.claims
+    ? claimPanesHTML(entry, animateAnalysis, newestFollowup)
+    : `
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
@@ -2086,10 +2115,9 @@ function composeCheckPrompt(url) {
     : "";
   return withCustomInstructions(
     `Fact-check this ${subject}: ${url}\n\n` +
-      "List the distinct factual claims it makes, check each one, and explain what the evidence " +
-      `shows. ${timestamps}` +
-      "Finish with exactly one line of the form `VERDICT: <Contradicted|Disputed|Corroborated" +
-      "|Insufficient evidence>` summarizing the main claim — no other text on that line.",
+      "List the distinct factual claims it makes and check each one, using the CLAIM " +
+      `STRUCTURE from the system prompt — one \`[[claim: …]]\` block per claim, each ` +
+      `ending in its own VERDICT line. ${timestamps}`,
   );
 }
 
@@ -2167,17 +2195,22 @@ async function runCheck(url, existingId, hint) {
     });
 
     const { text, verdictKey } = splitVerdict(answer);
+    const claims = splitClaims(answer);
     entry.status = "done";
-    entry.rawAnswer = answer; // kept whole, VERDICT line included — history needs it verbatim
+    entry.rawAnswer = answer; // kept whole, VERDICT line(s) included — history needs it verbatim
     entry.answer = text;
+    entry.claims = claims; // null (render as one card, see renderResultCard), or one block per claim
     entry.sources = sources;
     entry.incomplete = incomplete;
     // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
     // would then stamp it "Insufficient evidence" — a finding, in the app's own voice, that
     // the model never made and the reader has no way to tell from one it did. Left null when
     // the turn is known to be incomplete; the notice above the card says what happened
-    // instead, which is the true answer to "why is there no verdict".
-    entry.verdictKey = verdictKey ?? (incomplete ? null : "insufficient");
+    // instead, which is the true answer to "why is there no verdict". Same reasoning for the
+    // aggregate: see `aggregateVerdictKey`.
+    entry.verdictKey = claims
+      ? aggregateVerdictKey(claims) ?? (incomplete ? null : "insufficient")
+      : verdictKey ?? (incomplete ? null : "insufficient");
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) {

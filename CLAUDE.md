@@ -46,7 +46,7 @@ Node 20+ stdlib. To run a single test file directly: `node --test test-search.js
 see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
-test-timestamps.js`).
+test-timestamps.js test-claims.js`).
 
 ### `Sources/` (Swift, frozen)
 
@@ -117,6 +117,20 @@ renders each one as a chip that seeks the video pane (`currentTime` on the MP4 e
 `t=` is load-bearing: `lib/citation-cleanup.js` deletes any `[n]` it can't resolve in the
 ledger, so a bare `[0:12]` would be destroyed on the way out. Chips are only rendered as
 controls when there is something to seek — an article or a photo carousel gets inert text.
+
+**Claims are split into panes by a marker the model writes, not by guessing from prose.**
+The CLAIM STRUCTURE section of `FACT_CHECK_SYSTEM_PROMPT` (`lib/verified-chat.js`) asks the
+model to open each distinct claim with `[[claim: …]]` on its own line and close it with its
+own `VERDICT: …` line before the next one starts. `public/claims.js` is the only thing that
+parses that — `splitClaims` turns the raw answer into one block per marker (or `null` if
+there are none, which is the normal case for a follow-up or a greeting, and also covers
+every answer written before this feature existed), and `public/app.js`'s `claimPanesHTML`
+renders one `.claim-card` per block instead of the single card a `null` result still falls
+back to. This is not the sentence-level claim-detection heuristic the paragraph above says
+was torn out and must not come back — that guessed which sentences in already-written prose
+"looked like" a claim; this only ever acts on a marker the model was explicitly asked to
+write, the same shape `[t=…]` timestamps and the (now per-claim) `VERDICT:` line already
+are. Don't blur the two back together by trying to split an answer some other way.
 
 **Model fallback chain** (`lib/gemini.js` / `lib/degradation.js`): Flash 3.6 → 3.5 →
 3-preview → 2.5 → 2.0, walked on 404/403 (unavailable), 429/`RESOURCE_EXHAUSTED` (quota,
