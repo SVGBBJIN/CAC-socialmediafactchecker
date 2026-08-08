@@ -11,6 +11,26 @@
   rel="icon"
   href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>👁</text></svg>"
 />
+<!-- The four modules app.js imports, declared here so the browser can start fetching them
+     while it is still parsing this file.
+
+     Without these there is a three-step waterfall to the app running at all: fetch this
+     document, discover `/app.js` and fetch it, then parse ~130 KB of it before the four
+     `import` statements at its top are even visible, and only then fetch those. The last
+     hop is a full round trip spent discovering files whose names are known right now, and
+     it is a round trip on the critical path — nothing interactive exists until it lands.
+
+     `modulepreload` rather than `preload`: it fetches *and* parses into the module map, so
+     app.js's own imports resolve against work already done instead of merely warmed cache.
+     Same-origin, so no `crossorigin` attribute is wanted. A browser that doesn't support the
+     hint ignores it and gets exactly the waterfall it has today — this can only help.
+
+     If app.js ever imports something new, add it here. A missing entry costs the round trip
+     back; a stale one costs a fetch of a file nothing imports, which is worse. -->
+<link rel="modulepreload" href="/device.js">
+<link rel="modulepreload" href="/timestamps.js">
+<link rel="modulepreload" href="/claims.js">
+<link rel="modulepreload" href="/research.js">
 <style>
   :root {
     --bg: #12151A;

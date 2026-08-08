@@ -4002,3 +4002,38 @@ test("inlineByteLimitFromEnv reads the override, and refuses to exceed the API's
   assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: "lots" }), INLINE_BYTE_LIMIT);
   assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: "-5" }), INLINE_BYTE_LIMIT);
 });
+
+/* ---------------- the module preload list ---------------- */
+
+test("index.html preloads exactly the modules app.js imports", async () => {
+  // `<link rel="modulepreload">` in index.html removes a round trip from the critical path:
+  // without it the browser cannot discover app.js's imports until it has downloaded and
+  // parsed ~130 KB of app.js. The hint only works while the list is accurate, and it is a
+  // list in one file about the contents of another — exactly the pairing that goes stale
+  // silently. A missing entry costs back the round trip; a stale one costs a fetch of a
+  // file nothing imports, which is worse. So the two are compared rather than trusted.
+  const { readFile } = await import("node:fs/promises");
+  const html = await readFile(new URL("./public/index.html", import.meta.url), "utf8");
+  const app = await readFile(new URL("./public/app.js", import.meta.url), "utf8");
+
+  const preloaded = [...html.matchAll(/<link\s+rel="modulepreload"\s+href="([^"]+)"/g)]
+    .map((m) => m[1].replace(/^\//, ""))
+    .sort();
+
+  // Only app.js's own top-level imports. A module imported by one of *those* is a
+  // transitive dependency and is deliberately not preloaded — the waterfall this fixes is
+  // the one in front of app.js's first line, and today the graph is only two deep.
+  const imported = [...app.matchAll(/^import\s[\s\S]*?from\s+"\.\/([^"]+)"/gm)]
+    .map((m) => m[1])
+    .sort();
+
+  assert.ok(imported.length > 0, "the regex found app.js's imports at all");
+  assert.deepEqual(preloaded, imported);
+
+  // And the hints have to come before the script that needs them, or the browser learns
+  // about the modules at the same moment it would have anyway.
+  assert.ok(
+    html.indexOf('rel="modulepreload"') < html.indexOf('<script type="module"'),
+    "preload hints precede the module script",
+  );
+});
