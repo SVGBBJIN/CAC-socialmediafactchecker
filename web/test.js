@@ -30,7 +30,6 @@ import {
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
   resetClipCache,
-  TOOL_ROUND_INLINE_BYTE_LIMIT,
 } from "./lib/gemini.js";
 import {
   withRetry,
@@ -2103,125 +2102,46 @@ test("a clip past the inline ceiling goes through the Files API and is deleted a
   assert.deepEqual(deleted, ["files/abc"], "an uploaded clip does not stay in the Files quota");
 });
 
-test("streamChat uploads a clip that would otherwise ride inline, when the turn can run tool rounds", async () => {
-  // A clip under the ordinary inline ceiling but over TOOL_ROUND_INLINE_BYTE_LIMIT: staying
-  // inline would mean resending these bytes whole on every tool round in this turn, which is
-  // exactly the cost `resolveClipParts` is told to avoid once `tools`/`toolRunner` are set.
-  const bytes = Buffer.alloc(TOOL_ROUND_INLINE_BYTE_LIMIT + 1);
-  let uploaded = false;
-  const fetchImpl = async () => sseResponse([frame("ok", { finishReason: "STOP" })]);
+test("a cached clip under the inline ceiling costs nothing on a follow-up turn", async () => {
+  // Why `INLINE_BYTE_LIMIT` is not allowed to drift downward to save on re-sends.
+  //
+  // An inline clip is free to replay: the cache holds its bytes, and every later turn of the
+  // conversation re-inlines them without touching the network. An *uploaded* clip is not,
+  // because `cleanup()` deletes it at the end of every turn — so lowering the threshold to
+  // avoid re-sending base64 across tool rounds buys that back at the price of a fresh upload
+  // *and* a fresh wait for the file to leave PROCESSING on every single follow-up. That is a
+  // much larger, much more visible cost than the one it was trying to save, and it lands on
+  // the turns that used to be the cheapest. This test is what says so.
+  resetClipCache();
+  const messages = [{ role: "user", content: SOURCE_URL }];
+  let downloads = 0;
+  let uploads = 0;
 
-  const frames = await collect(
-    streamChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: SOURCE_URL }],
-      models: ["gemini-3.6-flash"],
-      tools: SEARCH_TOOL,
-      toolRunner: async () => ({ response: { result: "nothing found" } }),
-      fetchImpl,
-      clipOptions: {
-        resolveImpl: async () => resolvedClip(),
-        downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
-        uploadImpl: async () => {
-          uploaded = true;
-          return { name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" };
-        },
-        deleteImpl: async () => {},
-      },
-    }),
-  );
+  const options = {
+    apiKey: "k",
+    cache: true,
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => {
+      downloads += 1;
+      // Comfortably inline, and comfortably the size of a real short-form clip.
+      return { bytes: Buffer.alloc(5 * 1024 * 1024), mimeType: "video/mp4" };
+    },
+    uploadImpl: async () => {
+      uploads += 1;
+      return { name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" };
+    },
+    deleteImpl: async () => {},
+  };
 
-  assert.ok(uploaded, "a clip this size went through the Files API, not inline");
-  assert.ok(answerFrames(frames).some((f) => f.type === "delta"));
-});
+  for (let turn = 0; turn < 3; turn += 1) {
+    const clips = await resolveClipParts(messages, options);
+    // What `streamChat` does in its `finally` at the end of every turn.
+    await clips.cleanup();
+  }
 
-test("streamChat still inlines a small clip in a turn that can run tool rounds", async () => {
-  // The lower line only moves for a clip big enough that the resend actually costs
-  // something — see TOOL_ROUND_INLINE_BYTE_LIMIT's own reasoning for why a small clip isn't
-  // worth paying Gemini's upload-and-PROCESSING wait to avoid.
-  const bytes = Buffer.alloc(64);
-  let uploaded = false;
-  const fetchImpl = async () => sseResponse([frame("ok", { finishReason: "STOP" })]);
-
-  await collect(
-    streamChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: SOURCE_URL }],
-      models: ["gemini-3.6-flash"],
-      tools: SEARCH_TOOL,
-      toolRunner: async () => ({ response: { result: "nothing found" } }),
-      fetchImpl,
-      clipOptions: {
-        resolveImpl: async () => resolvedClip(),
-        downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
-        uploadImpl: async () => {
-          uploaded = true;
-          return { name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" };
-        },
-      },
-    }),
-  );
-
-  assert.ok(!uploaded, "a clip well under the tool-round line still rides inline");
-});
-
-test("a caller-supplied inlineByteLimit overrides the tool-round default", async () => {
-  // clipOptions is spread after the tool-round default, so an explicit caller choice —
-  // exactly the shape /api/chat or a test already passes — still wins.
-  const bytes = Buffer.alloc(TOOL_ROUND_INLINE_BYTE_LIMIT + 1);
-  let uploaded = false;
-  const fetchImpl = async () => sseResponse([frame("ok", { finishReason: "STOP" })]);
-
-  await collect(
-    streamChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: SOURCE_URL }],
-      models: ["gemini-3.6-flash"],
-      tools: SEARCH_TOOL,
-      toolRunner: async () => ({ response: { result: "nothing found" } }),
-      fetchImpl,
-      clipOptions: {
-        // Raised past this clip's size, so the caller's own choice keeps it inline even
-        // though the tool-round default here would have uploaded it.
-        inlineByteLimit: TOOL_ROUND_INLINE_BYTE_LIMIT + 10,
-        resolveImpl: async () => resolvedClip(),
-        downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
-        uploadImpl: async () => {
-          uploaded = true;
-          return { name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" };
-        },
-      },
-    }),
-  );
-
-  assert.ok(!uploaded, "the caller's own inlineByteLimit is not overridden by the tool-round default");
-});
-
-test("a clip past TOOL_ROUND_INLINE_BYTE_LIMIT still rides inline outside a tool-calling turn", async () => {
-  // No tools means no repeated resend, so the ordinary INLINE_BYTE_LIMIT applies exactly as
-  // it always has — the lower line is specific to the cost multi-round tool calling adds.
-  const bytes = Buffer.alloc(TOOL_ROUND_INLINE_BYTE_LIMIT + 1);
-  let uploaded = false;
-  const fetchImpl = async () => sseResponse([frame("ok", { finishReason: "STOP" })]);
-
-  await collect(
-    streamChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: SOURCE_URL }],
-      models: ["gemini-3.6-flash"],
-      fetchImpl,
-      clipOptions: {
-        resolveImpl: async () => resolvedClip(),
-        downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
-        uploadImpl: async () => {
-          uploaded = true;
-          return { name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" };
-        },
-      },
-    }),
-  );
-
-  assert.ok(!uploaded, "with no tools in play, this clip is well under the ordinary inline ceiling");
+  assert.equal(downloads, 1, "the clip cache serves the bytes after the first turn");
+  assert.equal(uploads, 0, "and nothing is uploaded, so no follow-up waits on PROCESSING");
+  resetClipCache();
 });
 
 test("a video that can't be fetched becomes a note, not a failed conversation", async () => {

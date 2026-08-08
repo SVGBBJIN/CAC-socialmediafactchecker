@@ -1514,27 +1514,6 @@ async function* parseSSE(body, deadline, idleTimeoutMs) {
 export const MAX_TOOL_ROUNDS = 3;
 
 /**
- * Below this, a clip stays inline even in a turn that will run tool-calling rounds.
- *
- * `INLINE_BYTE_LIMIT` (lib/tiktok.js) is about whether the *first* request can carry the
- * clip at all — past it, base64 alone would eat too much of the 20MB request cap. This is a
- * second, lower line, drawn for the cost `MAX_TOOL_ROUNDS`'s own comment names but never
- * acted on: every tool round resends `contents` whole, so an inline clip's base64 rides
- * along again on every one of up to four requests in the same turn, not once.
- *
- * The fix is not "always upload instead" — video pays a real, size-independent cost to get
- * there. Once uploaded it has to leave `PROCESSING` before any request may reference it
- * (see `UPLOAD_TIMEOUT_MS`/`POLL_INTERVAL_MS` in lib/gemini-files.js), and that wait lands
- * entirely in front of round 0, where an inline clip pays nothing. For a clip small enough
- * that resending it three extra times is still cheap, forcing that wait on round 0 to save
- * bandwidth on rounds most turns don't even reach would make the common case slower to chase
- * a saving that was never worth much. So the line only moves for clips big enough that the
- * resend cost is the one actually worth avoiding — meaningfully below `INLINE_BYTE_LIMIT`,
- * not down at zero.
- */
-export const TOOL_ROUND_INLINE_BYTE_LIMIT = 4 * 1024 * 1024;
-
-/**
  * What the model is told when its tool budget is spent and it asked to search anyway.
  *
  * Withdrawing the declaration is usually enough — see the note at the call site — but
@@ -1726,10 +1705,6 @@ export async function* streamChat({
   const deadline = new StreamDeadline(signal);
   let clips = null;
   let articles = null;
-  // Known from the parameters alone, so it is available before the clip is even resolved —
-  // see `TOOL_ROUND_INLINE_BYTE_LIMIT` for why a turn that will run tool rounds needs a
-  // different inline/upload line than one that answers in a single request.
-  const useTools = Boolean(tools?.length && toolRunner);
 
   try {
     // Clips are fetched before the first model call, not per model: the bytes are the same
@@ -1751,11 +1726,6 @@ export async function* streamChat({
         apiKey,
         fetchImpl,
         signal,
-        // Lower for a turn that can run tool-calling rounds, so a clip that would otherwise
-        // ride inline gets uploaded once instead of resent whole on every round — see
-        // `TOOL_ROUND_INLINE_BYTE_LIMIT`. A caller-supplied `inlineByteLimit` inside
-        // `clipOptions` still wins: this is a default for the common case, not a floor.
-        inlineByteLimit: useTools ? TOOL_ROUND_INLINE_BYTE_LIMIT : undefined,
         ...clipOptions,
       });
     }
@@ -1784,6 +1754,7 @@ export async function* streamChat({
     const media = contents.some((turn) =>
       turn.parts.some((part) => part.file_data || part.inline_data),
     );
+    const useTools = Boolean(tools?.length && toolRunner);
     let announced = null;
     // Whether the model has already been told, in so many words, that its tools are gone.
     // Once is a nudge; twice would be a loop, and a loop here is unbounded model calls.

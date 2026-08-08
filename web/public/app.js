@@ -533,22 +533,56 @@ async function pingLink(url) {
  * count as before this existed. The only request this adds is for a link that is pasted and
  * then never checked.
  *
- * The entries expire, and they have to. A TikTok resolve carries CDN URLs signed for a few
- * minutes (see the `hint` note on `runCheck`), so a warm result held past its usefulness is
- * one failed download and a re-resolve — slower than never having warmed it. Past the TTL
- * the entry is dropped and the click resolves the link itself, exactly as it used to.
+ * ## Two things come back from a warm-up, and they go stale at completely different rates
+ *
+ * The **verdict** — is this a link this app can check, and where did it land — does not
+ * really expire. A TikTok URL that resolved a minute ago is the same URL now, and the worst
+ * case if the post vanished in between is that the check reports it, which is what a check
+ * is for.
+ *
+ * The **hint** does. It carries CDN URLs signed for a short window, and `runCheck`'s own
+ * `@param hint` note is unambiguous about the consequence: a hint older than that is "one
+ * failed download and a re-resolve — slower than simply resolving. Seconds old is the only
+ * age at which this is worth anything." A stale hint is not a wasted optimisation, it is a
+ * *negative* one — the download attempt 403s, `fetchClipMedia` re-resolves, and the turn has
+ * paid a whole extra CDN round trip to end up exactly where it would have started.
+ *
+ * Holding both to one lifetime is what makes this dangerous, and it is the mistake this
+ * originally shipped with: a single 45s TTL meant the ordinary paste → read the page → click
+ * flow handed the server a hint that was almost certainly expired, and made the common case
+ * slower than having no warm-up at all. So they are separated. The verdict is reused for as
+ * long as it is plausibly about the same link; the hint is dropped the moment it is old
+ * enough to be a liability, and the check then resolves server-side exactly as it did before
+ * any of this existed. Dropping it costs one resolve. Keeping it costs a failed download
+ * *and* that same resolve.
  */
-const WARM_TTL_MS = 45_000;
-const warmedLinks = new Map(); // url → { at, pending }
+const WARM_TTL_MS = 5 * 60 * 1000;
+const HINT_MAX_AGE_MS = 8_000;
+const warmedLinks = new Map(); // url → { startedAt, settledAt, pending }
 
-function warmedResult(url) {
+function warmedEntry(url) {
   const warm = warmedLinks.get(url);
   if (!warm) return null;
-  if (Date.now() - warm.at > WARM_TTL_MS) {
+  if (Date.now() - warm.startedAt > WARM_TTL_MS) {
     warmedLinks.delete(url);
     return null;
   }
-  return warm.pending;
+  return warm;
+}
+
+/**
+ * A warm verdict with its hint kept only if the hint is still worth having.
+ *
+ * Aged from when the resolve *finished*, not when it was kicked off: the signed URLs inside
+ * it were minted at the far end of that request, so a slow resolve produces a hint that is
+ * already younger than its own start time would suggest.
+ */
+function usableWarmResult(warm, result) {
+  if (!result?.hint) return result;
+  const mintedAt = warm.settledAt ?? warm.startedAt;
+  if (Date.now() - mintedAt <= HINT_MAX_AGE_MS) return result;
+  const { hint, ...withoutHint } = result;
+  return withoutHint;
 }
 
 /**
@@ -560,13 +594,17 @@ function warmedResult(url) {
  * same rejected promise and reports it in the one place that is allowed to.
  */
 function warmLink(url) {
-  if (!url || warmedResult(url)) return;
+  if (!url || warmedEntry(url)) return;
   // One at a time. A reader editing a URL by hand would otherwise leave a warm entry per
   // keystroke-that-parsed, each holding a resolve nobody is going to use.
   warmedLinks.clear();
-  const pending = verifyLinkViewable(url);
-  pending.catch(() => {});
-  warmedLinks.set(url, { at: Date.now(), pending });
+  const warm = { startedAt: Date.now(), settledAt: null, pending: null };
+  warm.pending = verifyLinkViewable(url).then((result) => {
+    warm.settledAt = Date.now();
+    return result;
+  });
+  warm.pending.catch(() => {});
+  warmedLinks.set(url, warm);
 }
 
 async function verifyLinkViewable(url) {
@@ -762,19 +800,19 @@ function showLinkConfirm(url, result) {
  * putting a dialog in front of someone who was only asking a question.
  */
 async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
-  // Whatever `warmLink` started when this was pasted, if it is still fresh — see there for
-  // why reusing the promise rather than the result is what keeps the request count the same.
-  // A rejected warm-up is not a cached failure: it is discarded and the verification is run
-  // again here, where its outcome has somewhere to go.
+  // Whatever `warmLink` started when this was pasted — see there for why reusing the promise
+  // rather than the result is what keeps the request count the same, and why the hint that
+  // comes back with it is aged separately from the verdict. A rejected warm-up is not a
+  // cached failure: it is discarded and the verification is run again here, where its outcome
+  // has somewhere to go.
+  const warm = warmedEntry(url);
   let result;
   try {
-    result = await (warmedResult(url) ?? verifyLinkViewable(url));
+    result = warm ? usableWarmResult(warm, await warm.pending) : await verifyLinkViewable(url);
   } catch {
     result = await verifyLinkViewable(url);
   } finally {
-    // Spent either way. A warm entry is worth exactly one check — re-checking the same link
-    // a minute later would otherwise hand `runCheck` a hint whose signed URLs have aged out,
-    // which costs a failed download and a re-resolve rather than saving anything.
+    // Spent either way: a warm entry is worth exactly one check.
     warmedLinks.delete(url);
   }
   const target = result.url ?? url;
@@ -2926,10 +2964,13 @@ el.linkInput.addEventListener("keydown", (event) => {
  * Start verifying a link as soon as the composer holds one, so the Check button doesn't have
  * to wait for it — see `warmLink`.
  *
- * Debounced rather than fired per keystroke: someone typing a URL by hand passes through a
- * dozen strings that parse as links and are none of them the one they meant. A paste settles
- * instantly and clears the debounce on its first (and only) input event, which is the case
- * this is actually for — nobody types a TikTok URL.
+ * Debounced, and not lightly: someone typing a URL by hand passes through a dozen strings
+ * that parse as links and are none of them the one they meant, and each one that got through
+ * would spend a `/api/resolve-media` call — which shares `/api/chat`'s rate-limit window, not
+ * the looser one `/api/probe-link` gives itself. Burning a reader's fact-check allowance on
+ * prefixes of a URL they are still typing would be a self-inflicted 429, and a 429 is the
+ * slowest thing this app can do. Hence a long idle window rather than a twitchy one; the
+ * paste listener below is what actually covers the common case.
  */
 let warmTimer = null;
 el.linkInput.addEventListener("input", () => {
@@ -2940,7 +2981,7 @@ el.linkInput.addEventListener("input", () => {
   if (inFlight) return;
   const url = normalizeLink(el.linkInput.value);
   if (!url) return;
-  warmTimer = setTimeout(() => warmLink(url), 350);
+  warmTimer = setTimeout(() => warmLink(url), 700);
 });
 
 // A paste needs no debounce and is the case this is actually for: the string arrived whole,
