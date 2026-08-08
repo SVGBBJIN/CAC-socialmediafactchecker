@@ -8,7 +8,8 @@
     "dev": "node server.js",
     "test": "node --test test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js test-article.js test-browser-resolve.js test-post-preview.js test-device.js test-timestamps.js test-claims.js test-research.js",
     "search": "node bin/search.mjs",
-    "find": "node bin/find.mjs"
+    "find": "node bin/find.mjs",
+    "bench": "node bin/bench.mjs"
   },
   "engines": {
     "node": ">=20"

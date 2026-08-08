@@ -39,6 +39,7 @@ npm run dev                  # → http://127.0.0.1:3000, node server.js, no bui
 npm test                     # all unit tests, no network, no deps
 npm run search -- --claim "..." --query "..."   # run one search from the terminal
 npm run find -- --url <url> --find "..."        # run one in-page find, --show-scores for both ranking halves
+npm run bench                                  # structural cost of a turn: wire bytes/round, cache savings, hot-path CPU
 ```
 
 There is no bundler and no `node_modules` dependency for `web/` itself — everything used is
@@ -107,16 +108,23 @@ cold start — a latency optimisation, never a correctness assumption.
 What is deliberately **not** cached is the media in the request body. An attached clip under
 `INLINE_BYTE_LIMIT` rides as inline base64 in every round of the turn, so a three-round
 fact-check uploads the same megabytes three times, and the video's frame tokens are
-re-prefilled each round on top of that. The obvious fix — push every clip through the Files
-API so later rounds send a `file_uri` instead — was considered and rejected: the Files API
-makes video wait in `PROCESSING` before it can be referenced at all (see
-`lib/gemini-files.js`), which moves the cost from rounds 2-3, where it overlaps nothing, to
-in front of round 1, where the reader is already watching the longest silence in the request.
-It also would not touch the prefill, which is the larger half. Past the inline limit the
-Files API is used because there is no alternative, and that is the only reason it is used.
-Don't reach for it as a speed measure without a measurement saying the trade inverted — and
-note that `GEMINI_MEDIA_RESOLUTION` is the lever that actually addresses prefill, kept off by
-default for the reason documented at `MEDIA_RESOLUTIONS`.
+re-prefilled each round on top of that. The obvious fix is to push every clip through the
+Files API so later rounds send a `file_uri` instead. **That question is open, not settled** —
+`npm run bench` (`bin/bench.mjs`) measures the part of it that unit tests can measure, and
+what it shows is that the cost is `size × 4/3 × rounds`: a 3 MB clip moves 12 MB over a
+three-round turn, and a 12 MB one moves 64 MB over four. The counter-argument is a real cost
+but a *timed* one, not a byte one — a Files upload waits in `PROCESSING` before it can be
+referenced, which moves work in front of round 1 where the reader is already watching the
+longest silence in the request. Note that `lib/gemini-files.js` polls at 250 ms and backs
+off, so for a short clip that wait is small; how small is exactly what nobody has timed.
+
+So: the byte case for the Files API gets stronger the larger the clip, and `INLINE_BYTE_LIMIT`
+is a threshold on clip size alone that does not know how many rounds the turn will run. Before
+changing it, time an upload-and-poll against real clips and compare it to what the saved bytes
+buy on the deployment's actual upstream — the two numbers `bench` deliberately does not
+invent. And note that none of this touches prefill, which is re-paid per round either way and
+is the larger half; `GEMINI_MEDIA_RESOLUTION` is the lever for that one, kept off by default
+for the reason documented at `MEDIA_RESOLUTIONS`.
 
 **Citations are enforced by a ledger, not a heuristic.** The model has two tools:
 `web_search` (`lib/search.js`, schema in `lib/search-schema.js`) and `find_in_page`
