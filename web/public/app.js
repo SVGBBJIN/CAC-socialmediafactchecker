@@ -26,6 +26,7 @@ import {
   activeAt,
 } from "./timestamps.js";
 import { VERDICTS, splitVerdict, splitClaims, aggregateVerdictKey } from "./claims.js";
+import { createResearchTracker, visibleItems } from "./research.js";
 
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
@@ -1042,70 +1043,11 @@ const chatProgress = createProgressTicker("chatProgressBar");
 /**
  * Live chips for the searches and reads one turn dispatches — the third perceived-latency
  * trick alongside the stage label and the progress bar above, and the one that turns "the
- * server is doing *something*" into "the server is looking up this specific claim".
- *
- * The server already announces a round's calls before any of them has an answer — the
- * `{type: "searching"}` frame exists precisely so the reader isn't staring at "Reading the
- * sources" for however long the round's slowest search takes with nothing to show for it —
- * but nothing on this side ever listened for it. This is that listener.
- *
- * Matching a later result back to the chip it belongs to is the one thing worth getting
- * right here. `streamChat`'s tool loop (`lib/gemini.js`) resolves a round's calls and
- * yields their frames strictly in dispatch order, so the *n*th `search` frame this round
- * always answers the *n*th `web_search` call this round announced — and likewise for
- * `find`. Two FIFO queues, one per tool, is what that guarantees turn into: a completion
- * frame of a given type always resolves the oldest still-pending chip of that same type,
- * regardless of how the two tools were interleaved in the actual call order, and regardless
- * of which one happened to finish first (see `SEARCH_STRAGGLER_MS` in lib/verified-chat.js
- * — a dropped straggler resolves its chip to `error` the same way a real failure does).
- * Rounds never overlap — a round's calls are all awaited before the next one is dispatched
- * — so nothing here needs to know which round a chip belongs to.
+ * server is doing *something*" into "the server is looking up this specific claim". The
+ * tracker itself (`createResearchTracker`, `visibleItems`) lives in research.js so its one
+ * bit of real logic — matching a completion frame back to the chip it belongs to — can be
+ * unit tested without a DOM; what's here is just turning its items into markup.
  */
-function createResearchTracker() {
-  let items = [];
-  let searchQueue = [];
-  let findQueue = [];
-  let nextId = 0;
-
-  function push(kind, label) {
-    const item = { id: nextId++, kind, label: label || (kind === "find" ? "reading…" : "searching…"), status: "pending" };
-    items.push(item);
-    (kind === "search" ? searchQueue : findQueue).push(item);
-  }
-
-  function settle(queue, status) {
-    const item = queue.shift();
-    if (item) item.status = status;
-  }
-
-  return {
-    reset() {
-      items = [];
-      searchQueue = [];
-      findQueue = [];
-    },
-    onSearching(frame) {
-      for (const s of frame.searches ?? []) push("search", s.query);
-      for (const r of frame.reads ?? []) push("find", r.find || r.url);
-    },
-    onSearch(frame) {
-      settle(searchQueue, frame.error ? "error" : "done");
-    },
-    onFind(frame) {
-      settle(findQueue, frame.error ? "error" : "done");
-    },
-    get items() {
-      return items;
-    },
-  };
-}
-
-/** Most recent chips first is wrong here — dispatch order is the order the reader watched
- * them appear in, and reversing it on every update would make the row shuffle. Bounded to
- * the tail instead: an early round's chips have already told their story by the time a
- * later one is running, so only the most recent few stay worth the space. */
-const MAX_VISIBLE_RESEARCH_CHIPS = 4;
-
 function researchChipHTML(item) {
   const icon =
     item.status === "pending"
@@ -1123,7 +1065,7 @@ function researchChipHTML(item) {
  * below, which patches an existing row in place. Both read the same tracker, so a mid-stream
  * rebuild (a new claim skeleton growing in) never loses chips that already resolved. */
 function researchChipsHTML(tracker) {
-  return tracker.items.slice(-MAX_VISIBLE_RESEARCH_CHIPS).map(researchChipHTML).join("");
+  return visibleItems(tracker).map(researchChipHTML).join("");
 }
 
 /** Patches an already-mounted chip row rather than re-rendering the card around it — the
