@@ -188,6 +188,32 @@ export default async function handler(req, res) {
       articleOptions: { cache: true },
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
+      // The two numbers nobody had before: what a round's request cost to push out and how
+      // long Gemini then spent reading it, and — for a clip — which representation it rode
+      // in and what that representation's own overhead was. Logged rather than sent to the
+      // browser: this is operator data for deciding INLINE_BYTE_LIMIT, not something a
+      // reader has any use for. See "Sizing INLINE_BYTE_LIMIT" in web/README.md.
+      if (frame.type === "timing") {
+        if (frame.scope === "round") {
+          const kb = Math.round(frame.requestBytes / 1024);
+          const mbps = frame.uploadMs > 0 ? ((frame.requestBytes * 8) / frame.uploadMs / 1000).toFixed(1) : "–";
+          trace(
+            `round ${frame.round} ${frame.model}${frame.media ? " +media" : ""}: ` +
+              `${kb} KB up in ${frame.uploadMs}ms (${mbps} Mbps), ` +
+              `prefill ${frame.prefillMs ?? "–"}ms, total ${frame.totalMs}ms`,
+          );
+        } else if (frame.scope === "clip") {
+          trace(
+            frame.kind === "inline"
+              ? `clip: inline, ${Math.round(frame.bytes / 1024)} KB base64 per round`
+              : `clip: files, ${Math.round(frame.bytes / 1024)} KB transferred in ${frame.transferMs}ms, ` +
+                `then ${frame.processingMs}ms processing over ${frame.polls} poll(s)`,
+          );
+        }
+        // Not forwarded: the browser has no use for it, and an SSE frame per round is
+        // bytes down the wire for nobody.
+        continue;
+      }
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);
       if (frame.type === "find") {
         trace(

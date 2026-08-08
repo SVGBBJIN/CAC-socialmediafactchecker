@@ -318,6 +318,53 @@ the case where it does — a clip and the page it is arguing about — is the ex
 it used to pay for them end to end. They share nothing but the clock, so they overlap; each
 still records its own failures, and neither can fail the other.
 
+### Sizing `INLINE_BYTE_LIMIT`
+
+A clip under `INLINE_BYTE_LIMIT` rides as inline base64. Gemini has no memory between
+requests, so that base64 sits at the front of `contents` and is re-sent on **every round of
+the turn** — the real cost is `size × 4/3 × rounds`, not `size`. `npm run bench` prints the
+table; the short version is that a 3 MB clip moves 12 MB over a three-round turn and a 12 MB
+one moves 64 MB over four.
+
+The alternative is pushing more clips through the Files API, where the bytes go out once and
+later rounds send a `file_uri`. That trades repeated megabytes for a one-off `PROCESSING`
+wait, and it lands *in front of round one*, where the reader is already sitting through the
+longest silence in the request. Which side of the trade a given deployment is on depends on
+two numbers no amount of reading the code will tell you: **its upstream bandwidth**, and **how
+long Gemini actually takes to process a clip of the size you get**.
+
+Both are now measured on every request and written to the runtime log. Read them there:
+
+```
+[chat] 3s clip: inline, 4021 KB base64 per round
+[chat] 4s round 0 gemini-3.6-flash +media: 4023 KB up in 890ms (37.1 Mbps), prefill 3120ms, total 4400ms
+[chat] 12s round 1 gemini-3.6-flash +media: 4061 KB up in 910ms (36.6 Mbps), prefill 2980ms, total 4180ms
+```
+
+- `up in …ms (… Mbps)` is the request body going out. **That Mbps figure is the upstream
+  number** — bytes over time-to-headers — and it is what turns saved bytes into saved
+  seconds. In the trace above, the ~8 MB the second and third rounds re-send is costing about
+  1.8 seconds of pure repetition.
+- `prefill` is Gemini reading the request before it says anything. A `file_uri` does **not**
+  shrink this, and on a video check it is the larger half. `GEMINI_MEDIA_RESOLUTION` is the
+  only lever that touches it.
+
+To get the other number, run a canary with `INLINE_BYTE_LIMIT=0`, which forces every clip
+onto the Files API. The clip line then reports the split that matters:
+
+```
+[chat] 3s clip: files, 3015 KB transferred in 640ms, then 280ms processing over 2 poll(s)
+```
+
+`processing` is the whole of what inline is buying its way out of. Compare it against
+`uploadMs × (rounds − 1)` from the round lines on a comparable turn — that is the repetition
+the Files API would delete. If processing is reliably smaller, set `INLINE_BYTE_LIMIT` to
+something below the default and keep it there; if it swings into seconds on the clips your
+users actually paste, the default is right and this section is why.
+
+Do the comparison on real clips before moving the number. The default stays where it is
+precisely because nobody has run it yet.
+
 ## How a pasted page reaches the model
 
 Anything that is not a TikTok, YouTube or Instagram link is a **page**, and a page is now a

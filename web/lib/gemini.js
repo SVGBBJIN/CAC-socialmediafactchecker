@@ -653,6 +653,31 @@ export const CLIP_CACHE_TTL_MS = 10 * 60 * 1000;
  */
 export const CLIP_CACHE_MAX_BYTES = 48 * 1024 * 1024;
 
+/**
+ * The inline/Files threshold, from the environment.
+ *
+ * `INLINE_BYTE_LIMIT` is a bound on what one *request* may carry, so its default is a fact
+ * about the API and not a tuning choice — see its doc comment in lib/tiktok.js. What is a
+ * tuning choice is going *below* it deliberately: a clip under the ceiling still rides
+ * inline in every round of the turn, so its real cost is `size × 4/3 × rounds`, and the
+ * threshold cannot see the round count. Pushing more clips onto the Files API trades those
+ * repeated megabytes for one upload plus a `PROCESSING` wait.
+ *
+ * Which side of that trade a deployment is on depends on two numbers this code cannot know:
+ * its own upstream bandwidth and how long Gemini takes to process a real clip. Both are now
+ * measured and logged per request — see the `timing` frames in `streamRound` and
+ * `resolveClipParts`, and "Sizing INLINE_BYTE_LIMIT" in web/README.md for how to read them.
+ * This variable is what turns the answer into a config change rather than a deploy.
+ *
+ * Set to 0 to push every clip through the Files API. Values above the built-in ceiling are
+ * ignored: past it the request would simply be refused, which is not a knob, it's a break.
+ */
+export function inlineByteLimitFromEnv(env = process.env) {
+  const raw = Number(env?.INLINE_BYTE_LIMIT);
+  if (!Number.isFinite(raw) || raw < 0) return INLINE_BYTE_LIMIT;
+  return Math.min(raw, INLINE_BYTE_LIMIT);
+}
+
 export function clipCacheLimitFromEnv(env = process.env) {
   const raw = Number(env?.CLIP_CACHE_MAX_BYTES);
   return Number.isFinite(raw) && raw >= 0 ? raw : CLIP_CACHE_MAX_BYTES;
@@ -768,7 +793,7 @@ export async function resolveClipParts(
     apiKey,
     fetchImpl = fetch,
     signal,
-    inlineByteLimit = INLINE_BYTE_LIMIT,
+    inlineByteLimit = inlineByteLimitFromEnv(),
     maxAttachments = MAX_CLIP_ATTACHMENTS,
     providers = CLIP_PROVIDERS,
     resolveImpl = null,
@@ -994,6 +1019,11 @@ export async function resolveClipParts(
             entry.part = {
               inline_data: { mime_type: media.mimeType, data: media.bytes.toString("base64") },
             };
+            // What this clip will cost on the wire, recorded where the choice is made. The
+            // base64 copy is 4/3 the bytes and rides in *every* round of the turn, so the
+            // real cost is this times the round count — which is the thing `INLINE_BYTE_LIMIT`
+            // cannot see when it decides on size alone. See `npm run bench`.
+            entry.wire = { kind: "inline", bytes: Math.ceil((media.bytes.length * 4) / 3) };
           } else {
             const file = await uploadImpl(media.bytes, media.mimeType, {
               apiKey,
@@ -1002,6 +1032,10 @@ export async function resolveClipParts(
             });
             uploads.push(file);
             entry.part = { file_data: { file_uri: file.uri, mime_type: file.mimeType } };
+            // The other half of the same comparison: raw bytes, sent once, plus the wait
+            // that only this path pays. `uploadFile` splits transfer from processing
+            // because only the second is what inline buys its way out of.
+            entry.wire = { kind: "files", bytes: media.bytes.length, ...(file.timing ?? {}) };
           }
           // Bytes live in `media`, the upload above and — for the next turn of this
           // conversation — the clip cache, which is bounded and expires. Nothing here writes
@@ -1763,6 +1797,13 @@ export async function* streamChat({
     if (articlesPending) articles = await articlesPending;
     if (deadline.callerAborted) return;
 
+    // What each attached clip chose and what that choice cost — see `entry.wire` in
+    // `resolveClipParts`. One frame per clip, and only for clips that got as far as being
+    // attached: a link that failed has an error to report and no wire cost to measure.
+    for (const entry of new Set(clips?.attachments?.values() ?? [])) {
+      if (entry?.wire) yield { type: "timing", scope: "clip", ...entry.wire };
+    }
+
     const contents = toGeminiContents(messages, { clips, articles, attachVideos: attachMedia });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
@@ -2041,6 +2082,18 @@ async function* streamRound({
     }
 
     let response;
+    // Serialised once and measured, rather than handed straight to `fetch`. The byte count
+    // is half of the only throughput number this app can observe about itself: the request
+    // body is uploaded before Gemini can answer, so bytes over time-to-headers is the
+    // effective upstream of whatever this is deployed on. Nothing else in the pipeline
+    // reveals that, and it is what decides whether the megabytes an inline clip re-sends
+    // every round are worth engineering away. See `npm run bench` and web/README.md.
+    const payload = JSON.stringify(requestBody);
+    const requestBytes = Buffer.byteLength(payload, "utf8");
+    const sentAt = Date.now();
+    let headersAt = null;
+    let firstTokenAt = null;
+
     // No-ops unless a caller asked for a header deadline; there is no default one.
     deadline.arm(requestTimeoutMs);
     try {
@@ -2052,9 +2105,10 @@ async function* streamRound({
           // server access logs, headers generally don't.
           "x-goog-api-key": apiKey,
         },
-        body: JSON.stringify(requestBody),
+        body: payload,
         signal: deadline.signal,
       });
+      headersAt = Date.now();
     } catch (error) {
       // The caller giving up is not a failure to report — it's what they asked for.
       if (deadline.callerAborted) return void (abandoned = true);
@@ -2175,6 +2229,10 @@ async function* streamRound({
     deadline.arm(idleTimeoutMs);
     try {
       for await (const frame of parseSSE(response.body, deadline, idleTimeoutMs)) {
+        // The first frame carrying anything at all — text, a thought, a tool call. This is
+        // the moment the wait actually ends, and on a round with a video attached it is the
+        // longest silence in the request: everything before it is upload plus prefill.
+        firstTokenAt ??= Date.now();
         if (flushed) {
           yield frame;
           continue;
@@ -2233,6 +2291,28 @@ async function* streamRound({
     // aborts the shared controller mid-turn: the sources arrive, the answer never does,
     // and nothing anywhere reports an error. Re-armed by the next round's own fetch.
     deadline.clear();
+
+    // What this round actually cost, reported after it is over so nothing about the
+    // measurement sits in front of the reader. Purely observational — no control flow reads
+    // it — which is why it goes out as its own frame rather than being folded into `model`:
+    // a consumer that ignores it is unaffected, and `api/chat.js` logs it.
+    yield {
+      type: "timing",
+      scope: "round",
+      round,
+      model,
+      media,
+      requestBytes,
+      // Time to response headers. With a large inline clip this is dominated by pushing the
+      // body out, which is exactly what makes `requestBytes / uploadMs` the upstream number.
+      uploadMs: headersAt - sentAt,
+      // Headers to the first frame with content in it: Gemini reading the request — the
+      // video's frames above all — before it has anything to say. The half that a `file_uri`
+      // would *not* help with, and the larger one on a video check.
+      prefillMs: firstTokenAt == null ? null : firstTokenAt - headersAt,
+      totalMs: Date.now() - sentAt,
+    };
+
     answered = true;
     return;
   }

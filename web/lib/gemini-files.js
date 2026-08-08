@@ -119,6 +119,14 @@ async function failure(response, step) {
  * Upload `bytes` and return once the API reports the file usable.
  *
  * `sleep` is injected so tests don't actually wait out the polling interval.
+ *
+ * The returned file carries a `timing` — `{transferMs, processingMs, polls}` — because the
+ * split between those two is the whole of the open question about this path. Sending the
+ * bytes is work that has to happen either way and scales with the clip; waiting out
+ * `PROCESSING` is work that exists *only* on this path, and it is the reason inline is
+ * still the default under `INLINE_BYTE_LIMIT`. Nobody has ever timed the second number
+ * against real clips, so nothing measures it — until this does. See `npm run bench` and the
+ * experiment written up in web/README.md.
  */
 export async function uploadFile(
   bytes,
@@ -136,6 +144,16 @@ export async function uploadFile(
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   },
 ) {
+  const startedAt = now();
+  let transferredAt = startedAt;
+  let polls = 0;
+  // Stamped onto whichever file object is ultimately returned. Built here rather than at
+  // each `return` so the two exits below can't disagree about what was measured.
+  const timing = () => ({
+    transferMs: transferredAt - startedAt,
+    processingMs: now() - transferredAt,
+    polls,
+  });
   // 1. Start a resumable session.
   const start = await withTimeout(UPLOAD_ENDPOINT, {
     fetchImpl,
@@ -177,13 +195,16 @@ export async function uploadFile(
   });
   if (!finalize.ok) throw await failure(finalize, "upload");
 
+  // The bytes are on their way out by here; everything past this point is waiting.
+  transferredAt = now();
+
   let file = parseFile(await finalize.json());
 
   // 3. Wait for it to leave PROCESSING, looking soon and then progressively less often.
   const deadline = now() + maxPollWaitMs;
   let interval = pollIntervalMs;
   for (;;) {
-    if (file.state.toUpperCase() === "ACTIVE") return file;
+    if (file.state.toUpperCase() === "ACTIVE") return { ...file, timing: timing() };
     if (file.state.toUpperCase() !== "PROCESSING") {
       throw new FilesError(`Gemini Files upload finished in state ${file.state}.`);
     }
@@ -191,6 +212,7 @@ export async function uploadFile(
 
     await sleep(interval);
     interval = Math.min(Math.round(interval * POLL_BACKOFF), maxPollIntervalMs);
+    polls += 1;
     if (signal?.aborted) throw new FilesError("Upload abandoned.", { retryable: false });
 
     const polled = await withTimeout(`${FILES_ENDPOINT}/${file.name}`, {

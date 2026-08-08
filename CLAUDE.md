@@ -119,12 +119,22 @@ longest silence in the request. Note that `lib/gemini-files.js` polls at 250 ms 
 off, so for a short clip that wait is small; how small is exactly what nobody has timed.
 
 So: the byte case for the Files API gets stronger the larger the clip, and `INLINE_BYTE_LIMIT`
-is a threshold on clip size alone that does not know how many rounds the turn will run. Before
-changing it, time an upload-and-poll against real clips and compare it to what the saved bytes
-buy on the deployment's actual upstream — the two numbers `bench` deliberately does not
-invent. And note that none of this touches prefill, which is re-paid per round either way and
-is the larger half; `GEMINI_MEDIA_RESOLUTION` is the lever for that one, kept off by default
-for the reason documented at `MEDIA_RESOLUTIONS`.
+is a threshold on clip size alone that does not know how many rounds the turn will run. The
+two numbers that settle it — this deployment's upstream, and how long Gemini really spends in
+`PROCESSING` — are the two `bench` deliberately does not invent, because neither is knowable
+without the network. **Both are now instrumented.** Every round emits a
+`{type: "timing", scope: "round"}` frame (request bytes, upload ms, prefill ms) and every
+attached clip a `{scope: "clip"}` one (inline base64 size, or transfer/processing/polls for a
+Files upload); `api/chat.js` writes them to the runtime log and does not forward them to the
+browser. `INLINE_BYTE_LIMIT` is readable from the environment so the answer is a config change
+rather than a deploy. The procedure — including the `INLINE_BYTE_LIMIT=0` canary that is the
+only way to get a processing number for typical short clips — is "Sizing INLINE_BYTE_LIMIT"
+in web/README.md. The default has not moved, and should not move until someone has run it.
+
+And note that none of this touches prefill, which is re-paid per round either way and is the
+larger half — the `timing` frame reports it separately for exactly that reason.
+`GEMINI_MEDIA_RESOLUTION` is the lever for that one, kept off by default for the reason
+documented at `MEDIA_RESOLUTIONS`.
 
 **Citations are enforced by a ledger, not a heuristic.** The model has two tools:
 `web_search` (`lib/search.js`, schema in `lib/search-schema.js`) and `find_in_page`

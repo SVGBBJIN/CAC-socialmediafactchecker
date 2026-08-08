@@ -30,6 +30,7 @@ import {
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
   resetClipCache,
+  inlineByteLimitFromEnv,
 } from "./lib/gemini.js";
 import {
   withRetry,
@@ -58,6 +59,7 @@ import {
   fetchTikTokOEmbed,
   isTikTokLink,
   TikTokError,
+  INLINE_BYTE_LIMIT,
 } from "./lib/tiktok.js";
 import {
   instagramShortcode,
@@ -112,8 +114,16 @@ async function collect(iterator) {
  * and more of them is not a behaviour change, so tests about *what was answered* filter
  * them out; the test that they are emitted at all is `progress is reported…` below.
  */
+/**
+ * The frames that are *about the answer*, with the progress reporting filtered out.
+ *
+ * `stage` and `timing` are both observational — one tells the reader where the request got
+ * to, the other tells the operator what it cost — and neither carries a word of the answer.
+ * Tests that assert on the shape of a reply want them gone, so that adding a new one is not
+ * a change every such test has to be edited for.
+ */
 function answerFrames(frames) {
-  return frames.filter((f) => f.type !== "stage");
+  return frames.filter((f) => f.type !== "stage" && f.type !== "timing");
 }
 
 /* ---------------- Gemini client ---------------- */
@@ -155,7 +165,7 @@ test("reassembles a frame split across two network chunks", async () => {
     }),
   );
 
-  assert.deepEqual(frames.at(-1), { type: "delta", text: "split me" });
+  assert.deepEqual(answerFrames(frames).at(-1), { type: "delta", text: "split me" });
 });
 
 test("falls through a 404 model to the next in the chain", async () => {
@@ -308,7 +318,7 @@ test("MAX_TOKENS keeps the text and says it was cut off; other finish reasons th
   // The tokens that arrived are kept — they're real — but the turn is announced as
   // incomplete rather than passing for a finished answer.
   assert.equal(ok.find((f) => f.type === "delta").text, "cut off");
-  assert.deepEqual(ok.at(-1), { type: "truncated", reason: "max_output_tokens" });
+  assert.deepEqual(answerFrames(ok).at(-1), { type: "truncated", reason: "max_output_tokens" });
 
   await assert.rejects(
     collect(
@@ -340,7 +350,7 @@ test("a truncated answer reports where the tokens actually went, when Gemini say
     }),
   );
 
-  assert.deepEqual(frames.at(-1), {
+  assert.deepEqual(answerFrames(frames).at(-1), {
     type: "truncated",
     reason: "max_output_tokens",
     thoughtsTokens: 3000,
@@ -742,7 +752,7 @@ test("a final frame with no trailing newline is still delivered", () => {
       models: ["m"],
       fetchImpl: async () => sseResponse([body]),
     }),
-  ).then((frames) => assert.deepEqual(frames.at(-1), { type: "delta", text: "tail" }));
+  ).then((frames) => assert.deepEqual(answerFrames(frames).at(-1), { type: "delta", text: "tail" }));
 });
 
 // There is no header deadline by default any more. A caller that opts into one still
@@ -1174,7 +1184,7 @@ test("a rate-limited model falls through to the next one instead of failing the 
   );
 
   assert.equal(tried.length, 2);
-  assert.equal(frames.at(-1).text, "still answered");
+  assert.equal(answerFrames(frames).at(-1).text, "still answered");
 
   const announced = frames.find((f) => f.type === "model");
   assert.equal(announced.model, "gemini-3.5-flash");
@@ -2186,7 +2196,7 @@ test("streamChat attaches the clip and cleans up its upload when the answer is d
   assert.deepEqual(sentBody.contents[0].parts[0], {
     file_data: { file_uri: "https://files/xyz", mime_type: "video/mp4" },
   });
-  assert.deepEqual(frames.at(-1), { type: "delta", text: "watched it" });
+  assert.deepEqual(answerFrames(frames).at(-1), { type: "delta", text: "watched it" });
   assert.deepEqual(deleted, ["files/xyz"]);
 });
 
@@ -3831,4 +3841,164 @@ test("a chain that fails some other way is not waited out", async () => {
     /./,
   );
   assert.deepEqual(waits, [], "a mixed failure is not a capacity spike");
+});
+/* ---------------- instrumentation: what a turn cost ---------------- */
+/*
+ * These frames exist to settle one open question — whether a clip under INLINE_BYTE_LIMIT
+ * should keep riding inline, given it is re-sent in full on every round of the turn. That
+ * makes them load-bearing for a decision rather than decoration, so what they report has to
+ * be right. See `inlineByteLimitFromEnv` and "Sizing INLINE_BYTE_LIMIT" in web/README.md.
+ */
+
+test("every round reports what it cost, separating the upload from the wait that follows", async () => {
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([frame("hello")]),
+    }),
+  );
+
+  const timing = frames.filter((f) => f.type === "timing" && f.scope === "round");
+  assert.equal(timing.length, 1, "one per round that answered");
+  const [t] = timing;
+  assert.equal(t.round, 0);
+  assert.equal(t.model, "m");
+  assert.equal(t.media, false);
+  // The body was serialised and measured, not guessed at.
+  assert.ok(t.requestBytes > 0);
+  // The three clocks are separated because they answer different questions: bytes over
+  // uploadMs is the deployment's upstream, prefillMs is Gemini reading the request, and
+  // only the first is what a file_uri would shrink.
+  assert.ok(t.uploadMs >= 0);
+  assert.ok(t.prefillMs >= 0);
+  assert.ok(t.totalMs >= t.uploadMs);
+});
+
+test("a round with no content at all still reports, with prefill unknown rather than zero", async () => {
+  // Gemini closing the stream without ever sending a frame that carries anything. There is
+  // no first token, so there is no time-to-first-token — and reporting 0 would put a
+  // fictional zero into the very average the number exists to inform.
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([]),
+    }),
+  );
+
+  const t = frames.find((f) => f.type === "timing" && f.scope === "round");
+  assert.equal(t.prefillMs, null);
+});
+
+test("each round of a tool turn reports separately, so a per-round cost is visible", async () => {
+  let round = 0;
+  const fetchImpl = async () => {
+    round += 1;
+    return round === 1
+      ? sseResponse([
+          `data: ${JSON.stringify({
+            candidates: [{ content: { parts: [{ functionCall: { name: "t", args: {} } }] } }],
+          })}\n\n`,
+        ])
+      : sseResponse([frame("done")]);
+  };
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["m"],
+      fetchImpl,
+      tools: [{ function_declarations: [{ name: "t", description: "d", parameters: { type: "object", properties: {} } }] }],
+      toolRunner: async () => ({ response: { result: "ok" } }),
+    }),
+  );
+
+  const rounds = frames.filter((f) => f.type === "timing" && f.scope === "round");
+  assert.deepEqual(rounds.map((f) => f.round), [0, 1]);
+  // The second round carries the first round's tool result on top of everything the first
+  // one sent, so it is strictly the larger request — which is the growth the whole question
+  // about re-sending media is about.
+  assert.ok(rounds[1].requestBytes > rounds[0].requestBytes);
+});
+
+test("an inline clip reports the base64 cost it will pay on every round", async () => {
+  const bytes = Buffer.alloc(3000);
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${SOURCE_URL}` }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([frame("watched")]),
+      attachMedia: true,
+      clipOptions: {
+        resolveImpl: async () => resolvedClip(),
+        downloadImpl: async () => ({ bytes, mimeType: "video/mp4" }),
+      },
+    }),
+  );
+
+  const clip = frames.find((f) => f.type === "timing" && f.scope === "clip");
+  assert.equal(clip.kind, "inline");
+  // 4/3 the raw bytes — the base64 inflation, which is what actually goes on the wire.
+  assert.equal(clip.bytes, Math.ceil((3000 * 4) / 3));
+  // And the round it rides in is at least that big, which is the point of measuring both.
+  const round0 = frames.find((f) => f.type === "timing" && f.scope === "round");
+  assert.ok(round0.requestBytes >= clip.bytes);
+  assert.equal(round0.media, true);
+});
+
+test("a Files-API clip reports the transfer and the processing wait as separate numbers", async () => {
+  // The split is the whole point: transfer is work inline pays too (more of it, every
+  // round), while processing is the cost that exists only on this path and is the reason
+  // inline is still the default under the ceiling.
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${SOURCE_URL}` }],
+      models: ["m"],
+      fetchImpl: async () => sseResponse([frame("watched")]),
+      attachMedia: true,
+      clipOptions: {
+        inlineByteLimit: 8,
+        resolveImpl: async () => resolvedClip(),
+        downloadImpl: async () => ({ bytes: Buffer.alloc(64), mimeType: "video/mp4" }),
+        uploadImpl: async () => ({
+          name: "files/abc",
+          uri: "https://files/abc",
+          mimeType: "video/mp4",
+          state: "ACTIVE",
+          timing: { transferMs: 120, processingMs: 260, polls: 2 },
+        }),
+        deleteImpl: async () => {},
+      },
+    }),
+  );
+
+  const clip = frames.find((f) => f.type === "timing" && f.scope === "clip");
+  assert.deepEqual(clip, {
+    type: "timing",
+    scope: "clip",
+    kind: "files",
+    bytes: 64,
+    transferMs: 120,
+    processingMs: 260,
+    polls: 2,
+  });
+});
+
+test("inlineByteLimitFromEnv reads the override, and refuses to exceed the API's own ceiling", () => {
+  assert.equal(inlineByteLimitFromEnv({}), INLINE_BYTE_LIMIT, "unset means the built-in default");
+  assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: "1048576" }), 1048576);
+  // Zero is meaningful and not "unset": push every clip through the Files API, which is how
+  // the experiment in web/README.md gets a processing number for typical short clips.
+  assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: "0" }), 0);
+  // Raising it past the ceiling is not a knob, it is a request Gemini would refuse outright.
+  assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: String(999 * 1024 * 1024) }), INLINE_BYTE_LIMIT);
+  // Garbage falls back rather than disabling attachment entirely.
+  assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: "lots" }), INLINE_BYTE_LIMIT);
+  assert.equal(inlineByteLimitFromEnv({ INLINE_BYTE_LIMIT: "-5" }), INLINE_BYTE_LIMIT);
 });

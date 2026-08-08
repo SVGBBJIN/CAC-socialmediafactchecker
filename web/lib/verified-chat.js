@@ -664,8 +664,8 @@ function sourcesFrame(rows, { cited, truncated, streamError }) {
 /**
  * Stream one verified answer.
  *
- * Yields the frames `streamChat` does — including its `{type: "stage"}` progress reports,
- * which pass straight through — plus:
+ * Yields the frames `streamChat` does — including its `{type: "stage"}` progress reports and
+ * its `{type: "timing"}` cost reports, both of which pass straight through — plus:
  * - `{type: "searching", searches}` — these searches have just been dispatched, all at
  *   once. Sent before any of them returns, so the UI can show the wait rather than a gap.
  * - `{type: "search", …}` — a search ran; `results` are its numbered sources, or `error`.
