@@ -1039,6 +1039,106 @@ const runProgress = createProgressTicker("runProgressBar");
 const followupProgress = createProgressTicker("followupProgressBar");
 const chatProgress = createProgressTicker("chatProgressBar");
 
+/**
+ * Live chips for the searches and reads one turn dispatches — the third perceived-latency
+ * trick alongside the stage label and the progress bar above, and the one that turns "the
+ * server is doing *something*" into "the server is looking up this specific claim".
+ *
+ * The server already announces a round's calls before any of them has an answer — the
+ * `{type: "searching"}` frame exists precisely so the reader isn't staring at "Reading the
+ * sources" for however long the round's slowest search takes with nothing to show for it —
+ * but nothing on this side ever listened for it. This is that listener.
+ *
+ * Matching a later result back to the chip it belongs to is the one thing worth getting
+ * right here. `streamChat`'s tool loop (`lib/gemini.js`) resolves a round's calls and
+ * yields their frames strictly in dispatch order, so the *n*th `search` frame this round
+ * always answers the *n*th `web_search` call this round announced — and likewise for
+ * `find`. Two FIFO queues, one per tool, is what that guarantees turn into: a completion
+ * frame of a given type always resolves the oldest still-pending chip of that same type,
+ * regardless of how the two tools were interleaved in the actual call order, and regardless
+ * of which one happened to finish first (see `SEARCH_STRAGGLER_MS` in lib/verified-chat.js
+ * — a dropped straggler resolves its chip to `error` the same way a real failure does).
+ * Rounds never overlap — a round's calls are all awaited before the next one is dispatched
+ * — so nothing here needs to know which round a chip belongs to.
+ */
+function createResearchTracker() {
+  let items = [];
+  let searchQueue = [];
+  let findQueue = [];
+  let nextId = 0;
+
+  function push(kind, label) {
+    const item = { id: nextId++, kind, label: label || (kind === "find" ? "reading…" : "searching…"), status: "pending" };
+    items.push(item);
+    (kind === "search" ? searchQueue : findQueue).push(item);
+  }
+
+  function settle(queue, status) {
+    const item = queue.shift();
+    if (item) item.status = status;
+  }
+
+  return {
+    reset() {
+      items = [];
+      searchQueue = [];
+      findQueue = [];
+    },
+    onSearching(frame) {
+      for (const s of frame.searches ?? []) push("search", s.query);
+      for (const r of frame.reads ?? []) push("find", r.find || r.url);
+    },
+    onSearch(frame) {
+      settle(searchQueue, frame.error ? "error" : "done");
+    },
+    onFind(frame) {
+      settle(findQueue, frame.error ? "error" : "done");
+    },
+    get items() {
+      return items;
+    },
+  };
+}
+
+/** Most recent chips first is wrong here — dispatch order is the order the reader watched
+ * them appear in, and reversing it on every update would make the row shuffle. Bounded to
+ * the tail instead: an early round's chips have already told their story by the time a
+ * later one is running, so only the most recent few stay worth the space. */
+const MAX_VISIBLE_RESEARCH_CHIPS = 4;
+
+function researchChipHTML(item) {
+  const icon =
+    item.status === "pending"
+      ? '<span class="chip-spinner" aria-hidden="true"></span>'
+      : item.status === "error"
+        ? '<span class="chip-icon" aria-hidden="true">&times;</span>'
+        : '<span class="chip-icon" aria-hidden="true">&#10003;</span>';
+  const verb = item.kind === "find" ? "Reading" : "Searching";
+  const title = `${verb}: ${item.label}`;
+  return `<span class="research-chip research-chip-${item.status}" title="${escapeHTML(title)}">${icon}<span class="chip-text">${escapeHTML(item.label)}</span></span>`;
+}
+
+/** The chip row's own markup, for embedding in a loading view that's about to be built
+ * from scratch (`renderRunningCard`, `claimGridStatusHTML`) — as opposed to `renderResearchChips`
+ * below, which patches an existing row in place. Both read the same tracker, so a mid-stream
+ * rebuild (a new claim skeleton growing in) never loses chips that already resolved. */
+function researchChipsHTML(tracker) {
+  return tracker.items.slice(-MAX_VISIBLE_RESEARCH_CHIPS).map(researchChipHTML).join("");
+}
+
+/** Patches an already-mounted chip row rather than re-rendering the card around it — the
+ * same shape as `setStatusText`, just without the crossfade, since a chip appearing or
+ * resolving is itself the animation (`chip-in`/the spinner-to-checkmark swap in CSS). */
+function renderResearchChips(containerId, tracker) {
+  const node = document.getElementById(containerId);
+  if (!node) return;
+  node.innerHTML = researchChipsHTML(tracker);
+}
+
+const runResearch = createResearchTracker();
+const followupResearch = createResearchTracker();
+const chatResearch = createResearchTracker();
+
 /* ---------------------------------------------------------------- claim grid */
 /*
  * The claims pane used to be one card, or several stacked vertically with a scrollbar to
@@ -1212,6 +1312,7 @@ function renderChatPane({ newest = -1 } = {}) {
           pendingChat.error
             ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
             : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span></div>
+               <div class="research-chips" id="chatResearch">${researchChipsHTML(chatResearch)}</div>
                <div class="mini-progress"><div class="mini-progress-bar" id="chatProgressBar"></div></div>`
         }
       </div>`
@@ -1243,6 +1344,7 @@ async function runChat(question) {
   el.linkInput.value = "";
   const image = pendingImage;
   clearPendingImage();
+  chatResearch.reset();
   renderChatPane();
   chatProgress.start();
   updateComposerMode();
@@ -1264,6 +1366,18 @@ async function runChat(question) {
       onStage: (frame) => {
         setStatusText("chatStatus", stageText(frame));
         chatProgress.bump(frame?.stage);
+      },
+      onSearching: (frame) => {
+        chatResearch.onSearching(frame);
+        renderResearchChips("chatResearch", chatResearch);
+      },
+      onSearch: (frame) => {
+        chatResearch.onSearch(frame);
+        renderResearchChips("chatResearch", chatResearch);
+      },
+      onFind: (frame) => {
+        chatResearch.onFind(frame);
+        renderResearchChips("chatResearch", chatResearch);
       },
     });
     chatProgress.finish();
@@ -1761,6 +1875,7 @@ function renderRunningCard() {
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus">Sending to the model…</div>
         <div class="source-counter" id="runCounter">&nbsp;</div>
+        <div class="research-chips" id="runResearch">${researchChipsHTML(runResearch)}</div>
         <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
       </div>
     </div>`;
@@ -1777,6 +1892,7 @@ function claimGridStatusHTML(stage) {
     <div class="claim-grid-status">
       <div class="status-text stage-text" id="runStatus">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
+      <div class="research-chips" id="runResearch">${researchChipsHTML(runResearch)}</div>
       <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
     </div>`;
 }
@@ -2022,6 +2138,7 @@ function threadHTML(entry, newestIndex) {
             pendingFollowup.error
               ? `<div class="thread-error">${escapeHTML(pendingFollowup.error)}</div>`
               : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span></div>
+                 <div class="research-chips" id="followupResearch">${researchChipsHTML(followupResearch)}</div>
                  <div class="mini-progress"><div class="mini-progress-bar" id="followupProgressBar"></div></div>`
           }
         </div>`
@@ -2156,7 +2273,10 @@ function requestHeaders() {
  * An error with *no* text before it is unchanged: there is nothing to preserve, so it
  * throws and the caller reports it as the whole outcome of the turn.
  */
-async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, clipHints } = {}) {
+async function streamChat(
+  messages,
+  { signal, onStage, onSearchCount, onSearching, onSearch, onFind, onDelta, clipHints } = {},
+) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
@@ -2203,6 +2323,11 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, c
       }
 
       if (frame.type === "stage") onStage?.(frame);
+      // The round's searches and reads, announced before any of them has an answer — see
+      // the `{type: "searching"}` frame documented on `verifiedChat` in lib/verified-chat.js.
+      // `onSearch`/`onFind` below are each call's own result, landing later and in the same
+      // order these were announced in.
+      else if (frame.type === "searching") onSearching?.(frame);
       else if (frame.type === "delta") {
         answer += frame.text;
         onDelta?.(answer);
@@ -2211,7 +2336,10 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, c
       } else if (frame.type === "answer") {
         answer = frame.text;
         onDelta?.(answer);
-      } else if (frame.type === "search") onSearchCount?.(++searchCount);
+      } else if (frame.type === "search") {
+        onSearchCount?.(++searchCount);
+        onSearch?.(frame);
+      } else if (frame.type === "find") onFind?.(frame);
       else if (frame.type === "truncated") truncated = true;
       else if (frame.type === "sources") {
         if (!frame.provisional) sources = frame.sources;
@@ -2332,6 +2460,7 @@ async function runCheck(url, existingId, hint) {
   }
   selectedId = id;
   pendingFollowup = null;
+  runResearch.reset();
   persistLibrary();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
@@ -2371,6 +2500,21 @@ async function runCheck(url, existingId, hint) {
         // nudge the bar rather than let it sit on the last stage's floor while sources
         // keep arriving.
         runProgress.bump(Math.min(35 + n * 5, 70));
+      },
+      // The chip row: a query appears the moment its round dispatches it, and resolves to
+      // a checkmark, an ✕, or — for a straggler `SEARCH_STRAGGLER_MS` gave up on — the same
+      // ✕ a genuine failure gets, once its own result lands.
+      onSearching: (frame) => {
+        runResearch.onSearching(frame);
+        renderResearchChips("runResearch", runResearch);
+      },
+      onSearch: (frame) => {
+        runResearch.onSearch(frame);
+        renderResearchChips("runResearch", runResearch);
+      },
+      onFind: (frame) => {
+        runResearch.onFind(frame);
+        renderResearchChips("runResearch", runResearch);
       },
       // The model writes one `[[claim: …]]` marker per claim as it drafts the answer,
       // well before the full answer (and its citations) are finished — there's no
@@ -2439,6 +2583,7 @@ async function runFollowup(entry, question) {
   el.linkInput.value = "";
   const image = pendingImage;
   clearPendingImage();
+  followupResearch.reset();
   renderResultCard(entry, { animateAnalysis: false });
   followupProgress.start();
   updateComposerMode();
@@ -2456,6 +2601,18 @@ async function runFollowup(entry, question) {
       onStage: (frame) => {
         setStatusText("followupStatus", stageText(frame));
         followupProgress.bump(frame?.stage);
+      },
+      onSearching: (frame) => {
+        followupResearch.onSearching(frame);
+        renderResearchChips("followupResearch", followupResearch);
+      },
+      onSearch: (frame) => {
+        followupResearch.onSearch(frame);
+        renderResearchChips("followupResearch", followupResearch);
+      },
+      onFind: (frame) => {
+        followupResearch.onFind(frame);
+        renderResearchChips("followupResearch", followupResearch);
       },
     });
     followupProgress.finish();
