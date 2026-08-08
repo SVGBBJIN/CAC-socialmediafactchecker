@@ -40,6 +40,7 @@ import { RESEARCH_TOOLS, validateFindQuery, FindQueryError } from "./find-schema
 import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
+import { captionQuery, captionSearchEnabled } from "./caption-search.js";
 
 /**
  * The system prompt.
@@ -71,6 +72,15 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "marker. Your training data is not a source: it is stale, it cannot be checked by the",
   "reader, and you are not permitted to cite it. If you have not looked something up, you",
   "do not know it.",
+  "",
+  "One exception, and it is a narrow one. On a post with a caption the app may have run a",
+  "single search for that caption before your first turn, to save you a round — those",
+  "sources arrive in the prompt, already numbered in the same ledger, and you may cite them",
+  "exactly as if you had retrieved them. They are the only sources you will ever be given",
+  "that you did not ask for. Treat them as a starting point and nothing more: the query came",
+  "from a caption, which is often not what the post is really claiming, so read what they",
+  "actually say, use the ones that bear on a claim you are checking, and ignore the rest.",
+  "An unused source costs nothing. Everything they do not settle, you still have to look up.",
   "",
   "WHEN THERE IS NOTHING TO CHECK",
   "Not every message is a fact-check. A greeting, a question about what you do, a thank-you",
@@ -304,6 +314,74 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
  */
 export const PREFETCH_PER_SEARCH = 3;
 export const PREFETCH_PER_TURN = 9;
+
+/**
+ * One speculative search off the post's caption, run while the clip downloads.
+ *
+ * `resolveClipParts` calls this back the moment a link's metadata is known and before its
+ * bytes are fetched (see `onResolved` in lib/gemini.js). That gap — download, upload, and
+ * the whole of the model's first round — is the longest stretch in the request, and until
+ * now not one source was retrieved during any of it: the first search could not be issued
+ * until the model had watched the clip and said what to look for.
+ *
+ * So this fills it. The results go into the same ledger under the same numbering, reach the
+ * model as prompt context (`describePresearch`), and are offered rather than imposed — a
+ * caption is a guess about what matters, and the model is told as much.
+ *
+ * Everything about it is best-effort. A caption not worth searching, a search that fails, a
+ * provider that is down: each leaves the turn exactly as it would have been, because none of
+ * this is the answer — it is a head start on the evidence.
+ *
+ * Returns a controller rather than a promise so the caller can start it from a callback and
+ * collect from somewhere else entirely: `frames()` drains what the UI still owes the reader,
+ * and `note()` waits for the text the prompt needs.
+ */
+function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled }) {
+  let pending = null;
+  let started = false;
+  const queued = [];
+
+  return {
+    /** Fire, at most once per turn. Extra links are the reader's second paste, not a claim. */
+    start({ platform, resolved }) {
+      if (!enabled || started) return;
+      const query = captionQuery(resolved?.caption, { platform });
+      if (!query) return;
+      started = true;
+
+      pending = Promise.resolve(searchImpl(query, { env, fetchImpl, signal }))
+        .then((result) => {
+          const entries = ledger.record(result);
+          if (entries.length === 0) return null;
+          queued.push({
+            type: "search",
+            // Flagged so a consumer can say where it came from. The reader did not ask for
+            // this search and the model did not issue it; presenting it as though the model
+            // had would misdescribe the one part of the trail that is the app's own doing.
+            presearch: true,
+            query: result.query,
+            claim: result.claim,
+            provider: result.provider,
+            results: entries.map(({ n, title, url, domain }) => ({ n, title, url, domain })),
+          });
+          return CitationLedger.describePresearch(entries, result);
+        })
+        // A speculative search that fails is a non-event: no frame, no note, no mention.
+        // The model searches for itself exactly as it did before this existed.
+        .catch(() => null);
+    },
+
+    /** Frames the UI hasn't been shown yet. Drained, so nothing is emitted twice. */
+    frames() {
+      return queued.splice(0);
+    },
+
+    /** The prompt note, once the search has landed. Null when there is nothing to say. */
+    async note() {
+      return pending ? await pending : null;
+    },
+  };
+}
 
 export function searchEnabled(env = process.env) {
   // Read case-insensitively, like the provider keys: an operator who typed
@@ -589,10 +667,28 @@ export async function* verifiedChat({
   signal,
   prefetchPerSearch = PREFETCH_PER_SEARCH,
   prefetchPerTurn = PREFETCH_PER_TURN,
+  // Named rather than left in `geminiOptions` because this layer has to add to it: the
+  // caption search hangs off `onResolved`, and a blind `...geminiOptions` spread would let
+  // the caller's own clip options (the API route sets the cache, hints and browser worker
+  // there) silently replace the callback instead of merging with it.
+  clipOptions = {},
   ...geminiOptions
 }) {
   const enabled = searchEnabled(env);
   const ledger = new CitationLedger();
+  // Only on a fresh check. A follow-up replays the whole history, so the clip resolves
+  // again and would fire the same caption search on every question the reader asks — for a
+  // caption the model has had in front of it since the first turn. The clip is attached
+  // once, at its first mention; this is the turn-level twin of that rule.
+  const firstTurn = !messages.some((m) => m?.role === "assistant");
+  const captionSearch = makeCaptionSearch({
+    ledger,
+    env,
+    fetchImpl,
+    signal,
+    searchImpl,
+    enabled: enabled && firstTurn && captionSearchEnabled(env),
+  });
   // One cache for the whole turn, so a second find on a page already open costs the ranking
   // and nothing else. The model is expected to come back to a good source for another claim —
   // that is the point of reading one rather than searching again.
@@ -657,6 +753,24 @@ export async function* verifiedChat({
     yield { type: "break" };
   }
 
+  /**
+   * Hand the reader anything the caption search has produced since we last looked.
+   *
+   * Drained at every frame rather than emitted where the search lands, because the search
+   * lands inside `streamChat`'s clip attachment — a stretch this generator is blocked on and
+   * cannot yield from. This is the first opportunity, and it is still early: these sources
+   * reach the screen before the model has said a word.
+   */
+  function* drainCaptionFrames() {
+    for (const frame of captionSearch.frames()) {
+      yield frame;
+      if (ledger.size > sentSources) {
+        sentSources = ledger.size;
+        yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+      }
+    }
+  }
+
   try {
     for await (const frame of streamChat({
       apiKey,
@@ -666,8 +780,18 @@ export async function* verifiedChat({
       fetchImpl,
       tools: enabled ? RESEARCH_TOOLS : null,
       toolRunner: enabled ? toolRunner : null,
+      // Started from inside the clip attachment, the moment the caption is known and before
+      // a single byte of video is fetched — see `makeCaptionSearch`.
+      clipOptions: { ...clipOptions, onResolved: (info) => captionSearch.start(info) },
+      // Collected once the download is done, by which time it has almost always long since
+      // finished. Returns the numbered sources as a note on the last user turn.
+      contextNotes: async () => {
+        const note = await captionSearch.note();
+        return note ? [note] : [];
+      },
       ...geminiOptions,
     })) {
+      yield* drainCaptionFrames();
       // The model went off to use a tool, or a fresh round began on top of text already
       // written. Either way what it writes next is a new paragraph, not a continuation.
       if (frame.type === "search" || frame.type === "find") needsBreak = true;
@@ -732,6 +856,12 @@ export async function* verifiedChat({
         yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
       }
     }
+    // In practice the drain inside the loop has already run — `contextNotes` waits for the
+    // caption search before the first round is even sent, so its frames are queued well
+    // before any frame arrives to drain them. This is for the turn where that doesn't hold:
+    // a stream that produced nothing at all would otherwise retrieve sources and never
+    // mention them.
+    yield* drainCaptionFrames();
   } catch (error) {
     // The caller closing the tab is what they asked for, not a failure to dress up.
     if (signal?.aborted) return;

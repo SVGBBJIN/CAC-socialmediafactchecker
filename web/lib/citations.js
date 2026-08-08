@@ -171,6 +171,43 @@ export class CitationLedger {
   }
 
   /**
+   * The caption search's sources, as a note in the prompt rather than a tool result.
+   *
+   * This search was issued by the app before the model's first turn — see
+   * lib/caption-search.js — so there is no `functionCall` for it to be the response to. It
+   * arrives as prompt context instead, in the same bracketed shape `describeClip` and
+   * `describeArticle` already use for everything else the app went and fetched on the
+   * model's behalf.
+   *
+   * Two things it must say and `describe` does not. Where the sources came from, because
+   * the model did not ask for them and unexplained numbered sources invite the assumption
+   * that they are already-verified findings. And that they are *offered*, not binding: the
+   * query came from a caption, which is a guess about what is worth checking, and a model
+   * that felt obliged to use a bad guess would be worse off than one that searched for
+   * itself. They cost nothing to ignore — they are already paid for.
+   */
+  static describePresearch(entries, searchResult) {
+    if (entries.length === 0) return null;
+    const lines = entries.map(
+      (e) =>
+        `[${e.n}] ${e.title}\n    ${e.url}\n    ${e.snippet || "(no snippet)"}${
+          e.published ? `\n    published: ${e.published}` : ""
+        }`,
+    );
+    return (
+      `[Before you started, the app searched for the post's own caption and retrieved ` +
+      `${entries.length} source${entries.length === 1 ? "" : "s"} (query: ` +
+      `"${searchResult.query}", via ${searchResult.provider}, ${searchResult.retrievedAt}). ` +
+      `They are numbered in the same ledger as anything you retrieve yourself and you may ` +
+      `cite them the same way:\n\n${lines.join("\n\n")}\n\n` +
+      `These are a head start, not an instruction. The caption is not always what the post ` +
+      `is really claiming, so use the ones that actually bear on a claim you are checking ` +
+      `and ignore the rest — an unused source costs nothing. Search for whatever they do ` +
+      `not settle, and cite nothing they do not support.]`
+    );
+  }
+
+  /**
    * One find's passages, as the model reads them.
    *
    * Written to make the passages the evidence and the marker their address. Two details

@@ -796,6 +796,15 @@ export async function resolveClipParts(
     // Null means every failure below is reported exactly as it was before this existed.
     browserWorker = null,
     browserResolveImpl = browserResolve,
+    // Called once per link the moment its metadata is known and *before* its bytes are
+    // fetched, with `{link, platform, resolved}`. That gap is the point: resolving yields
+    // the caption, the creator and the duration, and the download that follows is the
+    // slowest thing in the request — so a caller with something useful to do with a caption
+    // (see lib/caption-search.js) can do it in time that was going to be spent waiting
+    // either way. Fires for cached and hinted links too, since a caller wanting the caption
+    // wants it however we came by it. Never awaited and never allowed to throw: this is a
+    // notification, and a caller that breaks must not take the clip down with it.
+    onResolved = null,
   } = {},
 ) {
   const caching = Boolean(cache) && cacheTTLMs > 0 && cacheMaxBytes > 0;
@@ -893,24 +902,48 @@ export async function resolveClipParts(
     // or running Instagram's post query — not the download itself, so every link is resolved
     // at once rather than one after another. With the usual two-link paste this halves the
     // wait before either download can even start.
+    // Told as soon as *this* link is known rather than once the slowest of them is, since
+    // the whole value of the hook is the head start. Swallows its own failure: a caller's
+    // bad callback is not a reason to lose the clip.
+    const announce = (link, provider, resolved) => {
+      if (!onResolved || !resolved) return resolved;
+      try {
+        onResolved({ link, platform: provider.platform, resolved });
+      } catch {
+        // Best-effort by design — see `onResolved`.
+      }
+      return resolved;
+    };
+
     const resolutions = await Promise.all(
       links.map(async ({ link, provider }) => {
         const hit = cached.get(link);
-        if (hit) return { link, provider, resolved: hit.resolved, cached: hit };
+        if (hit) {
+          announce(link, provider, hit.resolved);
+          return { link, provider, resolved: hit.resolved, cached: hit };
+        }
         // A real cache hit outranks a hint: it already holds the bytes, so it skips the
         // download too, where a hint only skips the resolve.
         const hinted = hints?.get(`${provider.platform}:${link}`);
-        if (hinted) return { link, provider, resolved: hinted, fromHint: true };
+        if (hinted) {
+          announce(link, provider, hinted);
+          return { link, provider, resolved: hinted, fromHint: true };
+        }
         try {
           const resolve = resolveImpl ?? provider.resolve;
-          return { link, provider, resolved: await resolve(link, clipOptions) };
+          const resolved = await resolve(link, clipOptions);
+          announce(link, provider, resolved);
+          return { link, provider, resolved };
         } catch (error) {
           // A throttled, refused or shape-changed resolve is a failure about *us* rather
           // than about the post — the page is public and a browser can see it. Ask one.
           // `escalate` keeps the original error if the worker can't help, so the worst case
           // is the note the user would have got anyway, arriving later.
           const resolved = await escalate(link, provider.platform, error);
-          if (resolved) return { link, provider, resolved };
+          if (resolved) {
+            announce(link, provider, resolved);
+            return { link, provider, resolved };
+          }
           return { link, provider, error: describeFailure(error) };
         }
       }),
@@ -1243,14 +1276,36 @@ function describeOEmbedFallback(meta, platform, link, reason) {
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
  */
-export function toGeminiContents(messages, { clips, articles, attachVideos = true } = {}) {
+export function toGeminiContents(
+  messages,
+  { clips, articles, attachVideos = true, extraNotes = [] } = {},
+) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
   const attachedPages = new Set();
   const attachments = clips?.attachments ?? new Map();
   const pages = articles?.pages ?? new Map();
 
-  return messages.map((message) => {
+  // `extraNotes` land on the **last** user turn, and after everything else that turn had to
+  // say. Both halves of that matter, and not only for tidiness.
+  //
+  // Last, because these are things gathered for *this* request — they are not part of the
+  // conversation's history and are not replayed, so putting them on the first turn would
+  // make that turn's text differ between the request that generated them and every later
+  // one. Gemini's implicit caching keys off a stable prefix (it is on by default for every
+  // 2.5+ model in the chain), and the video sits in that prefix — attached once, at first
+  // mention, by the rules above. A note spliced in ahead of it would move the video and
+  // cost the cache hit on the single largest thing in the request.
+  //
+  // After, because the clip's own caption line and a quoted page are context about the
+  // subject, and these are context about the evidence. Reading the second before the first
+  // would be reading the answer before the question.
+  const lastUserIndex = messages.reduce(
+    (found, message, index) => (message?.role !== "assistant" ? index : found),
+    -1,
+  );
+
+  return messages.map((message, index) => {
     const isUser = message.role !== "assistant";
     const text = String(message.content ?? "");
     const parts = [];
@@ -1323,6 +1378,12 @@ export function toGeminiContents(messages, { clips, articles, attachVideos = tru
         attachedPages.add(link);
         const context = describeArticle(link, page);
         if (context) notes.push(context);
+      }
+
+      if (index === lastUserIndex) {
+        for (const note of extraNotes) {
+          if (note) notes.push(note);
+        }
       }
     }
 
@@ -1407,6 +1468,26 @@ function* framesFromLine(line) {
   const blockReason = frame?.promptFeedback?.blockReason;
   if (blockReason) {
     throw new GeminiError(`Gemini declined to answer (${blockReason}).`, { status: 502 });
+  }
+
+  // What the request actually cost, and how much of it Gemini served from cache.
+  //
+  // Reported for its own sake rather than only on the truncation path below, because
+  // `cachedContentTokenCount` is the one observable that says whether *implicit* caching is
+  // working. It is on by default for every 2.5+ model in the chain, needs no code, and
+  // keys off a stable prompt prefix — which `toGeminiContents` maintains by attaching each
+  // video exactly once at its first mention. That means the largest thing in a video
+  // fact-check is expected to be a cache hit from round 1 onward and on every follow-up
+  // turn, and until this frame existed there was no way to know whether it actually was.
+  // A silent regression there is expensive and invisible; this is what makes it neither.
+  const usage = frame?.usageMetadata;
+  if (usage && (usage.promptTokenCount != null || usage.cachedContentTokenCount != null)) {
+    yield {
+      type: "usage",
+      promptTokens: usage.promptTokenCount ?? null,
+      cachedTokens: usage.cachedContentTokenCount ?? 0,
+      totalTokens: usage.totalTokenCount ?? null,
+    };
   }
 
   const candidate = frame?.candidates?.[0];
@@ -1693,6 +1774,12 @@ export async function* streamChat({
   // one by default. /api/chat opts in — see the note there.
   attachPages = false,
   articleOptions = {},
+  // An async provider for extra prompt context the caller gathered *during* attachment —
+  // work it started off the back of `clipOptions.onResolved` and wants in front of the
+  // model. Returns strings, appended to the last user turn by `toGeminiContents`. Kept as
+  // a callback rather than a value because the whole point is that it runs concurrently
+  // with the clip download, and a value would have to have been computed before it.
+  contextNotes = null,
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
@@ -1747,7 +1834,29 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { clips, articles, attachVideos: attachMedia });
+    // Anything the caller went and got while the clip was being attached, collected now
+    // that there is nothing left to overlap it with. Awaited rather than raced: by this
+    // point the download — the long pole — is already finished, so work started before it
+    // has had that whole stretch to complete and is in practice already done. A provider
+    // that hangs anyway is the caller's own bound to enforce (`lib/search.js` has a
+    // timeout of its own); a provider that *fails* costs the turn nothing, because the
+    // note it would have added is context, not the answer.
+    let extraNotes = [];
+    if (contextNotes) {
+      try {
+        extraNotes = (await contextNotes()) ?? [];
+      } catch {
+        extraNotes = [];
+      }
+    }
+    if (deadline.callerAborted) return;
+
+    const contents = toGeminiContents(messages, {
+      clips,
+      articles,
+      attachVideos: attachMedia,
+      extraNotes,
+    });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
@@ -1819,6 +1928,14 @@ export async function* streamChat({
         if (frame.type === "function_call") {
           calls.push(frame.call);
           turn.addCall(frame.call, frame.signature);
+          continue;
+        }
+        // Stamped with the round here rather than reported bare, because the number only
+        // means something against one: a cache hit on round 0 is Gemini remembering an
+        // earlier *turn*, and a hit on round 1 is it remembering the video from a moment
+        // ago. Told apart, they say different things about what is working.
+        if (frame.type === "usage") {
+          yield { ...frame, round };
           continue;
         }
         if (frame.type === "model") {

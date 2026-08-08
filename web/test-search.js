@@ -1622,3 +1622,185 @@ test("a fabricated marker is deleted from the answer the reader is shown", async
   const sources = frames.filter((f) => f.type === "sources").at(-1);
   assert.deepEqual(sources.sources.map((s) => s.n), [1]);
 });
+
+/* ---------------------------------------------------------------- the caption pre-search */
+
+/**
+ * A clip whose resolve carries a caption, attached the way `resolveClipParts` would.
+ *
+ * `attachMedia` has to be on for the pre-search to exist at all — the hook it hangs off
+ * fires inside clip resolution — so these tests stub the resolver and downloader rather
+ * than turning attachment off the way every test above does.
+ */
+const CAPTION = "The Ridgeway bridge was closed on Monday after a structural failure";
+const CLIP_URL = "https://www.tiktok.com/@someone/video/6718335390845095173";
+
+function clipOptionsWithCaption(caption = CAPTION) {
+  return {
+    resolveImpl: async () => ({
+      videoID: "6718335390845095173",
+      mediaURL: "https://cdn.example/v.mp4",
+      sourceURL: CLIP_URL,
+      caption,
+      authorName: "Someone",
+    }),
+    downloadImpl: async () => ({ bytes: Buffer.alloc(32), mimeType: "video/mp4" }),
+  };
+}
+
+test("the caption is searched while the clip downloads, and reaches the model numbered", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "The closure began Monday [1]." }]);
+  const queries = [];
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async (query) => {
+        queries.push(query);
+        return searchResult(query.claim, ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  // One search, issued by the app rather than the model, off the caption's own words.
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].query, /Ridgeway bridge was closed on Monday/);
+  assert.match(queries[0].claim, /What the TikTok post's caption states/);
+
+  // It is on screen as its own item in the evidence trail, marked as the app's doing.
+  const searchFrame = frames.find((f) => f.type === "search");
+  assert.equal(searchFrame.presearch, true);
+  assert.deepEqual(searchFrame.results.map((r) => r.n), [1]);
+
+  // And the sources go out with it, before the model has written anything.
+  const firstSources = frames.findIndex((f) => f.type === "sources");
+  const firstDelta = frames.findIndex((f) => f.type === "delta");
+  assert.ok(firstSources !== -1 && firstSources < firstDelta);
+
+  // The model was handed the numbered sources as prompt context, on the user turn.
+  const userTurn = sent[0].contents.at(-1);
+  assert.equal(userTurn.role, "user");
+  const text = userTurn.parts.at(-1).text;
+  assert.match(text, /the app searched for the post's own caption/);
+  assert.match(text, /\[1\] Title 0/);
+});
+
+test("the caption note lands after the video part, so the cached prefix is unmoved", async () => {
+  // Implicit caching keys off a stable prefix and the video is the largest thing in it —
+  // see the note on `extraNotes` in toGeminiContents. A note placed ahead of the clip would
+  // cost the hit on every follow-up.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok [1]." }]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async (query) => searchResult(query.claim, ["https://roads.example/notice"]),
+    }),
+  );
+
+  const parts = sent[0].contents.at(-1).parts;
+  assert.ok(parts[0].inline_data, "the clip is still the first part of the turn");
+  assert.match(parts.at(-1).text, /the app searched for the post's own caption/);
+});
+
+test("a caption not worth searching costs nothing", async () => {
+  const { fetchImpl } = fakeGemini([{ text: "Nothing to check here." }]);
+  let searched = false;
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption("😂😂 #fyp #viral"),
+      searchImpl: async () => {
+        searched = true;
+        throw new Error("a decoration-only caption must not be searched");
+      },
+    }),
+  );
+
+  assert.ok(!searched);
+  assert.ok(!frames.some((f) => f.type === "search"));
+});
+
+test("CAPTION_SEARCH_ENABLED=false turns the pre-search off and leaves the turn alone", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "Checked." }]);
+  let searched = false;
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: { CAPTION_SEARCH_ENABLED: "false" },
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async () => {
+        searched = true;
+        return searchResult("x", ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  assert.ok(!searched, "the flag is honoured");
+  assert.doesNotMatch(sent[0].contents.at(-1).parts.at(-1).text, /the app searched/);
+});
+
+test("a follow-up does not re-search the caption it already has", async () => {
+  // The clip resolves again on every turn (the history is replayed), so without the
+  // first-turn guard this would spend a query per follow-up for a caption the model has
+  // had in front of it since the beginning.
+  const { fetchImpl } = fakeGemini([{ text: "Still Monday." }]);
+  let searched = false;
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [
+        { role: "user", content: `Fact-check this: ${CLIP_URL}` },
+        { role: "assistant", content: "The closure began Monday." },
+        { role: "user", content: "Are you sure?" },
+      ],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async () => {
+        searched = true;
+        return searchResult("x", ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  assert.ok(!searched);
+});
+
+test("a pre-search that fails leaves the turn exactly as it would have been", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "Checked it myself." }]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async () => {
+        throw new SearchError("provider is down");
+      },
+    }),
+  );
+
+  // No frame, no note, no mention — and above all, no failed turn.
+  assert.ok(!frames.some((f) => f.type === "search"));
+  assert.doesNotMatch(sent[0].contents.at(-1).parts.at(-1).text, /the app searched/);
+  assert.match(frames.filter((f) => f.type === "delta").map((f) => f.text).join(""), /Checked it myself/);
+});

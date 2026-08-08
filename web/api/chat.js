@@ -190,6 +190,18 @@ export default async function handler(req, res) {
             : `read: ${frame.url} — ${frame.matches} passage(s) for "${frame.find}"${frame.semantic ? "" : " (lexical only)"}`,
         );
       }
+      // Logged, never forwarded. It is operator diagnostics — the browser has no use for a
+      // token count, and prompt accounting is not something to hand a client that didn't
+      // ask. `cached` is the number worth watching: implicit caching is on by default for
+      // every 2.5+ model in the chain and the video sits in a stable prompt prefix, so on a
+      // video check this should be most of the prompt from round 1 onward and on every
+      // follow-up. A run where it stays at 0 means something moved the prefix.
+      if (frame.type === "usage") {
+        trace(
+          `round ${frame.round} tokens: ${frame.cachedTokens} cached of ${frame.promptTokens ?? "?"} prompt`,
+        );
+        continue;
+      }
       if (frame.type === "truncated" && frame.totalTokens != null) {
         // What THINKING_BUDGET_TOKENS is a guess about, made concrete: if thinking is most
         // of `totalTokens`, the budget still needs to come down (or the model needs a
