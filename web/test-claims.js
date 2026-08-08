@@ -5,7 +5,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { VERDICTS, splitVerdict, splitClaims, aggregateVerdictKey } from "./public/claims.js";
+import {
+  VERDICTS,
+  splitVerdict,
+  splitClaims,
+  claimDiff,
+  aggregateVerdictKey,
+} from "./public/claims.js";
 
 import { cleanCitations } from "./lib/citation-cleanup.js";
 import { CitationLedger } from "./lib/citations.js";
@@ -158,6 +164,57 @@ test("aggregateVerdictKey ignores claims with no verdict of their own", () => {
 
 test("aggregateVerdictKey of an empty list is null, not a guess", () => {
   assert.equal(aggregateVerdictKey([]), null);
+});
+
+/* ---------------------------------------------------------------- claimDiff */
+
+test("claimDiff asks for a rebuild when the first marker arrives", () => {
+  assert.deepEqual(claimDiff(null, splitClaims("[[claim: One]]\nchecking")), {
+    rebuild: true,
+    settled: [],
+  });
+});
+
+test("claimDiff asks for a rebuild when a later marker adds a box", () => {
+  const before = splitClaims("[[claim: One]]\nwhy\nVERDICT: Corroborated");
+  const after = splitClaims("[[claim: One]]\nwhy\nVERDICT: Corroborated\n[[claim: Two]]\nchecking");
+  const { rebuild, settled } = claimDiff(before, after);
+  assert.equal(rebuild, true);
+  // The rebuild redraws every box, settled ones included, so there is no in-place work left.
+  assert.deepEqual(settled, []);
+});
+
+test("claimDiff reports the claim whose verdict line just landed", () => {
+  // The exact moment a box can stop shimmering: the model closed the block the system
+  // prompt asked it to close. Nothing is inferred from the prose above it.
+  const before = splitClaims("[[claim: One]]\nthe evidence [1]");
+  const after = splitClaims("[[claim: One]]\nthe evidence [1]\nVERDICT: Contradicted");
+  assert.deepEqual(claimDiff(before, after), { rebuild: false, settled: [0] });
+});
+
+test("claimDiff reports nothing while a claim is only growing text", () => {
+  const before = splitClaims("[[claim: One]]\nthe");
+  const after = splitClaims("[[claim: One]]\nthe evidence so far");
+  assert.deepEqual(claimDiff(before, after), { rebuild: false, settled: [] });
+});
+
+test("claimDiff does not re-report a claim that already settled", () => {
+  const settled = splitClaims("[[claim: One]]\nwhy\nVERDICT: Disputed");
+  assert.deepEqual(claimDiff(settled, settled), { rebuild: false, settled: [] });
+});
+
+test("claimDiff settles only the claim that closed, not its unfinished neighbours", () => {
+  // The whole point: on a multi-claim check the earlier blocks are finished and readable
+  // long before the last one is, and each is handed over on its own.
+  const answer = (second) => splitClaims(`[[claim: One]]\nwhy\nVERDICT: Corroborated\n[[claim: Two]]\n${second}`);
+  const before = answer("still checking");
+  const after = answer("done\nVERDICT: Contradicted");
+  assert.deepEqual(claimDiff(before, after), { rebuild: false, settled: [1] });
+});
+
+test("claimDiff treats an answer with no markers as nothing to draw", () => {
+  // A greeting or a follow-up: `splitClaims` returns null, and null is not "zero claims".
+  assert.deepEqual(claimDiff(null, splitClaims("hello there")), { rebuild: false, settled: [] });
 });
 
 /* ---------------------------------------------------------------- coexistence with citations */

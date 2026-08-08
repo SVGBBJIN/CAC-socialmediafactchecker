@@ -529,6 +529,19 @@
     100% { background-position: 0% 50%; }
   }
 
+  /* A box that has just stopped shimmering (`settleClaimPane` in app.js). Claims settle one
+     at a time and several seconds apart, anywhere in the grid — including above where the
+     reader is looking — so the border lights up once and fades back rather than the box
+     silently swapping its contents. It is the one moment in a long check where something
+     the reader can actually *read* arrives, and it should be findable without re-scanning
+     the grid. Plays once and stops; the class is never removed because there is nothing
+     left for it to do. */
+  .claim-pane.just-settled { animation: claim-settle 1.1s ease-out 1; }
+  @keyframes claim-settle {
+    0%   { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79,209,197,0.35); }
+    100% { border-color: var(--border); box-shadow: none; }
+  }
+
   /* The loading spinner — the only child of `.claim-card` while a check is running, so
      `flex: 1` lets it claim the card's whole height and `justify-content: center` puts it
      in the middle of that instead of pinned near the top with the rest of a tall card
@@ -738,6 +751,27 @@
   }
   .source-pill:hover { color: var(--accent); border-color: var(--accent); }
   .source-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* The count of sources retrieved past the handful the strip shows. Not a link, so it must
+     not read as one. */
+  .source-pill.more { color: var(--muted); background: none; }
+
+  /* The same pills, but during the wait rather than under the answer — `renderLiveSources`
+     in app.js. Centred and borderless because they sit inside the centred `.card-loading`
+     column rather than at the foot of a finished card, and each pill fades itself in as it
+     arrives: the row grows one source at a time, which is the point of showing it at all.
+     Capped height so a long list scrolls inside the strip rather than shoving the spinner
+     and progress bar up the card as the ledger fills. */
+  .live-sources {
+    display: flex; flex-wrap: wrap; gap: 6px; justify-content: center;
+    max-width: 460px; max-height: 84px; overflow-y: auto;
+    margin-top: 6px; padding: 0 12px;
+  }
+  .live-sources:empty { display: none; }
+  .live-sources .source-pill { animation: pill-arrive 0.45s ease-out 1; }
+  @keyframes pill-arrive {
+    from { opacity: 0; transform: translateY(4px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
 
   .retry-button {
     padding: 8px 14px;
@@ -1321,10 +1355,12 @@
   [data-motion="reduced"] .thread-spinner,
   [data-motion="reduced"] .stage-text,
   [data-motion="reduced"] .skeleton-line,
+  [data-motion="reduced"] .claim-pane.just-settled,
+  [data-motion="reduced"] .live-sources .source-pill,
   [data-motion="reduced"] .icon-btn.listening { animation: none !important; transition: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .notice, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .live-sources .source-pill { animation: none !important; transition: none !important; }
   }
 
   /* ---------- Instant press feedback ---------- */

@@ -976,6 +976,99 @@ function twoRoundGemini() {
 
 const SEARCH_TOOL = [{ function_declarations: [{ name: "web_search", parameters: { type: "object" } }] }];
 
+/** A first round that asks for several searches at once, then answers. */
+function multiCallGemini(names) {
+  const sent = [];
+  const fetchImpl = async (_url, options) => {
+    sent.push(JSON.parse(options.body));
+    const parts =
+      sent.length === 1
+        ? names.map((query) => ({ functionCall: { name: "web_search", args: { query } } }))
+        : [{ text: "the answer" }];
+    return sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts } }] })}\n\n`]);
+  };
+  return { fetchImpl, sent };
+}
+
+test("a round's tool frames go out as each call lands, not behind the slowest one", async () => {
+  // The evidence trail is the only thing on screen during a tool round. Overlapping the
+  // calls shortens the round, but it buys the reader nothing if the frames are then held in
+  // call order behind whichever search took longest — which is how four searches finishing
+  // over three seconds used to show nothing at all and then everything at once.
+  const { fetchImpl } = multiCallGemini(["slow", "fast"]);
+  const release = new Map();
+  const held = new Map(
+    ["slow", "fast"].map((query) => [
+      query,
+      new Promise((resolve) => release.set(query, resolve)),
+    ]),
+  );
+
+  const frames = [];
+  const iterator = streamChat({
+    apiKey: "k",
+    messages: [{ role: "user", content: "check this" }],
+    models: ["gemini-3.6-flash"],
+    maxToolRounds: 1,
+    tools: SEARCH_TOOL,
+    toolRunner: async (call) => {
+      const query = call.args.query;
+      await held.get(query);
+      return { response: { result: query }, frame: { type: "search", query } };
+    },
+    fetchImpl,
+  });
+
+  // Consume in the background so the generator is actually pulling while the calls settle.
+  const pump = (async () => {
+    for await (const value of iterator) frames.push(value);
+  })();
+
+  // The *second* call finishes first. In call order its frame would be stuck behind "slow".
+  release.get("fast")();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(
+    frames.filter((f) => f.type === "search").map((f) => f.query),
+    ["fast"],
+    "the finished search reached the consumer without waiting for its sibling",
+  );
+
+  release.get("slow")();
+  await pump;
+  assert.deepEqual(
+    frames.filter((f) => f.type === "search").map((f) => f.query),
+    ["fast", "slow"],
+  );
+});
+
+test("function responses are still matched to their calls positionally", async () => {
+  // Gemini pairs a round's functionResponse parts with its functionCall parts by position,
+  // so however the frames above are reordered, this must not be.
+  const { fetchImpl, sent } = multiCallGemini(["first", "second"]);
+
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check this" }],
+      models: ["gemini-3.6-flash"],
+      maxToolRounds: 1,
+      tools: SEARCH_TOOL,
+      toolRunner: async (call) => {
+        // The second call settles first, and the first one settles a tick later.
+        if (call.args.query === "first") await new Promise((resolve) => setTimeout(resolve, 5));
+        return { response: { result: call.args.query } };
+      },
+      fetchImpl,
+    }),
+  );
+
+  const responses = sent[1].contents.at(-1).parts;
+  assert.deepEqual(
+    responses.map((part) => part.functionResponse.response.result),
+    ["first", "second"],
+  );
+});
+
 test("a round that can still search thinks on a shorter leash than the round that answers", async () => {
   // The largest avoidable wait in a video fact-check: the first round's whole output is a
   // list of searches, and the reader sits through however much invisible reasoning the

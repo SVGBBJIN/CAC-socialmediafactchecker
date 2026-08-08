@@ -1878,21 +1878,40 @@ export async function* streamChat({
 
       // Dispatched together, not one after another. The model is told it may ask for every
       // search it needs in a single round precisely so they can overlap here: four claims
-      // now cost one search's worth of waiting rather than four. Results are still consumed
-      // in call order, so the numbering in the ledger doesn't depend on which search won.
-      const running = calls.map((call) => {
-        const pending = Promise.resolve(toolRunner(call, { signal }));
+      // now cost one search's worth of waiting rather than four.
+      const running = calls.map((call, index) => {
+        const pending = Promise.resolve(toolRunner(call, { signal })).then((settled) => ({
+          index,
+          settled,
+        }));
         // A sibling failing first must not turn the rest of the round into unhandled
         // rejections; the real handling is the `await` below, which still throws.
         pending.catch(() => {});
         return pending;
       });
 
-      const responseParts = [];
-      for (const [index, call] of calls.entries()) {
-        const { response, frame } = await running[index];
-        if (frame) yield frame;
-        responseParts.push({ functionResponse: { name: call.name, response } });
+      // Reported as each one lands, not in call order. Overlapping the calls only shortens
+      // the round; it does nothing for the reader if the round's frames are then held behind
+      // the slowest of them, which is what awaiting in order did — four searches finishing
+      // over three seconds showed nothing until the last one, then all four at once. The
+      // evidence trail is the one thing on screen during a tool round, so each search's
+      // sources go out the moment that search has them.
+      //
+      // Nothing downstream depends on the order these arrive in. The ledger's numbering has
+      // never come from this loop: `makeToolRunner` files its results after awaiting the
+      // search, so a number has always been assigned in the order the searches *finished*.
+      // What does have to stay in call order is `responseParts`, since Gemini matches a
+      // round's function responses to its calls positionally — so that is filled by index
+      // rather than pushed.
+      const responseParts = new Array(calls.length);
+      const pending = new Set(running);
+      while (pending.size > 0) {
+        const { index, settled } = await Promise.race(pending);
+        pending.delete(running[index]);
+        if (settled.frame) yield settled.frame;
+        responseParts[index] = {
+          functionResponse: { name: calls[index].name, response: settled.response },
+        };
       }
       // Function results go back under `user`. Gemini's `Content.role` only accepts
       // `user` and `model`; the results are an input to the next turn, so they are the
