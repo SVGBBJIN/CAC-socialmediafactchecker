@@ -24,6 +24,7 @@ import {
   extractPassages,
   extractPassagesCooperative,
   fetchPage,
+  readCapped,
   rankPassages,
   findInPage,
   PageCache,
@@ -460,6 +461,66 @@ test("fetchPage refuses a page that declares itself enormous, before reading it"
     /too large/,
   );
   assert.equal(read, false);
+});
+
+test("fetchPage asks for brotli as well as the gzip the runtime already requests", async () => {
+  // A CDN's best-compressed copy is the one browsers ask for, and on real pages it is 15%
+  // (Wikipedia) to 41% (AP) smaller than the gzip copy the same host hands anything that
+  // doesn't. `undici` decodes it, so nothing below this line can tell the difference — the
+  // header is the whole change, which is exactly why it needs pinning.
+  let headers = null;
+  await fetchPage("https://example.gov/report", {
+    fetchImpl: async (_url, options) => {
+      headers = options.headers;
+      return response("<title>T</title><p>Some readable prose about a figure.</p>");
+    },
+  });
+  assert.match(headers["accept-encoding"], /\bbr\b/);
+  assert.match(headers["accept-encoding"], /\bgzip\b/);
+});
+
+test("a body that inflates past the cap is dropped mid-read, not buffered whole", async () => {
+  // The point of `readCapped`, and the reason accepting brotli is safe. `content-length`
+  // describes the *compressed* copy, so a page can declare 40KB and inflate to gigabytes;
+  // the old `await response.text()` would have had all of it in the heap before anything
+  // measured it. Here the count is of bytes as they arrive, and the stream is abandoned the
+  // moment it passes the cap — so the chunks after that point are never even pulled.
+  let pulled = 0;
+  await assert.rejects(
+    fetchPage("https://example.gov/bomb", {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        // Small on the wire. Enormous once inflated — which is the whole attack.
+        headers: { get: (n) => (n === "content-length" ? "40000" : "text/html") },
+        body: (async function* () {
+          for (;;) {
+            pulled += 1;
+            yield Buffer.alloc(1_000_000, 0x61);
+          }
+        })(),
+        text: async () => {
+          throw new Error("text() must not be reached — that is the buffering being avoided");
+        },
+      }),
+    }),
+    /too large/,
+  );
+  // 3MB cap, 1MB a chunk: the fourth is what crosses it and nothing is pulled after.
+  assert.equal(pulled, 4);
+});
+
+test("readCapped still measures a stubbed response that has no stream to walk", async () => {
+  // Every fetch stub in this file returns `{text}` and no `body`, and a runtime could do
+  // the same. The fallback must keep the cap rather than quietly stop enforcing it.
+  assert.deepEqual(await readCapped({ text: async () => "abc" }, 10), {
+    text: "abc",
+    exceeded: false,
+  });
+  assert.deepEqual(await readCapped({ text: async () => "abcdefghijk" }, 10), {
+    text: "",
+    exceeded: true,
+  });
 });
 
 /* ---------------- the page cache ---------------- */

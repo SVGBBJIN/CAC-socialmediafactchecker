@@ -450,6 +450,32 @@ async function collect(stream) {
  * replayed here for the same reason: it is the citation cleanup's edit, so a test that
  * ignored it would be asserting on text no reader is shown.
  */
+/**
+ * The sources a reader actually ends up holding, by replaying the frames the way
+ * public/app.js does: a provisional frame carries the *difference* — `added` rows and
+ * `quotes` patches — and a final, unflagged one replaces the lot.
+ *
+ * Same reasoning as `readerSees` above, and the same bug class: asserting on one frame's
+ * payload cannot see whether the browser ends up with the right bibliography, because no
+ * single provisional frame carries it any more. Only the accumulation does. Take
+ * `{ upTo }` to ask what was on screen at a given point in the stream — which is how the
+ * "before the first token" tests stay meaningful.
+ */
+function readerSources(frames, { upTo = frames.length } = {}) {
+  let rows = [];
+  for (const frame of frames.slice(0, upTo)) {
+    if (frame.type !== "sources") continue;
+    if (!frame.provisional) {
+      rows = frame.sources ?? [];
+      continue;
+    }
+    rows = rows.concat(frame.added ?? []);
+    const patches = new Map((frame.quotes ?? []).map((q) => [q.n, q.quote]));
+    rows = rows.map((row) => (patches.has(row.n) ? { ...row, quote: patches.get(row.n) } : row));
+  }
+  return rows;
+}
+
 function readerSees(frames) {
   let shown = "";
   for (const frame of frames) {
@@ -483,8 +509,7 @@ test("the model searches, the sources are numbered, the answer is shown", async 
   const searchFrame = frames.find((f) => f.type === "search");
   assert.deepEqual(searchFrame.results.map((r) => r.n), [1, 2]);
 
-  const sources = frames.find((f) => f.type === "sources");
-  assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1, 2]);
   assert.ok(!frames.some((f) => f.type === "unverified"));
 
   // The tool declaration went out, and the tool result came back in the next request.
@@ -716,8 +741,12 @@ test("the bibliography is sent while the searches land, before the answer is wri
     "the sources must arrive before the first token, so markers link as the answer streams",
   );
   assert.equal(frames[firstSources].provisional, true);
-  // Provisional means everything retrieved, since what gets cited is not known yet.
-  assert.deepEqual(frames[firstSources].sources.map((s) => s.n), [1, 2]);
+  // Provisional means everything retrieved, since what gets cited is not known yet — and
+  // it has to be on screen *by the first token*, which is what the slice checks.
+  assert.deepEqual(
+    readerSources(frames, { upTo: firstDelta }).map((s) => s.n),
+    [1, 2],
+  );
 
   // The last one is the real bibliography: not provisional, and narrowed to what was cited.
   const last = frames.filter((f) => f.type === "sources").at(-1);
@@ -753,7 +782,7 @@ test("a search that turns up nothing new does not re-send the same bibliography"
 
   const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
   assert.equal(provisional.length, 1, "one bibliography, not one per search");
-  assert.deepEqual(provisional[0].sources.map((s) => s.n), [1]);
+  assert.deepEqual(provisional[0].added.map((s) => s.n), [1]);
 });
 
 test("a stream that dies mid-answer keeps the text it wrote and its bibliography", async () => {
@@ -784,9 +813,11 @@ test("a stream that dies mid-answer keeps the text it wrote and its bibliography
   }
 
   assert.match(readerSees(frames), /The bridge cost \$2\.1 billion \[1\]\./);
-  const sources = frames.find((f) => f.type === "sources");
-  assert.ok(sources, "the bibliography must survive the failure");
-  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+  assert.ok(
+    frames.some((f) => f.type === "sources"),
+    "the bibliography must survive the failure",
+  );
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1]);
   // Still an error — the reader is owed the reason it stopped, just not at the cost of
   // everything that did arrive.
   assert.match(thrown?.message ?? "", /RECITATION/);
@@ -1071,8 +1102,7 @@ test("the same query asked twice is searched once", async () => {
   // The model still gets an answer for each call it made, and each claim is filed against
   // the source that was retrieved for it.
   assert.equal(frames.filter((f) => f.type === "search").length, 3);
-  const sources = frames.find((f) => f.type === "sources");
-  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1]);
 });
 
 test("a model that keeps asking to search past its budget is made to answer, once", async () => {
@@ -1124,7 +1154,7 @@ test("a turn that spends itself searching still ends with words, not a blank", a
   const text = frames.filter((f) => f.type === "delta").map((f) => f.text).join("");
   assert.match(text, /did not get to an answer/);
   // And the sources it did retrieve are shown, even though no marker points at them.
-  assert.deepEqual(frames.find((f) => f.type === "sources").sources.map((s) => s.n), [1]);
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1]);
 });
 
 /* ---------------- what the banners say ---------------- */
@@ -1204,6 +1234,120 @@ test("the model reads a page a search returned and quotes it under the same numb
   // …and the passage rides along, so a fallback list can show the sentence the citation
   // rests on without the reader opening anything.
   assert.equal(sources.sources[0].quote, "The final bill came to $2.1 billion.");
+});
+
+test("a mid-turn bibliography carries what changed, not the whole ledger again", async () => {
+  // Two searches and a find. The second search adds one page to a ledger of two; the find
+  // adds no page at all and only attaches a quote to one already sent. Re-sending every row
+  // each time is what made this quadratic — six searches with two finds a round spent 151KB
+  // of frames to deliver 19KB of rows — so what each frame carries is the property under
+  // test, not just what the browser ends up holding.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { calls: [{ name: "web_search", args: { query: "bridge opening", claim: "It opened in 2019" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: { url: "https://a.example/1", find: "the final cost", claim: "The bridge cost $4bn" },
+        },
+      ],
+    },
+    { text: "The final bill was $2.1 billion [1]." },
+  ]);
+
+  const pages = {
+    "bridge cost": ["https://a.example/1", "https://b.example/2"],
+    "bridge opening": ["https://a.example/1", "https://c.example/3"],
+  };
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, pages[args.query]),
+      findImpl: async (query) =>
+        findResult(query.url, query.find, ["The final bill came to $2.1 billion."]),
+    }),
+  );
+
+  const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
+  assert.equal(provisional.length, 3, "one per search, one for the find");
+
+  // First search: both its pages are new.
+  assert.deepEqual(provisional[0].added.map((s) => s.n), [1, 2]);
+  assert.deepEqual(provisional[0].quotes, []);
+
+  // Second search: [1] came back again and is not re-sent. Only [3] is new.
+  assert.deepEqual(provisional[1].added.map((s) => s.n), [3]);
+  assert.deepEqual(provisional[1].quotes, []);
+
+  // The find retrieves nothing. It carries one quote and no rows — where it used to
+  // re-send all three sources to deliver exactly this.
+  assert.deepEqual(provisional[2].added, []);
+  assert.deepEqual(provisional[2].quotes, [
+    { n: 1, quote: "The final bill came to $2.1 billion." },
+  ]);
+
+  // And replaying them the way the browser does still rebuilds the whole ledger.
+  const rebuilt = readerSources(frames.filter((f) => f.provisional === true));
+  assert.deepEqual(rebuilt.map((s) => s.n), [1, 2, 3]);
+  assert.equal(rebuilt[0].quote, "The final bill came to $2.1 billion.");
+  assert.equal(rebuilt[1].quote, undefined);
+});
+
+test("a second find on a page already quoted sends nothing at all", async () => {
+  // `sourceRows` quotes the first passage ever recorded, so a page's quote is set once and
+  // never changes. A re-read of the same page therefore has no news, and a frame saying so
+  // is the redundancy this change exists to remove.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: {
+            url: "https://a.example/1",
+            find: "the final cost",
+            claim: "The bridge cost $4bn",
+          },
+        },
+      ],
+    },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: {
+            url: "https://a.example/1",
+            find: "when the bridge opened",
+            claim: "The bridge cost $4bn",
+          },
+        },
+      ],
+    },
+    { text: "The final bill was $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+      findImpl: async (query) => findResult(query.url, query.find, ["The final bill came to $2.1 billion."]),
+    }),
+  );
+
+  const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
+  assert.equal(provisional.length, 2, "the search, and the first find's quote — nothing more");
+  assert.deepEqual(provisional[1].quotes, [
+    { n: 1, quote: "The final bill came to $2.1 billion." },
+  ]);
 });
 
 /**

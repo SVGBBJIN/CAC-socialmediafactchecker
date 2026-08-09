@@ -2413,6 +2413,9 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
   let buffer = "";
   let answer = "";
   let sources = [];
+  // The ledger as the provisional frames have built it up so far. Separate from `sources`,
+  // which stays empty until the final frame says what the answer actually cited.
+  let live = [];
   let searchCount = 0;
   let truncated = false;
   let failure = null;
@@ -2447,15 +2450,29 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
       } else if (frame.type === "search") onSearchCount?.(++searchCount);
       else if (frame.type === "truncated") truncated = true;
       else if (frame.type === "sources") {
-        // Provisional rows are the ledger mid-turn: everything retrieved so far, before the
-        // answer has said which of it was worth citing. They are not what the finished entry
-        // is stored with — the last, unflagged frame narrows and renumbers to what was
+        // Provisional frames are the ledger mid-turn: everything retrieved so far, before
+        // the answer has said which of it was worth citing. They are not what the finished
+        // entry is stored with — the last, unflagged frame narrows and renumbers to what was
         // actually cited, and that is the one that wins here — but they *are* what makes a
         // marker a link while the answer is still being written, which is the whole reason
-        // the server sends them early (see `sourcesFrame` in lib/verified-chat.js) and which
-        // went to waste while this branch dropped them on the floor.
-        if (!frame.provisional) sources = frame.sources;
-        onSources?.(frame.sources ?? []);
+        // the server sends them early (see `sourcesFrame` in lib/verified-chat.js).
+        //
+        // They arrive as a difference rather than a fresh copy of the ledger, so they are
+        // accumulated here: `added` are rows not seen yet, `quotes` attach a page's own
+        // words to a row already held. Rebuilding the array rather than mutating in place
+        // keeps every reader of `liveSources` looking at one immutable snapshot.
+        if (frame.provisional) {
+          if (frame.added?.length) live = live.concat(frame.added);
+          if (frame.quotes?.length) {
+            const patches = new Map(frame.quotes.map((q) => [q.n, q.quote]));
+            live = live.map((row) => (patches.has(row.n) ? { ...row, quote: patches.get(row.n) } : row));
+          }
+          onSources?.(live);
+        } else {
+          sources = frame.sources;
+          live = frame.sources ?? [];
+          onSources?.(live);
+        }
       } else if (frame.type === "error") failure = frame.message;
     }
 

@@ -676,14 +676,22 @@ function sourcesFrame(rows, { cited, truncated, streamError }) {
  *   from the verdict that follows the search, which is the job the old `reset` frame did by
  *   *erasing* the preamble. **Nothing this layer emits ever un-draws text.** A consumer that
  *   ignores this frame gets a run-on paragraph, not a wrong answer.
- * - `{type: "sources", sources, provisional, fallback}` — the links, built from the ledger.
- *   Sent **as the searches land**, with `provisional: true` and the whole ledger, so the
- *   evidence is on screen and every `[n]` marker resolves to a link from the first token of
- *   the answer rather than only after the last one. Sent once more at the end without the
- *   flag, narrowed and renumbered to what the answer actually cited; a consumer replaces on
- *   each one. `fallback` says whether the links still need to be *shown* as a list — see
- *   `sourcesFrame`, and note that a consumer must keep the rows either way, because they are
- *   what turns a marker into a link.
+ * - `{type: "sources", …}` — the links, built from the ledger. It comes in two shapes, and
+ *   the flag says which:
+ *   - `{provisional: true, added, quotes}` — sent **as the searches land**, so the evidence
+ *     is on screen and every `[n]` marker resolves to a link from the first token of the
+ *     answer rather than only after the last one. It carries the *difference*: `added` is
+ *     the rows the consumer has not been sent, `quotes` is `{n, quote}` for a source it is
+ *     already holding that a find has since pulled words out of. A consumer accumulates
+ *     these. Sending the whole ledger each time — which is what this did — cost 151KB
+ *     across a heavy turn to deliver 19KB of new rows, on a stream whose other job is
+ *     getting the answer to the screen. Neither key is ever absent, only empty.
+ *   - `{sources, fallback}` — sent once, at the end, without the flag: the complete list,
+ *     narrowed and renumbered to what the answer actually cited. This one *replaces*
+ *     whatever the provisional frames built up, and it is what the finished answer is
+ *     stored with. `fallback` says whether the links still need to be *shown* as a list —
+ *     see `sourcesFrame`, and note that a consumer must keep the rows either way, because
+ *     they are what turns a marker into a link.
  * - `{type: "answer", text}` — the final text of the answer, with its citations cleaned up.
  *   Replaces everything streamed as `delta` so far. Sent only when cleanup changed something,
  *   which is why it is a replacement rather than the normal channel: the answer streams
@@ -754,6 +762,42 @@ export async function* verifiedChat({
   // new — a repeat query served from the cache, or a page another search already found —
   // doesn't re-send a bibliography identical to the one already on screen.
   let sentSources = 0;
+  // Which of those it has already been sent a `quote` for. A find attaches the page's own
+  // words to a source the browser is already holding, and the first passage recorded is the
+  // one `sourceRows` quotes forever after, so a quote is set once and never changes.
+  const sentQuotes = new Set();
+
+  /**
+   * The next provisional `sources` frame — what changed — or `null` when nothing has.
+   *
+   * This used to re-send the entire ledger on every search *and* every find, which made the
+   * cost of the evidence trail quadratic in the number of things retrieved. A find is the
+   * worst of it: it adds no source at all, and was re-sending twenty rows to deliver one
+   * quote. Measured on a heavy turn — six searches, two finds a round — that is 151KB of
+   * `sources` frames carrying 19KB of actual news, on a stream that is also trying to
+   * deliver the answer the reader is watching appear, and that Vercel is forbidden from
+   * compressing because SSE here is sent `no-transform`.
+   *
+   * So a provisional frame carries `added` and `quotes` instead of `sources`. The final,
+   * unflagged frame is untouched and still carries the whole narrowed, renumbered list —
+   * it is the authoritative one, it is what the answer is stored with, and it is sent once.
+   */
+  function provisionalSources() {
+    const added = sourceRows(ledger.sources.slice(sentSources));
+    // Only entries the browser already holds need a patch; anything in `added` carries its
+    // quote inline. Reading the old `sentSources` before it moves is what keeps those two
+    // sets from overlapping.
+    const quotes = [];
+    for (const source of ledger.sources.slice(0, sentSources)) {
+      const quote = source.passages?.[0]?.text;
+      if (quote && !sentQuotes.has(source.n)) quotes.push({ n: source.n, quote });
+    }
+    for (const row of added) if (row.quote) sentQuotes.add(row.n);
+    for (const patch of quotes) sentQuotes.add(patch.n);
+    sentSources = ledger.sources.length;
+    if (added.length === 0 && quotes.length === 0) return null;
+    return { type: "sources", added, quotes, provisional: true };
+  }
   // The highest round seen to begin, and whether text is currently mid-paragraph. Together
   // they decide when a `break` goes out: a new round starting on top of text already
   // written means the model stopped to use a tool and is now resuming. See the frame's
@@ -801,10 +845,8 @@ export async function* verifiedChat({
   function* drainCaptionFrames() {
     for (const frame of captionSearch.frames()) {
       yield frame;
-      if (ledger.size > sentSources) {
-        sentSources = ledger.size;
-        yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
-      }
+      const sources = provisionalSources();
+      if (sources) yield sources;
     }
   }
 
@@ -882,15 +924,17 @@ export async function* verifiedChat({
       //
       // Provisional because what the answer cites is not known yet: this is everything
       // retrieved, and the frame at the end narrows it to what was actually used.
-      if (frame.type === "search" && ledger.size > sentSources) {
-        sentSources = ledger.size;
-        yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+      if (frame.type === "search") {
+        const sources = provisionalSources();
+        if (sources) yield sources;
       }
-      // A find retrieves no new source, so it does not move `sentSources` — but it does
-      // attach the page's own words to a source already on screen, and those quotes are
-      // the best thing the provisional list can show while the model is still reading.
+      // A find retrieves no new source — but it does attach the page's own words to a
+      // source already on screen, and those quotes are the best thing the provisional list
+      // can show while the model is still reading. That is all such a frame now carries:
+      // the one `quotes` patch, rather than the whole ledger again to deliver it.
       if (frame.type === "find" && frame.matches > 0) {
-        yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+        const sources = provisionalSources();
+        if (sources) yield sources;
       }
     }
     // In practice the drain inside the loop has already run — `contextNotes` waits for the
