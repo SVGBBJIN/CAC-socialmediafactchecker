@@ -9,9 +9,10 @@
 // This exists for one reason: a ranking is the hardest kind of bug to see from a chat
 // answer. When a fact-check misses a figure that is plainly on the page, the question is
 // whether the fetch dropped the text, the splitter cut the sentence in half, the lexical
-// half scored it below the floor, or the semantic half was quietly unavailable — and from
-// the outside all four look identical. `--show-scores` separates them: it prints both
-// halves of every passage's score, so the failure names itself.
+// half scored it below the floor, the semantic half was quietly unavailable, or the
+// embedding call was never made because fuzzy search was already confident — and from the
+// outside all five look identical. `--show-scores` separates them: it prints both halves of
+// every passage's score, so the failure (or the deliberate skip) names itself.
 //
 // Same fetch, same extraction, same scoring, same floor as the tool. Not a second
 // implementation that might not have the bug.
@@ -120,10 +121,21 @@ try {
   console.log(`${page.title || args.url}`);
   console.log(
     `${passages.length} passages read · ranked by ${
-      result.semantic ? "meaning and wording" : "wording only (no semantic half)"
+      result.semantic
+        ? "meaning and wording"
+        : result.semanticSkipped
+          ? "wording only — matched confidently enough that the embedding call was skipped"
+          : "wording only (no semantic half)"
     } · looking for “${args.find}”`,
   );
-  if (!result.semantic && !args.lexical && apiKey) {
+  // Distinct from the failure note below: a skip is fuzzy search succeeding outright, not
+  // the embedding call being unavailable. Conflating the two here would be the exact bug
+  // this tool exists to make visible — "a result looks wrong, was that the embedding call
+  // silently failing?" — and this line is what tells an operator it was neither, on
+  // purpose. See LEXICAL_CONFIDENT_SCORE in lib/page-find.js.
+  if (result.semanticSkipped) {
+    console.log("note: fuzzy search alone was confident enough — no embedding call was made.");
+  } else if (!result.semantic && !args.lexical && apiKey) {
     // The one failure worth calling out explicitly: a key is set, the embedding call failed
     // anyway, and the ranking silently halved. From a chat answer this is invisible.
     console.log("note: a Gemini key is set but the embedding call did not succeed.");

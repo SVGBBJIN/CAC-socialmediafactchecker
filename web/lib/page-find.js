@@ -372,12 +372,39 @@ const SEMANTIC_WEIGHT = 0.45;
 const PHRASE_BONUS = 0.25;
 
 /**
- * Rank passages against a query using whichever signals are available.
+ * How confident a lexical match has to be before the embedding call is worth making at all.
  *
- * @returns `{passages, semantic}` — `semantic` says whether the embedding half ran, which
- *   the tool result passes on to the model. A find that was lexical-only is a weaker
- *   negative result: "not on this page" from half the ranking deserves less confidence
- *   than "not on this page" from both halves, and the model is told which it got.
+ * Semantic ranking exists to catch the passage that says the right thing in different
+ * words — the one case fuzzy matching cannot see, because there is no shared vocabulary for
+ * it to find. It has nothing to add once that case has already been ruled out, and a fact-
+ * check turns on figures, dates, names and quotes far more often than it turns on paraphrase
+ * — exactly what `lexicalScore`'s coverage term rewards outright and `phraseHit` rewards
+ * completely. A raw lexical score this high means most or all of the query's terms were
+ * found at or near verbatim, clustered tightly together: not "probably the passage," but the
+ * same passage a human skimming for the same words would land on.
+ *
+ * Embedding a shortlist anyway on that evidence would spend the slowest step of a find — a
+ * network call, capped at `EMBEDDING_TIMEOUT_MS` and often the largest single wait once a
+ * page is already cached — to ask a second opinion nothing left in doubt needs. So it isn't
+ * asked: see the `confident` gate below. `RELEVANCE_FLOOR` is "is this a match at all";
+ * this is "is it already certain enough that a slower, weaker-on-specifics signal price is
+ * wasted asking it to agree."
+ */
+const LEXICAL_CONFIDENT_SCORE = 0.72;
+
+/**
+ * Rank passages against a query using whichever signals are available — or needed.
+ *
+ * @returns `{passages, semantic, semanticSkipped}`. `semantic` says whether the embedding
+ *   half actually ran and contributed a score; the tool result passes it to the model,
+ *   because a find that was lexical-only is a weaker *negative* result — "not on this page"
+ *   from half the ranking deserves less confidence than from both. `semanticSkipped` is the
+ *   other reason `semantic` can be false: lexical matching alone was already confident
+ *   enough (see `LEXICAL_CONFIDENT_SCORE`) that no embedding call was made at all. The two
+ *   must stay distinguishable downstream — one is a degraded negative result, the other is
+ *   a strong positive one that simply didn't need a second opinion, and telling a model
+ *   "the semantic ranking was unavailable" about the second would undersell exactly the
+ *   passage it should trust most.
  */
 export async function rankPassages(
   query,
@@ -392,53 +419,72 @@ export async function rankPassages(
   const fuzzy = fuzzyIndex(terms, passages);
   const scored = passages.map((passage) => {
     const { score, matched } = lexicalScore(terms, weights, passage, fuzzy);
-    return { passage, lexical: score, matched, semantic: 0 };
+    // Computed here rather than in the final loop below, because the confidence gate needs
+    // it *before* deciding whether to embed — a passage phrase-matched verbatim is the
+    // strongest evidence this function can produce, stronger than any lexical score alone.
+    return { passage, lexical: score, matched, semantic: 0, phrase: phraseHit(query, passage) };
   });
 
-  // Only the lexically plausible passages are embedded. Embedding a whole page is the
+  // Only the lexically plausible passages are ever embedded. Embedding a whole page is the
   // slowest and most expensive thing this file can do, and the passages that score zero on
   // every query term are almost never the answer — but "almost never" is why the shortlist
   // is generous rather than tight, and why it falls back to the head of the page when
   // nothing matched a word at all.
   const shortlist = shortlistFor(scored);
 
-  const { queryVector, vectors } = await embedShortlist(query, shortlist, {
-    apiKey,
-    fetchImpl,
-    signal,
-    embedImpl,
-    cache: vectorCache,
-  });
+  // Fuzzy search runs first, unconditionally, above — it is arithmetic over text already in
+  // memory and costs nothing to have done. Whether the network call after it happens at all
+  // is decided here: if the shortlist's own top match already clears the confidence bar,
+  // embedding it would only be spending the slowest step of a find to double-check an
+  // answer fuzzy search already gave.
+  const confident = shortlist.some(
+    (entry) => entry.phrase || entry.lexical >= LEXICAL_CONFIDENT_SCORE,
+  );
 
   let semantic = false;
-  if (queryVector) {
-    semantic = true;
-    for (const [index, entry] of shortlist.entries()) {
-      entry.semantic = similarity(queryVector, vectors[index]);
+  if (!confident) {
+    const { queryVector, vectors } = await embedShortlist(query, shortlist, {
+      apiKey,
+      fetchImpl,
+      signal,
+      embedImpl,
+      cache: vectorCache,
+    });
+    if (queryVector) {
+      semantic = true;
+      for (const [index, entry] of shortlist.entries()) {
+        entry.semantic = similarity(queryVector, vectors[index]);
+      }
     }
   }
 
   const results = [];
   for (const entry of scored) {
-    const phrase = phraseHit(query, entry.passage);
     const blended = semantic
       ? entry.lexical * LEXICAL_WEIGHT + entry.semantic * SEMANTIC_WEIGHT
       : entry.lexical;
-    const score = Math.min(1, blended + (phrase ? PHRASE_BONUS : 0));
+    const score = Math.min(1, blended + (entry.phrase ? PHRASE_BONUS : 0));
     if (score < RELEVANCE_FLOOR) continue;
     results.push({
       text: entry.passage.text,
       score: Number(score.toFixed(3)),
       lexical: Number(entry.lexical.toFixed(3)),
       semantic: semantic ? Number(entry.semantic.toFixed(3)) : null,
-      phrase,
+      phrase: entry.phrase,
       matched: entry.matched,
       position: entry.passage.index,
     });
   }
 
   results.sort((a, b) => b.score - a.score || a.position - b.position);
-  return { passages: results.slice(0, limit), semantic, terms };
+  return {
+    passages: results.slice(0, limit),
+    semantic,
+    // Only meaningful when `semantic` is false — see the doc comment above. Left `false`
+    // (rather than omitted) on every other path so a consumer can read it unconditionally.
+    semanticSkipped: !semantic && confident,
+    terms,
+  };
 }
 
 /**
@@ -576,8 +622,8 @@ export class PageCache {
 /**
  * Run one find: open the page, rank its passages, hand back the ones that match.
  *
- * @returns `{url, find, claim, title, passages, semantic, passageCount}`. An empty
- *   `passages` is a real and useful answer — this page does not say that — and is
+ * @returns `{url, find, claim, title, passages, semantic, semanticSkipped, passageCount}`.
+ *   An empty `passages` is a real and useful answer — this page does not say that — and is
  *   reported as such rather than as a failure.
  */
 export async function findInPage(
@@ -594,7 +640,7 @@ export async function findInPage(
     );
   }
 
-  const { passages, semantic } = await rankPassages(find, page.passages, {
+  const { passages, semantic, semanticSkipped } = await rankPassages(find, page.passages, {
     apiKey,
     fetchImpl,
     signal,
@@ -612,6 +658,7 @@ export async function findInPage(
     title: page.title,
     passages,
     semantic,
+    semanticSkipped,
     passageCount: page.passages.length,
   };
 }

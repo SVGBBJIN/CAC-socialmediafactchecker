@@ -589,6 +589,11 @@ async function runFind(call, { ledger, apiKey, fetchImpl, pages, findImpl, signa
         matches: result.passages.length,
         passages: result.passages.length,
         semantic: result.semantic,
+        // Distinct from `!semantic` on its own — see the doc comment on `rankPassages` in
+        // lib/page-find.js. Carried through so a consumer watching the trace can tell "fuzzy
+        // search already nailed it, no embedding call made" apart from "the embedding call
+        // was unavailable," which is the same distinction `describeFind` draws for the model.
+        semanticSkipped: result.semanticSkipped,
       },
     };
   } catch (error) {

@@ -187,7 +187,9 @@ export default async function handler(req, res) {
         trace(
           frame.error
             ? `read failed: ${frame.url} — ${frame.error}`
-            : `read: ${frame.url} — ${frame.matches} passage(s) for "${frame.find}"${frame.semantic ? "" : " (lexical only)"}`,
+            : `read: ${frame.url} — ${frame.matches} passage(s) for "${frame.find}"${
+                frame.semantic ? "" : frame.semanticSkipped ? " (fuzzy match confident, embedding skipped)" : " (lexical only)"
+              }`,
         );
       }
       // Logged, never forwarded. It is operator diagnostics — the browser has no use for a

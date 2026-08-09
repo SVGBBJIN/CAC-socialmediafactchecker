@@ -223,13 +223,30 @@ export class CitationLedger {
    */
   static describeFind(entry, findResult) {
     const where = `[${entry.n}] ${entry.title} — ${entry.url}`;
+    // Three states, not two, and they read very differently to the model. `semantic` true
+    // is the strong case either way — meaning and wording agree. Lexical-only splits in
+    // two: `semanticSkipped` is a *confident* result (the wording matched well enough on
+    // its own that a second opinion was never asked for — see LEXICAL_CONFIDENT_SCORE in
+    // lib/page-find.js), where plain "the semantic ranking was unavailable" would undersell
+    // exactly the finding the model should trust most. The unqualified case — no key, no
+    // shortlist, a failed batch — is the one that phrase was written for, and keeps it.
+    const rankingNote = findResult.semantic
+      ? "ranked by meaning and by wording"
+      : findResult.semanticSkipped
+        ? "matched confidently enough by wording alone that no further check was needed"
+        : "ranked by wording only — the semantic ranking was unavailable";
     if (findResult.passages.length === 0) {
+      // Unreachable in practice — a lexical match confident enough to skip embedding is
+      // confident enough to clear the relevance floor — but handled rather than assumed,
+      // since a scoring change elsewhere could make it possible.
       return (
         `Nothing on ${where} matches "${findResult.find}". The page was read in full ` +
-        `(${findResult.passageCount} passages${findResult.semantic ? ", ranked by meaning and by wording" : ", ranked by wording only — the semantic ranking was unavailable"}).\n\n` +
+        `(${findResult.passageCount} passages, ${rankingNote}).\n\n` +
         `This is a real finding about the page, not an error: it does not say what you were ` +
         `looking for. Do not cite [${entry.n}] for that claim.` +
-        (findResult.semantic ? "" : " If the claim may be phrased very differently on the page, one search with other wording is worth a try.")
+        (findResult.semantic || findResult.semanticSkipped
+          ? ""
+          : " If the claim may be phrased very differently on the page, one search with other wording is worth a try.")
       );
     }
 
@@ -239,9 +256,7 @@ export class CitationLedger {
     );
     return (
       `Read ${where}\nLooking for: "${findResult.find}"\n` +
-      `${findResult.passages.length} of ${findResult.passageCount} passages match${
-        findResult.semantic ? "" : " (ranked by wording only — the semantic ranking was unavailable)"
-      }.\n\n${lines.join("\n\n")}\n\n` +
+      `${findResult.passages.length} of ${findResult.passageCount} passages match (${rankingNote}).\n\n${lines.join("\n\n")}\n\n` +
       `This is the page's own text, quoted exactly. Cite it as [${entry.n}] — reading a page ` +
       `does not create a new source, so do not give it a new number. Quote it directly where ` +
       `the wording matters, and if these passages do not settle the claim, say so rather ` +
