@@ -1236,8 +1236,16 @@ function geminiAndPages(rounds) {
   return { fetchImpl, sent, fetched };
 }
 
-/** Let the fire-and-forget prefetches settle before asserting on them. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * Let the fire-and-forget prefetches settle before asserting on them.
+ *
+ * Several macrotasks rather than one: prefetching is deliberately drained a couple of pages
+ * at a time (see the queue in `makeToolRunner`), so the last of a turn's nine is several
+ * scheduling hops behind the first even when every fetch resolves instantly.
+ */
+const settle = async () => {
+  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+};
 
 test("the top results of a search are opened while the model is still reading the snippets", async () => {
   // The two-pass shape the prompt asks for means the page a second-round `find_in_page`
@@ -1803,4 +1811,67 @@ test("a pre-search that fails leaves the turn exactly as it would have been", as
   assert.ok(!frames.some((f) => f.type === "search"));
   assert.doesNotMatch(sent[0].contents.at(-1).parts.at(-1).text, /the app searched/);
   assert.match(frames.filter((f) => f.type === "delta").map((f) => f.text).join(""), /Checked it myself/);
+});
+
+test("prefetching is spread out rather than launched all at once", async () => {
+  // A round's searches return together, so nine prefetches launched together also *finish*
+  // together — and each one parses its page on the way into the cache. Measured, that
+  // pile-up was a single ~250ms block of the event loop, landing exactly when the model had
+  // begun writing and the SSE stream was pushing tokens every few milliseconds: the answer
+  // froze mid-sentence and then caught up. Draining the queue a couple at a time is what
+  // stops the arrivals coinciding. Every page still lands long inside a model round, which
+  // is the only deadline a prefetch has.
+  let inFlight = 0;
+  let peak = 0;
+  const { fetchImpl: gemini } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "a", claim: "claim one here" } },
+        { name: "web_search", args: { query: "b", claim: "claim two here" } },
+        { name: "web_search", args: { query: "c", claim: "claim three here" } },
+      ],
+    },
+    { text: "No source settles this." },
+  ]);
+
+  const fetched = [];
+  const fetchImpl = async (url, options) => {
+    if (String(url).includes("batchEmbedContents")) return { ok: false, status: 503 };
+    if (options?.body) return gemini(url, options);
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    inFlight -= 1;
+    fetched.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === "content-type" ? "text/html" : null) },
+      text: async () => "<html><title>T</title><body><p>Something long enough to keep.</p></body></html>",
+    };
+  };
+
+  let query = 0;
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => {
+        query += 1;
+        return searchResult(`claim ${query}`, [
+          `https://q${query}.example/1`,
+          `https://q${query}.example/2`,
+          `https://q${query}.example/3`,
+        ]);
+      },
+    }),
+  );
+  await settle();
+
+  assert.ok(peak <= 2, `at most two pages open at once, saw ${peak}`);
+  // And every one of them still gets fetched — spreading them out must not drop any.
+  assert.equal(fetched.length, 9);
 });

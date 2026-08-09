@@ -170,37 +170,83 @@ export function htmlToText(html) {
  * - Long paragraphs are cut at sentence boundaries. A 4,000-character block scores as a
  *   weak match for everything, and quoting the whole of it back is not a quote.
  */
-export function extractPassages(text) {
-  const blocks = [];
+/**
+ * Every passage in the page, in document order, prepared one at a time.
+ *
+ * Streaming rather than two passes — glue every block, *then* prepare every block — because
+ * a generator that does all of its splitting before its first `yield` cannot be interrupted
+ * during the half that runs first, and the cooperative wrapper below would then still block
+ * for as long as that half takes. Emitting each block's passages as soon as that block ends
+ * makes the whole thing interruptible. The output is unchanged: blocks complete in document
+ * order either way, so the passages and their indices come out in exactly the same order.
+ */
+function* preparedPassages(text) {
   let buffer = "";
+  let index = 0;
 
-  const flush = () => {
-    const trimmed = buffer.trim();
-    if (trimmed) blocks.push(trimmed);
+  function* flush() {
+    const block = buffer.trim();
     buffer = "";
-  };
-
-  for (const line of String(text ?? "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flush();
-      continue;
-    }
-    buffer = buffer ? `${buffer} ${trimmed}` : trimmed;
-    if (buffer.length >= GLUE_TARGET_CHARS && /[.!?:;"'”’)]$/.test(trimmed)) flush();
-    else if (buffer.length >= MAX_PASSAGE_CHARS) flush();
-  }
-  flush();
-
-  const passages = [];
-  for (const block of blocks) {
+    if (!block) return;
     for (const piece of splitLong(block)) {
       // Below the floor a "passage" is a nav label, a byline or a caption fragment. It has
       // no room to support a claim, and letting one win a ranking would hand the model a
       // citation pointing at "Read more".
       if (piece.length < MIN_PASSAGE_CHARS) continue;
-      passages.push(prepare(piece, passages.length));
+      yield prepare(piece, index);
+      index += 1;
     }
+  }
+
+  for (const line of String(text ?? "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      yield* flush();
+      continue;
+    }
+    buffer = buffer ? `${buffer} ${trimmed}` : trimmed;
+    if (buffer.length >= GLUE_TARGET_CHARS && /[.!?:;"'”’)]$/.test(trimmed)) yield* flush();
+    else if (buffer.length >= MAX_PASSAGE_CHARS) yield* flush();
+  }
+  yield* flush();
+}
+
+export function extractPassages(text) {
+  return [...preparedPassages(text)];
+}
+
+/**
+ * How many passages are prepared between yields back to the event loop.
+ *
+ * Tokenising a passage is a fraction of a millisecond; a few hundred of them is tens. The
+ * chunk is sized to keep any single uninterrupted run short enough that a stream writing
+ * every few milliseconds never visibly stalls behind it, without yielding so often that the
+ * scheduling costs more than the work.
+ */
+const PASSAGE_YIELD_CHUNK = 100;
+
+/**
+ * `extractPassages`, but it lets the event loop breathe.
+ *
+ * Parsing a page is the one genuinely CPU-bound thing this server does, and prefetching
+ * (see `PREFETCH_PER_SEARCH` in lib/verified-chat.js) does it up to nine times per turn on
+ * speculation. Those nine fetches are kicked off by one round's searches, so they land
+ * within a moment of each other and their parses run back to back — measured at a **189ms
+ * unbroken block** of the event loop, landing exactly when the model has started writing
+ * and the SSE stream is trying to push tokens out every few milliseconds. Nothing was
+ * slower overall; the answer simply froze mid-sentence and then caught up.
+ *
+ * The work is identical and the result is identical — this only declines to do all of it in
+ * one go. Wall-clock cost is a few extra milliseconds of scheduling per page, paid on a
+ * background task, to keep a foreground stream smooth.
+ */
+export async function extractPassagesCooperative(text, { chunk = PASSAGE_YIELD_CHUNK } = {}) {
+  const passages = [];
+  for (const passage of preparedPassages(text)) {
+    passages.push(passage);
+    // `setImmediate` rather than a resolved promise: a microtask would drain in the same
+    // tick and yield nothing at all to the I/O this is trying to get out of the way of.
+    if (passages.length % chunk === 0) await new Promise((resolve) => setImmediate(resolve));
   }
   return passages;
 }
@@ -513,7 +559,11 @@ export class PageCache {
           fetchImpl: this.fetchImpl,
           signal: this.signal,
         });
-        const passages = extractPassages(text);
+        // Cooperative because most pages that reach this cache were never asked for: they
+        // are prefetched off a search's top results while the model is still reading its
+        // snippets, and a page nobody has requested has no business freezing the answer
+        // that is being written. See `extractPassagesCooperative`.
+        const passages = await extractPassagesCooperative(text);
         return { title, text, passages, vectors: new PassageVectors() };
       })();
       pending.catch(() => this.pages.delete(url));

@@ -426,19 +426,51 @@ function makeToolRunner({
     ]);
 
   // Speculative page loads, budgeted for the whole turn — see `PREFETCH_PER_SEARCH`.
+  //
+  // Queued and drained a couple at a time rather than all launched at once, and that is a
+  // latency decision, not a politeness one. A round's searches return together, so nine
+  // simultaneous prefetches also *finish* together — and each one then parses its page
+  // synchronously on the way into the cache. Measured, that pile-up was a single unbroken
+  // ~190ms block of the event loop, landing exactly when the model had started writing and
+  // the SSE stream was trying to push tokens out every few milliseconds: the answer visibly
+  // froze mid-sentence and then caught up. Nothing was slower; it just stuttered.
+  //
+  // `extractPassagesCooperative` (lib/page-find.js) fixed the parsing half. This fixes the
+  // other half — the pages arriving at the same instant — by spreading their arrivals out.
+  // Two at a time still finishes every page well inside a model round that runs for tens of
+  // seconds, which is the only deadline any of this has: a prefetch is worth having if it
+  // lands before the model asks for the page, and not one millisecond sooner.
+  const PREFETCH_CONCURRENCY = 2;
   let prefetched = 0;
+  let running = 0;
+  const queue = [];
+  const pump = () => {
+    while (running < PREFETCH_CONCURRENCY && queue.length > 0) {
+      const url = queue.shift();
+      if (signal?.aborted) return;
+      running += 1;
+      // Deliberately not awaited by the caller: the point is that this overlaps the model
+      // call the search results are about to be handed to. A page that will not open is not
+      // a failure here — nobody asked for it yet, and `PageCache` has already forgotten it
+      // by the time a real find might.
+      pages
+        .load(url)
+        .catch(() => {})
+        .finally(() => {
+          running -= 1;
+          pump();
+        });
+    }
+  };
   const prefetch = (entries) => {
     if (!pages || prefetchPerSearch <= 0) return;
     for (const { url } of entries.slice(0, prefetchPerSearch)) {
-      if (prefetched >= prefetchPerTurn) return;
+      if (prefetched >= prefetchPerTurn) break;
       if (signal?.aborted) return;
       prefetched += 1;
-      // Deliberately not awaited: the point is that this overlaps the model call the
-      // search results are about to be handed to. A page that will not open is not a
-      // failure here — nobody asked for it yet, and `PageCache` has already forgotten it
-      // by the time a real find might.
-      pages.load(url).catch(() => {});
+      queue.push(url);
     }
+    pump();
   };
 
   return async (call, { signal: callSignal } = {}) => {

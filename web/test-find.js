@@ -22,6 +22,7 @@ import {
 import {
   htmlToText,
   extractPassages,
+  extractPassagesCooperative,
   fetchPage,
   rankPassages,
   findInPage,
@@ -650,4 +651,32 @@ test("a page's own footnote numbers are stripped, because they collide with our 
   assert.ok(!/citation needed/i.test(text));
   assert.match(text, /completed in 1889/);
   assert.match(text, /lost the title in 1930/);
+});
+
+test("the cooperative parse produces exactly what the blocking one does", () => {
+  // Prefetched pages are parsed in chunks so the parse cannot freeze a stream that is
+  // writing tokens (see `extractPassagesCooperative`). It is the same work, interrupted —
+  // if it ever stopped being the same work, every ranking downstream of it would quietly
+  // shift, so this pins it rather than trusting the refactor.
+  const html =
+    "<html><title>t</title><body>" +
+    Array.from({ length: 400 }, (_, i) => `<p>Paragraph ${i} with a figure of ${i * 7} in it.</p>`).join("") +
+    `<div>short</div><p>${"a long run of words ".repeat(200)}</p><li>Read more</li></body></html>`;
+  const { text } = htmlToText(html);
+
+  const blocking = extractPassages(text);
+  // A deliberately tiny chunk, so the yields land in the middle of the work rather than
+  // after all of it — the arrangement that would expose an off-by-one in the indices.
+  return extractPassagesCooperative(text, { chunk: 7 }).then((cooperative) => {
+    assert.equal(cooperative.length, blocking.length);
+    assert.deepEqual(
+      cooperative.map((p) => [p.index, p.text, p.normalised]),
+      blocking.map((p) => [p.index, p.text, p.normalised]),
+    );
+  });
+});
+
+test("the cooperative parse handles an empty page without hanging", async () => {
+  assert.deepEqual(await extractPassagesCooperative(""), []);
+  assert.deepEqual(await extractPassagesCooperative(null), []);
 });
