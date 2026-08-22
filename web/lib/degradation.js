@@ -242,6 +242,11 @@ export function describeDegradation({ reason, preferred, model, remainingMs, det
         label: "long chat",
         note: `This conversation is too long for ${preferred}, so ${model} answered it. Starting a new chat will bring ${preferred} back.`,
       };
+    case REASONS.unavailable:
+      return {
+        label: "fallback",
+        note: `${preferred} was unavailable for this API key${detail ? ` (${detail})` : ""}, so ${model} answered instead.${recovery}`,
+      };
     default:
       return {
         label: "fallback",
