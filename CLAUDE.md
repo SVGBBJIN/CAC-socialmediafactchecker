@@ -133,9 +133,13 @@ write, the same shape `[t=…]` timestamps and the (now per-claim) `VERDICT:` li
 are. Don't blur the two back together by trying to split an answer some other way.
 
 **Model fallback chain** (`lib/gemini.js` / `lib/degradation.js`): Flash 3.6 → 3.5 →
-3-preview → 2.5 → 2.0, walked on 404/403 (unavailable), 429/`RESOURCE_EXHAUSTED` (quota,
-remembered per-model with cooldown), and 503/overloaded-500 (capacity, remembered 20s) —
-but a bare `500` is terminal, not walked. This chain is intentionally mirrored in
+3-preview → 2.5 → 2.0, walked on 404/403 (unavailable, remembered per-model — a retired
+preview ID or a key not entitled to a model doesn't get re-learned on every request),
+429/`RESOURCE_EXHAUSTED` (quota, remembered per-model with cooldown), and
+503/overloaded-500 (capacity, remembered 20s) — but a bare `500` is terminal, not walked,
+and an invalid key (401, or a 403 that's actually `API_KEY_INVALID`) is terminal and never
+recorded against any one model, since the model wasn't the problem. This chain is
+intentionally mirrored in
 `Sources/SeerCore/Gemini/GeminiModel.swift`; if you ever do touch that Swift file for a
 non-web reason, keep the comments' reasoning in sync since model IDs get retired.
 

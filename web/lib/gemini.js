@@ -218,8 +218,10 @@ export class GeminiError extends Error {
 /**
  * Whether a failure against one model means "try the next one".
  *
- * - 404: no such model for this API version. Fall through.
- * - 403: key isn't entitled to this model. Fall through.
+ * - 404: no such model for this API version. Fall through, and remembered — see below.
+ * - 403: key isn't entitled to this model. Fall through, and remembered too, unless the
+ *   403 is actually an invalid key (`isInvalidKeyFailure`), which is terminal and says
+ *   nothing about this model specifically.
  * - 400 mentioning an unknown/unsupported model: fall through.
  * - 429, or anything else that means "out of quota": fall through. Quotas in Gemini are
  *   **per model**, so `gemini-3.6-flash` being rate-limited says nothing at all about
@@ -2081,9 +2083,26 @@ async function* streamRound({
       } else if (isContextLimitFailure(response.status, message)) {
         reason = REASONS.context;
         detail = message;
-      } else if (response.status === 404 || response.status === 403) {
+      } else if (
+        (response.status === 404 || response.status === 403) &&
+        !isInvalidKeyFailure(response.status, message)
+      ) {
+        // Remembered too, and for the same reason as quota and overload above: a retired
+        // preview ID or a key not entitled to a model is not a fact this request learns
+        // and the next one re-learns from scratch. Unlike those two it isn't expected to
+        // clear on its own on any particular schedule, so it borrows the same ceiling
+        // `markExhausted` already clamps everything to rather than inventing a longer one
+        // — an operator who fixes the key or the chain waits at most that long to see it
+        // take effect, and until then every request stops paying a wasted round trip on
+        // a model that was never going to answer.
+        const entry = health.markExhausted(model, {
+          reason: REASONS.unavailable,
+          detail: message,
+          cooldownMs: MAX_COOLDOWN_MS,
+        });
         reason = REASONS.unavailable;
         detail = message;
+        remainingMs = entry.until - Date.now();
       }
 
       // The one failure this app can repair by itself. `mediaResolution` is an optional
