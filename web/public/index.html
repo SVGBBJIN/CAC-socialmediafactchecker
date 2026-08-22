@@ -695,6 +695,17 @@
     text-transform: uppercase; letter-spacing: 0.06em; color: var(--warn);
   }
 
+  /* How long a turn took — see `durationHTML` in app.js. Plain muted text rather than a
+     chip: it sits alongside `.notice`/`.badges` in the same reveal order but isn't a claim
+     the app is making the way a verdict or an incomplete-notice is. */
+  .timing-note {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    margin: -6px 0 14px;
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .timing-note.in { opacity: 1; transform: translateY(0); }
+
   .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .badge {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1316,6 +1327,7 @@
   [data-motion="reduced"] .claim-text,
   [data-motion="reduced"] .badge,
   [data-motion="reduced"] .notice,
+  [data-motion="reduced"] .timing-note,
   [data-motion="reduced"] .source-pills,
   [data-motion="reduced"] .seal-check,
   [data-motion="reduced"] .thread-spinner,
@@ -1324,7 +1336,7 @@
   [data-motion="reduced"] .icon-btn.listening { animation: none !important; transition: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .notice, .timing-note, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line { animation: none !important; transition: none !important; }
   }
 
   /* ---------- Instant press feedback ---------- */
