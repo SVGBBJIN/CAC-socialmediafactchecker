@@ -1140,9 +1140,57 @@ function createProgressTicker(barId) {
   };
 }
 
+/**
+ * The live "how long has this been running" readout next to a stage label — one instance
+ * per turn type, same split as `createProgressTicker` above and for the same reason: each
+ * drives a different part of the UI even though only one is ever running at once.
+ *
+ * Deliberately not the same thing as the progress bar. That one is eased *because* a raw
+ * elapsed clock reads as slower than a bar that keeps creeping forward — see the note on
+ * `.mini-progress` in index.html. This is exactly that raw clock, shown anyway: a reader
+ * who wants to know precisely how long a turn has been going gets to, right next to the bar
+ * that exists to keep the wait from *feeling* that long.
+ */
+function createElapsedTicker(elementId) {
+  let start = 0;
+  let timer = null;
+
+  function paint() {
+    const node = document.getElementById(elementId);
+    if (node) node.textContent = formatClock((Date.now() - start) / 1000);
+  }
+
+  return {
+    start() {
+      start = Date.now();
+      paint();
+      if (timer) clearInterval(timer);
+      timer = setInterval(paint, 1000);
+    },
+    /** Re-applies the current elapsed time to whatever node currently owns this id — same
+     * reasoning as `createProgressTicker`'s `resync`: a markup rebuild mid-run (a new claim
+     * skeleton appearing) swaps in a fresh node that would otherwise sit at "0:00" until the
+     * next tick. */
+    resync() {
+      paint();
+    },
+    /** Milliseconds since `start()`, for the caller to keep once the turn finishes — the
+     * ticker itself holds nothing once `stop()` clears its timer. */
+    elapsedMs() {
+      return Date.now() - start;
+    },
+    stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+    },
+  };
+}
+
 const runProgress = createProgressTicker("runProgressBar");
 const followupProgress = createProgressTicker("followupProgressBar");
 const chatProgress = createProgressTicker("chatProgressBar");
+const runElapsed = createElapsedTicker("runElapsed");
+const followupElapsed = createElapsedTicker("followupElapsed");
+const chatElapsed = createElapsedTicker("chatElapsed");
 
 /* ---------------------------------------------------------------- claim grid */
 /*
@@ -1296,6 +1344,7 @@ function chatThreadHTML(newestIndex) {
           <div class="thread-q">${escapeHTML(c.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
           ${incompleteHTML(c.incomplete, animate)}
+          ${durationHTML(c.durationMs, animate, "Answered in")}
           ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
@@ -1316,7 +1365,7 @@ function renderChatPane({ newest = -1 } = {}) {
         ${
           pendingChat.error
             ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
-            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span></div>
+            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span><span class="elapsed-time" id="chatElapsed">0:00</span></div>
                <div class="mini-progress"><div class="mini-progress-bar" id="chatProgressBar"></div></div>`
         }
       </div>`
@@ -1350,6 +1399,7 @@ async function runChat(question) {
   clearPendingImage();
   renderChatPane();
   chatProgress.start();
+  chatElapsed.start();
   updateComposerMode();
 
   const controller = new AbortController();
@@ -1372,7 +1422,7 @@ async function runChat(question) {
       },
     });
     chatProgress.finish();
-    chatThread.push({ question, answer, sources, incomplete });
+    chatThread.push({ question, answer, sources, incomplete, durationMs: chatElapsed.elapsedMs() });
     settled = true;
   } catch (error) {
     if (error.name === "AbortError") {
@@ -1384,6 +1434,7 @@ async function runChat(question) {
     pendingChat = { question, error: error.message };
   } finally {
     chatProgress.stop();
+    chatElapsed.stop();
     if (settled) pendingChat = null;
     inFlight = null;
     el.checkBtn.disabled = false;
@@ -1866,12 +1917,14 @@ function renderRunningCard() {
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus">Sending to the model…</div>
         <div class="source-counter" id="runCounter">&nbsp;</div>
+        <div class="elapsed-time" id="runElapsed">0:00</div>
         <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
         <div class="live-sources" id="runSources"></div>
       </div>
     </div>`;
   refreshTimeline();
   runProgress.start();
+  runElapsed.start();
 }
 
 /**
@@ -1924,6 +1977,7 @@ function claimGridStatusHTML(stage) {
     <div class="claim-grid-status">
       <div class="status-text stage-text" id="runStatus">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
+      <div class="elapsed-time" id="runElapsed">0:00</div>
       <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
     </div>`;
   // No `#runSources` here on purpose. The live source row belongs to the wait *before* the
@@ -2012,6 +2066,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
   revealIn(el.claimsPane);
   refreshTimeline();
   runProgress.resync();
+  runElapsed.resync();
 }
 
 /**
@@ -2102,6 +2157,21 @@ function badgeHTML(verdictKey, animate) {
 function verdictHTML(entry, animate) {
   if (entry.incomplete && !entry.verdictKey) return "";
   return badgeHTML(entry.verdictKey ?? "insufficient", animate);
+}
+
+/**
+ * How long a finished turn took, wall-clock — captured once by `createElapsedTicker`
+ * between the request going out and the stream ending, and stored on the entry (or the
+ * follow-up / chat turn) alongside the text it produced, so it survives a reload the same
+ * as everything else in `library`.
+ *
+ * Nothing is rendered for a turn that predates this feature, or an aborted one that never
+ * reached `entry.status = "done"` — an absent number is silence, not a claim that the turn
+ * was instant.
+ */
+function durationHTML(ms, animate, label = "Checked in") {
+  if (!Number.isFinite(ms)) return "";
+  return `<div ${revealAttrs("check-duration", animate)}>${escapeHTML(label)} ${escapeHTML(formatClock(ms / 1000))}</div>`;
 }
 
 /**
@@ -2240,6 +2310,7 @@ function threadHTML(entry, newestIndex) {
           <div class="thread-q">${escapeHTML(f.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
           ${incompleteHTML(f.incomplete, animate)}
+          ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
           ${sourcePillsHTML(f.sources, animate)}
         </div>`;
@@ -2254,7 +2325,7 @@ function threadHTML(entry, newestIndex) {
           ${
             pendingFollowup.error
               ? `<div class="thread-error">${escapeHTML(pendingFollowup.error)}</div>`
-              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span></div>
+              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span><span class="elapsed-time" id="followupElapsed">0:00</span></div>
                  <div class="mini-progress"><div class="mini-progress-bar" id="followupProgressBar"></div></div>`
           }
         </div>`
@@ -2290,6 +2361,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       const eyebrow = claimEyebrowText(index, claims.length);
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
+           ${durationHTML(entry.durationMs, animate)}
            ${actionRowHTML(entry.id, null)}
            ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
@@ -2322,6 +2394,7 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
+      ${durationHTML(entry.durationMs, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
       ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
@@ -2686,6 +2759,7 @@ async function runCheck(url, existingId, hint) {
     entry.verdictKey = claims
       ? aggregateVerdictKey(claims) ?? (incomplete ? null : "insufficient")
       : verdictKey ?? (incomplete ? null : "insufficient");
+    entry.durationMs = runElapsed.elapsedMs();
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) {
@@ -2721,6 +2795,7 @@ async function runCheck(url, existingId, hint) {
     // reader navigated away from mid-flight would otherwise leave the ticker running against
     // a bar that's no longer on screen.
     runProgress.stop();
+    runElapsed.stop();
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
@@ -2737,6 +2812,7 @@ async function runFollowup(entry, question) {
   clearPendingImage();
   renderResultCard(entry, { animateAnalysis: false });
   followupProgress.start();
+  followupElapsed.start();
   updateComposerMode();
 
   const controller = new AbortController();
@@ -2759,7 +2835,7 @@ async function runFollowup(entry, question) {
     // Kept in the thread even when it came back damaged. A partial answer is text the model
     // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
     // so the next turn is not built on prose the reader was never told was cut off.
-    entry.followups.push({ question, answer, sources, incomplete });
+    entry.followups.push({ question, answer, sources, incomplete, durationMs: followupElapsed.elapsedMs() });
     persistLibrary();
     renderLibrary(el.searchInput.value);
     settled = true;
@@ -2773,6 +2849,7 @@ async function runFollowup(entry, question) {
     pendingFollowup = { entryId: entry.id, question, error: error.message };
   } finally {
     followupProgress.stop();
+    followupElapsed.stop();
     if (settled) pendingFollowup = null;
     inFlight = null;
     el.checkBtn.disabled = false;
