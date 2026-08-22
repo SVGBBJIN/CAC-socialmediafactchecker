@@ -140,7 +140,7 @@ let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check
 // link has ever been checked, not only after: a pasted link is intercepted by the regex in
 // confirmAndRunCheck/normalizeLink and starts a real check instead of landing here. Not
 // persisted, same as pendingFollowup above — a reload starts the conversation over.
-let chatThread = []; // { question, answer, sources, incomplete }
+let chatThread = []; // { question, answer, sources, incomplete, durationMs }
 let pendingChat = null; // { question, error? }
 
 /* ---------------------------------------------------------------- settings */
@@ -1191,6 +1191,7 @@ function chatThreadHTML(newestIndex) {
           <div class="thread-q">${escapeHTML(c.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
           ${incompleteHTML(c.incomplete, animate)}
+          ${durationHTML(c.durationMs, animate)}
           ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
@@ -1253,6 +1254,7 @@ async function runChat(question) {
   el.newCheckBtn.disabled = true;
   let settled = false;
 
+  const startedAt = performance.now();
   try {
     const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
     const history = chatThread.flatMap((c) => [
@@ -1267,7 +1269,7 @@ async function runChat(question) {
       },
     });
     chatProgress.finish();
-    chatThread.push({ question, answer, sources, incomplete });
+    chatThread.push({ question, answer, sources, incomplete, durationMs: performance.now() - startedAt });
     settled = true;
   } catch (error) {
     if (error.name === "AbortError") {
@@ -1832,6 +1834,30 @@ function renderErrorCard(entry) {
   document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
 }
 
+/** "4.2s" under a minute (one decimal below 10s, since a whole-second reading feels too
+ * coarse for the common case; whole seconds above it, where a decimal stops being useful),
+ * "1m 03s" past it. `null` for anything that isn't a real elapsed time — a turn from before
+ * this feature existed, or one that never finished — so callers can skip rendering rather
+ * than print "NaNs". */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+/** How long a turn took end to end — the request going out to the full answer landing,
+ * timed in `streamChat`'s caller (`runCheck`/`runFollowup`/`runChat`) rather than here. A
+ * plain muted note, not a `.badge`: it's metadata about the exchange, not a finding the app
+ * is asserting the way a verdict is. */
+function durationHTML(ms, animate) {
+  const label = formatDuration(ms);
+  if (!label) return "";
+  return `<div ${revealAttrs("timing-note", animate)}>Answered in ${escapeHTML(label)}</div>`;
+}
+
 /**
  * The band saying an answer is less than a whole one.
  *
@@ -2007,6 +2033,7 @@ function threadHTML(entry, newestIndex) {
           <div class="thread-q">${escapeHTML(f.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
           ${incompleteHTML(f.incomplete, animate)}
+          ${durationHTML(f.durationMs, animate)}
           ${actionRowHTML(entry.id, index)}
           ${sourcePillsHTML(f.sources, animate)}
         </div>`;
@@ -2057,6 +2084,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       const eyebrow = claims.length > 1 ? `Claim ${index + 1} of ${claims.length}` : "Claim checked";
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
+           ${durationHTML(entry.durationMs, animate)}
            ${actionRowHTML(entry.id, null)}
            ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
@@ -2089,6 +2117,7 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
+      ${durationHTML(entry.durationMs, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
       ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
@@ -2353,6 +2382,7 @@ async function runCheck(url, existingId, hint) {
   const stage = { text: "Sending to the model…", searchCount: 0 };
   let discoveredTitles = [];
 
+  const startedAt = performance.now();
   try {
     const message = { role: "user", content: prompt, ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([message], {
@@ -2395,6 +2425,7 @@ async function runCheck(url, existingId, hint) {
     entry.claims = claims; // null (render as one card, see renderResultCard), or one block per claim
     entry.sources = sources;
     entry.incomplete = incomplete;
+    entry.durationMs = performance.now() - startedAt;
     // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
     // would then stamp it "Insufficient evidence" — a finding, in the app's own voice, that
     // the model never made and the reader has no way to tell from one it did. Left null when
@@ -2449,6 +2480,7 @@ async function runFollowup(entry, question) {
   el.newCheckBtn.disabled = true;
   let settled = false;
 
+  const startedAt = performance.now();
   try {
     const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([...historyFor(entry), message], {
@@ -2463,7 +2495,7 @@ async function runFollowup(entry, question) {
     // Kept in the thread even when it came back damaged. A partial answer is text the model
     // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
     // so the next turn is not built on prose the reader was never told was cut off.
-    entry.followups.push({ question, answer, sources, incomplete });
+    entry.followups.push({ question, answer, sources, incomplete, durationMs: performance.now() - startedAt });
     persistLibrary();
     renderLibrary(el.searchInput.value);
     settled = true;
