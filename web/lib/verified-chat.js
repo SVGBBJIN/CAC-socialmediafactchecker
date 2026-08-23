@@ -862,8 +862,11 @@ export async function* verifiedChat({
       // Started from inside the clip attachment, the moment the caption is known and before
       // a single byte of video is fetched — see `makeCaptionSearch`.
       clipOptions: { ...clipOptions, onResolved: (info) => captionSearch.start(info) },
-      // Collected once the download is done, by which time it has almost always long since
-      // finished. Returns the numbered sources as a note on the last user turn.
+      // Collected once the download is done. On video that's usually well past when this
+      // search finished; on a photo post the download is often the *faster* half, so
+      // `streamChat`'s own `CONTEXT_NOTES_TIMEOUT_MS` is what actually bounds this now
+      // rather than the download's length — see the comment there. Returns the numbered
+      // sources as a note on the last user turn.
       contextNotes: async () => {
         const note = await captionSearch.note();
         return note ? [note] : [];
