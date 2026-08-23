@@ -114,6 +114,7 @@ token in the clear.
 | Variable | Default | What it does |
 |---|---|---|
 | `PORT` | `8080` | |
+| `HOST` | `127.0.0.1`, or `0.0.0.0` once a token is set | Which interface to listen on. With no token set the worker answers anyone who can reach it, so it binds to loopback by default; setting a token is what opens it up, and setting `HOST` explicitly overrides either way. A container that needs the port published wants `HOST=0.0.0.0` **and** a token. |
 | `BROWSER_WORKER_TOKEN` | none | Shared secret. Set it whenever the worker is reachable by anything but localhost. |
 | `MAX_CONCURRENCY` | `4` | Open pages at once. Past it, callers get an immediate 503 rather than a queue slot — see below. |
 | `RESOLVE_TIMEOUT_MS` | `15000` | Ceiling on one resolve inside the browser. |
