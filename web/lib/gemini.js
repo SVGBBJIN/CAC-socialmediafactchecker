@@ -98,9 +98,13 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
  * Sent only to models known to support it (`supportsThinkingBudget`); the field does not
  * exist on `gemini-2.0-flash`, and Gemini rejects an unrecognised name outright rather
  * than ignoring it. Not verified against a live thinking-capable response as of writing —
- * `isUnsupportedThinkingConfig` below exists as the fallback if that guess about which
- * models accept the field turns out wrong, so a bad guess degrades to the next model in
- * the chain rather than to a broken turn.
+ * `isUnsupportedThinkingConfig` below is the safety net for that guess, and
+ * `thinkingConfigRefused` is what makes the net hold: a model that refuses the field is
+ * remembered and asked again without it, so a bad guess costs one extra round trip once
+ * and then nothing. It deliberately does *not* fall through to the next model, because the
+ * next model is guessed about by the same version-number rule and would refuse identically
+ * — which is how one wrong guess used to walk the whole chain and fail the turn over an
+ * optional tuning parameter.
  */
 export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
 
@@ -182,6 +186,38 @@ export function mediaResolutionFromEnv(env = process.env) {
  * on purpose — it can only ever hold model IDs from the configured chain.
  */
 const mediaResolutionRefused = new Set();
+
+/**
+ * Models that answered a `thinkingConfig` with "no such field".
+ *
+ * The same memo as `mediaResolutionRefused`, for the same guess. `supportsThinkingBudget`
+ * decides from a version number which models accept `thinkingConfig.thinkingBudget`, and
+ * its own note says that guess is not verified against a live thinking-capable response.
+ *
+ * What that guess costs when it is wrong used to be the whole request. A refused
+ * `thinkingConfig` is a 400, `shouldFallThrough` waves a 400 like this through, and so the
+ * chain moved on to the next model — which is guessed about by the *same rule*, so it
+ * refuses too. One wrong guess about a version family therefore walked the entire chain,
+ * nine round trips deep, and failed the turn outright over an optional tuning parameter
+ * that was never part of what the user asked for.
+ *
+ * So it is handled exactly the way a refused `mediaResolution` already is: remembered, the
+ * field dropped, and the same model asked again. Module-scoped and unbounded on purpose —
+ * it can only ever hold model IDs from the configured chain.
+ */
+const thinkingConfigRefused = new Set();
+
+/**
+ * Forget which models have refused `mediaResolution` or `thinkingConfig`.
+ *
+ * A test seam, like `resetClipCache`. Both memos are module state that outlives a single
+ * `streamChat`, which is exactly what they are for — and exactly what makes one test's
+ * refusal leak into the next test's expectations if nothing can clear them.
+ */
+export function resetFieldSupport() {
+  mediaResolutionRefused.clear();
+  thinkingConfigRefused.clear();
+}
 
 /**
  * Whether `model` is expected to accept `thinkingConfig.thinkingBudget`.
@@ -2172,7 +2208,13 @@ async function* streamRound({
     // freshly for whichever model this attempt is about to call — mutated in place on the
     // shared `requestBody` rather than cloned, since only one attempt is ever in flight
     // and the object is rebuilt from scratch at the top of every round anyway.
-    if (thinkingBudgetTokens > 0 && supportsThinkingBudget(model)) {
+    if (
+      thinkingBudgetTokens > 0 &&
+      supportsThinkingBudget(model) &&
+      // Dropped for a model already caught refusing the field, so a wrong guess is paid
+      // for once rather than on every request. See `thinkingConfigRefused`.
+      !thinkingConfigRefused.has(model)
+    ) {
       requestBody.generationConfig.thinkingConfig = { thinkingBudget: thinkingBudgetTokens };
     } else {
       delete requestBody.generationConfig.thinkingConfig;
@@ -2284,6 +2326,27 @@ async function* streamRound({
       if (isUnsupportedMediaResolution(response.status, message)) {
         const firstRefusal = !mediaResolutionRefused.has(model);
         mediaResolutionRefused.add(model);
+        if (firstRefusal) {
+          lastError = describeFailure(response.status, message, model);
+          index -= 1;
+          continue;
+        }
+      }
+
+      // The second such repair, and the more important one. `thinkingConfig` is a cap on
+      // reasoning, not part of the question — a model refusing the field is no reason to
+      // give up on that model, and every reason to expect the next one to refuse it too,
+      // since `supportsThinkingBudget` guesses about both by the same version-number rule.
+      // Falling through was therefore the one move guaranteed not to work: it walked the
+      // whole chain collecting the identical 400 and failed the turn.
+      //
+      // Terminating for the same reason the media-resolution repair does: the memory above
+      // means the second attempt cannot carry the field, so it cannot be refused for this
+      // reason twice. If something else refuses it anyway, `shouldFallThrough` still has
+      // the old behaviour waiting underneath.
+      if (isUnsupportedThinkingConfig(response.status, message)) {
+        const firstRefusal = !thinkingConfigRefused.has(model);
+        thinkingConfigRefused.add(model);
         if (firstRefusal) {
           lastError = describeFailure(response.status, message, model);
           index -= 1;
