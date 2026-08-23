@@ -1217,6 +1217,54 @@ test("a turn with no video is never sent a media resolution", async () => {
   assert.ok(!("mediaResolution" in sent.generationConfig));
 });
 
+test("a photo carousel is sent at the configured resolution too — the field is about media, not video specifically", async () => {
+  // `mediaResolution` describes token cost per image or video frame alike (Gemini's own
+  // docs say "per input image or video frame"), and `streamChat`'s `media` flag — the
+  // gate on whether the field is sent at all — is computed from `inline_data`/`file_data`
+  // presence, not from any video-specific marker. A photo post's slides ride as
+  // `inline_data` parts exactly like a downloaded clip does, so this is already covered
+  // with no code change; this test is what keeps it that way; a future refactor that
+  // narrows the gate to "has a video" specifically would fail it.
+  let sent;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${IG_SOURCE_URL}` }],
+      models: ["gemini-3.6-flash"],
+      mediaResolution: "MEDIA_RESOLUTION_LOW",
+      attachMedia: true,
+      clipOptions: {
+        providers: [
+          {
+            platform: "Instagram",
+            find: findInstagramLinks,
+            matches: () => true,
+            resolve: async () => ({
+              sourceURL: IG_SOURCE_URL,
+              videoID: IG_SHORTCODE,
+              kind: "images",
+              mimeType: "image/jpeg",
+              slideCount: 2,
+              authorName: "instagram",
+              caption: "carousel",
+              images: [1, 2].map((n) => ({ url: `https://scontent.cdninstagram.com/s${n}.jpg` })),
+            }),
+            downloadImages: async () => ({
+              slides: [1, 2].map((n) => ({ bytes: Buffer.from(`slide ${n}`), mimeType: "image/jpeg" })),
+              truncated: 0,
+            }),
+          },
+        ],
+      },
+      fetchImpl: async (_url, options) => {
+        sent = JSON.parse(options.body);
+        return sseResponse([frame("looked at both slides")]);
+      },
+    }),
+  );
+  assert.equal(sent.generationConfig.mediaResolution, "MEDIA_RESOLUTION_LOW");
+});
+
 test("a clip is sent at the configured resolution; a model that refuses it keeps the answer", async () => {
   // An optional speed setting must not cost the turn. Falling through the chain would be
   // the wrong repair — the next model is if anything *more* likely to refuse the same

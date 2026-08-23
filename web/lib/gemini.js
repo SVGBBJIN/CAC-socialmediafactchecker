@@ -128,22 +128,30 @@ export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
 export const DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS = 1024;
 
 /**
- * How much of a video Gemini is asked to look at, per frame.
+ * How much detail Gemini is asked to read, per input image or video frame.
  *
- * `generationConfig.mediaResolution` trades visual detail for tokens, and video is where
- * that trade is worth naming: a clip is sampled at a frame a second, so a 45-second TikTok
- * arrives as ~45 images. At the default that is several thousand input tokens the model
- * has to read before it can say anything — on every round of the turn, since the clip
- * stays in the conversation — and it is the largest single contributor to the gap between
- * pasting a link and seeing the first search.
+ * `generationConfig.mediaResolution` trades visual detail for tokens, and it isn't a
+ * video-only setting even though video is where the trade is most worth naming: a clip is
+ * sampled at a frame a second, so a 45-second TikTok arrives as ~45 images, several
+ * thousand input tokens the model has to read before it can say anything — on every round
+ * of the turn, since the clip stays in the conversation — and the largest single
+ * contributor to the gap between pasting a link and seeing the first search. But a photo
+ * carousel pays the same per-image cost with none of the video's frame-sampling discount
+ * baked in: up to `MAX_IMAGE_SLIDES` full-resolution stills, each one is its own tiled
+ * image the model reads in full — see `downloadImageSet` in lib/media-fetch.js. This field
+ * applies to both uniformly. `streamChat` decides whether to send it at all from whether
+ * *any* media is attached (`file_data` or `inline_data`), never from whether that media
+ * happens to be a video — see the `media` flag where the round is built.
  *
  * Deliberately **not** on by default, even though `low` is the biggest remaining speed
  * lever in this file. On short-form video the claim frequently lives in an on-screen text
- * card rather than in the audio — the system prompt says so in as many words — and reading
- * small text off a frame is exactly what resolution buys. Trading it away silently would
- * make the app faster at the thing it exists to do badly, so the choice is the operator's:
- * set `GEMINI_MEDIA_RESOLUTION=low` (or `medium`) and measure it against clips you care
- * about.
+ * card rather than in the audio — the system prompt says so in as many words — and a
+ * still photo (a screenshot, a meme, an infographic) just as often carries the claim as
+ * its own on-screen text. Reading small text off a frame or a slide is exactly what
+ * resolution buys either way. Trading it away silently would make the app faster at the
+ * thing it exists to do badly, so the choice is the operator's: set
+ * `GEMINI_MEDIA_RESOLUTION=low` (or `medium`) and measure it against posts you care about
+ * — video and photo alike, since one setting covers both.
  */
 export const MEDIA_RESOLUTIONS = {
   low: "MEDIA_RESOLUTION_LOW",
