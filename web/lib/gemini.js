@@ -128,26 +128,6 @@ export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
 export const DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS = 1024;
 
 /**
- * How long `contextNotes` (below) is allowed to hold up the first round before it is
- * dropped rather than waited for.
- *
- * `contextNotes` exists to overlap work with the clip download — the caption pre-search is
- * the one caller today — on the assumption that the download is the long pole and the
- * notes provider has that whole stretch to finish in. True for video, tens of seconds of
- * download versus a search capped at `SEARCH_TIMEOUT_MS`. False for a photo carousel:
- * `downloadImageSet` (lib/media-fetch.js) moves a few hundred KB to a couple of MB, often
- * under a second, so there is no download left to hide a multi-second search behind — an
- * `await` with no bound of its own turned a photo check's fastest phase into a wait gated
- * by the search's full 15s ceiling, on every photo check with a caption worth searching.
- *
- * So the wait is bounded on its own terms rather than inherited from whatever is
- * overlapping it this time. Short, because the value here is only ever a head start the
- * model would otherwise get by searching for itself one round later — losing it costs
- * nothing but that head start, per the note where this is awaited below.
- */
-export const CONTEXT_NOTES_TIMEOUT_MS = 3_000;
-
-/**
  * How much detail Gemini is asked to read, per input image or video frame.
  *
  * `generationConfig.mediaResolution` trades visual detail for tokens, and it isn't a
@@ -1834,7 +1814,6 @@ export async function* streamChat({
   // a callback rather than a value because the whole point is that it runs concurrently
   // with the clip download, and a value would have to have been computed before it.
   contextNotes = null,
-  contextNotesTimeoutMs = CONTEXT_NOTES_TIMEOUT_MS,
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
@@ -1890,28 +1869,16 @@ export async function* streamChat({
     if (deadline.callerAborted) return;
 
     // Anything the caller went and got while the clip was being attached, collected now
-    // that there is (usually) nothing left to overlap it with. "Usually": the assumption
-    // this relies on is that the clip download was the long pole and the provider has had
-    // that whole stretch to finish in — true for video, tens of seconds of download against
-    // a search capped at `SEARCH_TIMEOUT_MS`, and false for a photo carousel, whose download
-    // is a few hundred KB to a couple of MB and often finishes in under a second. Without a
-    // bound of its own, an unfinished search here stopped being "free overlap" and became
-    // the slowest part of a photo check — see `CONTEXT_NOTES_TIMEOUT_MS`. So this is raced
-    // against that timeout rather than awaited outright: past it, the notes are dropped and
-    // the round proceeds without them. A provider that hangs longer still than that is the
-    // caller's own bound to enforce beyond this one (`lib/search.js` has a timeout of its
-    // own); a provider that *fails*, times out here, or never resolves in time costs the
-    // turn nothing but the head start, because the note it would have added is context, not
-    // the answer — the model can still search for itself, one round later than it might
-    // otherwise have needed to.
+    // that there is nothing left to overlap it with. Awaited rather than raced: by this
+    // point the download — the long pole — is already finished, so work started before it
+    // has had that whole stretch to complete and is in practice already done. A provider
+    // that hangs anyway is the caller's own bound to enforce (`lib/search.js` has a
+    // timeout of its own); a provider that *fails* costs the turn nothing, because the
+    // note it would have added is context, not the answer.
     let extraNotes = [];
     if (contextNotes) {
       try {
-        extraNotes =
-          (await Promise.race([
-            contextNotes(),
-            new Promise((resolve) => setTimeout(() => resolve(null), contextNotesTimeoutMs)),
-          ])) ?? [];
+        extraNotes = (await contextNotes()) ?? [];
       } catch {
         extraNotes = [];
       }

@@ -334,11 +334,19 @@ export const PREFETCH_PER_TURN = 9;
  *
  * Returns a controller rather than a promise so the caller can start it from a callback and
  * collect from somewhere else entirely: `frames()` drains what the UI still owes the reader,
- * and `note()` waits for the text the prompt needs.
+ * and `note()` produces the text the prompt needs — waiting for it on a clip, where the
+ * download gives it a window to finish in, and taking only what has already arrived on a
+ * photo post, where it does not. See `note()`.
  */
 function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled }) {
   let pending = null;
   let started = false;
+  // What the search actually produced, kept for the case where `note()` is not allowed to
+  // wait for it — see the note there. Null until it lands, and null forever if it fails.
+  let settledNote = null;
+  // Whether `note()` may block on this search. Decided from what the post turned out to
+  // be, in `start` below.
+  let blocking = true;
   const queued = [];
 
   return {
@@ -348,6 +356,17 @@ function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled
       const query = captionQuery(resolved?.caption, { platform });
       if (!query) return;
       started = true;
+      // The whole design of this pre-search is that it runs inside a window something else
+      // has already opened: the clip download. A video's bytes take tens of seconds, so a
+      // search capped at `SEARCH_TIMEOUT_MS` finishes inside that window every time and
+      // waiting for it costs nothing. A photo post has no such window — `downloadImageSet`
+      // moves a few hundred KB to a couple of MB and is regularly done in under a second —
+      // so waiting there is not overlap at all, it is the search's full latency in front of
+      // the first model round, which is exactly what it was supposed to be hiding behind.
+      // Anything that is not a photo post keeps the original blocking behaviour, including
+      // a `kind` this app does not recognise: the default has to be the one already proven
+      // on video.
+      blocking = resolved?.kind !== "images";
 
       pending = Promise.resolve(searchImpl(query, { env, fetchImpl, signal }))
         .then((result) => {
@@ -364,7 +383,8 @@ function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled
             provider: result.provider,
             results: entries.map(({ n, title, url, domain }) => ({ n, title, url, domain })),
           });
-          return CitationLedger.describePresearch(entries, result);
+          settledNote = CitationLedger.describePresearch(entries, result);
+          return settledNote;
         })
         // A speculative search that fails is a non-event: no frame, no note, no mention.
         // The model searches for itself exactly as it did before this existed.
@@ -376,9 +396,29 @@ function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled
       return queued.splice(0);
     },
 
-    /** The prompt note, once the search has landed. Null when there is nothing to say. */
+    /**
+     * The prompt note. Null when there is nothing to say.
+     *
+     * Two behaviours, and which one applies is decided in `start` from the media itself.
+     *
+     * On a clip this waits, exactly as it always has: the download it overlaps runs for
+     * tens of seconds, so by the time anyone asks the search is long since finished and the
+     * wait is free. That path is unchanged and deliberately so.
+     *
+     * On a photo post it takes whatever has already arrived and never waits. There is no
+     * download left to overlap — see `start` — so a wait here would be the search's own
+     * latency, paid up front, in front of the first model round. A search that got back in
+     * time still gets its head start; one that did not is simply dropped, and the model
+     * looks things up for itself the way it did before this existed — which is already how
+     * this module treats a pre-search that fails. Note that a search landing after the turn
+     * has finished reaches nobody: `frames()` is only drained while the turn is running, so
+     * on a photo post a slow pre-search costs its own cost and buys nothing. That is the
+     * trade, and it is the right way round — the alternative was charging every photo check
+     * that latency up front, before the model had been called at all.
+     */
     async note() {
-      return pending ? await pending : null;
+      if (!pending) return null;
+      return blocking ? await pending : settledNote;
     },
   };
 }
@@ -862,11 +902,10 @@ export async function* verifiedChat({
       // Started from inside the clip attachment, the moment the caption is known and before
       // a single byte of video is fetched — see `makeCaptionSearch`.
       clipOptions: { ...clipOptions, onResolved: (info) => captionSearch.start(info) },
-      // Collected once the download is done. On video that's usually well past when this
-      // search finished; on a photo post the download is often the *faster* half, so
-      // `streamChat`'s own `CONTEXT_NOTES_TIMEOUT_MS` is what actually bounds this now
-      // rather than the download's length — see the comment there. Returns the numbered
-      // sources as a note on the last user turn.
+      // Collected once the download is done. On a clip that is well past when this search
+      // finished, so it is waited for; on a photo post the download is often the faster of
+      // the two and nothing is waited for — `note()` owns that split, and the reasoning for
+      // it. Returns the numbered sources as a note on the last user turn.
       contextNotes: async () => {
         const note = await captionSearch.note();
         return note ? [note] : [];

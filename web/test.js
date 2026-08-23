@@ -30,7 +30,6 @@ import {
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
   resetClipCache,
-  CONTEXT_NOTES_TIMEOUT_MS,
 } from "./lib/gemini.js";
 import {
   withRetry,
@@ -1264,69 +1263,6 @@ test("a photo carousel is sent at the configured resolution too — the field is
     }),
   );
   assert.equal(sent.generationConfig.mediaResolution, "MEDIA_RESOLUTION_LOW");
-});
-
-test("a slow contextNotes provider does not hold up the first round past its own timeout", async () => {
-  // The bug this pins: `contextNotes` (the caption pre-search's hook) used to be awaited
-  // outright, on the assumption that the clip download it overlaps had already given it
-  // plenty of time to finish. True for video; false for a photo carousel, whose download
-  // is often under a second — nothing for a several-second search to hide behind. Without
-  // its own bound, a slow provider turned a photo check's fastest phase into its slowest.
-  let started;
-  let sent;
-  const frames = await collect(
-    streamChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "no links here" }],
-      models: ["gemini-3.6-flash"],
-      // Real time, but tiny: long enough to prove the round didn't wait for the slow
-      // provider, short enough that the test itself stays fast.
-      contextNotesTimeoutMs: 20,
-      contextNotes: () => {
-        started = Date.now();
-        return new Promise((resolve) => setTimeout(() => resolve(["a note that arrived too late"]), 200));
-      },
-      fetchImpl: async (_url, options) => {
-        sent = JSON.parse(options.body);
-        return sseResponse([frame("answered without waiting")]);
-      },
-    }),
-  );
-
-  assert.ok(Date.now() - started < 150, "the round went out well before the slow provider resolved");
-  const lastUserTurn = sent.contents.filter((c) => c.role === "user").at(-1);
-  assert.ok(
-    !lastUserTurn.parts.some((p) => p.text?.includes("arrived too late")),
-    "the late note must not appear — it wasn't ready when the round was built",
-  );
-  assert.equal(answerFrames(frames).at(-1).text, "answered without waiting");
-});
-
-test("a contextNotes provider that resolves in time still reaches the prompt", async () => {
-  let sent;
-  await collect(
-    streamChat({
-      apiKey: "k",
-      messages: [{ role: "user", content: "no links here" }],
-      models: ["gemini-3.6-flash"],
-      contextNotesTimeoutMs: 500,
-      contextNotes: async () => ["a note that arrived in time"],
-      fetchImpl: async (_url, options) => {
-        sent = JSON.parse(options.body);
-        return sseResponse([frame("ok")]);
-      },
-    }),
-  );
-
-  const lastUserTurn = sent.contents.filter((c) => c.role === "user").at(-1);
-  assert.ok(lastUserTurn.parts.some((p) => p.text?.includes("arrived in time")));
-});
-
-test("CONTEXT_NOTES_TIMEOUT_MS defaults to a few seconds, not the full search budget", () => {
-  // The whole point: bounded on its own terms, far short of `SEARCH_TIMEOUT_MS` (15s) —
-  // otherwise a slow search provider could still cost a photo check most of that ceiling.
-  assert.ok(CONTEXT_NOTES_TIMEOUT_MS > 0);
-  assert.ok(CONTEXT_NOTES_TIMEOUT_MS <= 5_000);
 });
 
 test("a clip is sent at the configured resolution; a model that refuses it keeps the answer", async () => {

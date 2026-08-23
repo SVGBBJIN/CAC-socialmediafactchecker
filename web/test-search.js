@@ -1841,6 +1841,111 @@ test("the caption is searched while the clip downloads, and reaches the model nu
   assert.match(text, /\[1\] Title 0/);
 });
 
+/** The same post, but photo-mode: no clip to download, just slides. */
+function photoClipOptionsWithCaption(caption = CAPTION) {
+  return {
+    resolveImpl: async () => ({
+      videoID: "7218335390845095174",
+      kind: "images",
+      slideCount: 2,
+      sourceURL: CLIP_URL,
+      caption,
+      authorName: "Someone",
+      images: [1, 2].map((n) => ({ url: `https://cdn.example/s${n}.jpg` })),
+    }),
+    downloadImagesImpl: async () => ({
+      slides: [1, 2].map((n) => ({ bytes: Buffer.from(`slide ${n}`), mimeType: "image/jpeg" })),
+      truncated: 0,
+    }),
+  };
+}
+
+test("a slow caption search never holds up a photo post's first model round", async () => {
+  // The regression this pins. The pre-search is only free while it is hiding inside the
+  // clip download, and a photo post's download is regularly under a second — there is no
+  // window. Waiting anyway put the search's whole latency in front of the first round, on
+  // every photo check with a caption worth searching.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok." }]);
+  const SLOW_MS = 400;
+  let calledAt = null;
+
+  const startedAt = Date.now();
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl: async (...args) => {
+        calledAt ??= Date.now();
+        return fetchImpl(...args);
+      },
+      clipOptions: photoClipOptionsWithCaption(),
+      searchImpl: async (query) => {
+        await new Promise((resolve) => setTimeout(resolve, SLOW_MS));
+        return searchResult(query.claim, ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  assert.ok(calledAt !== null, "the model was called");
+  assert.ok(
+    calledAt - startedAt < SLOW_MS,
+    `the round must not wait on the search (waited ${calledAt - startedAt}ms of ${SLOW_MS}ms)`,
+  );
+  // And it went without the note rather than with a half-built one.
+  const text = sent[0].contents.at(-1).parts.at(-1).text;
+  assert.ok(
+    !/the app searched for the post's own caption/.test(text),
+    "a search that had not landed must not appear in the prompt",
+  );
+});
+
+test("a photo post whose caption search is already back still gets the head start", async () => {
+  // The other half: not waiting is not the same as not using it. A search that finished
+  // during the resolve/download still reaches the model exactly as it does on a clip —
+  // otherwise this would have "fixed" the latency by deleting the feature for photo posts.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok [1]." }]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: photoClipOptionsWithCaption(),
+      searchImpl: async (query) => searchResult(query.claim, ["https://roads.example/notice"]),
+    }),
+  );
+
+  const text = sent[0].contents.at(-1).parts.at(-1).text;
+  assert.match(text, /the app searched for the post's own caption/);
+  assert.match(text, /\[1\] Title 0/);
+});
+
+test("a clip still waits for its caption search — the non-blocking path is photo-only", async () => {
+  // Video is the case the pre-search was built for and measured on: the download is tens of
+  // seconds, so the wait is free and the note is worth having. A slow search here must
+  // still reach the prompt, or the photo fix has quietly cost video its head start.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok [1]." }]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async (query) => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return searchResult(query.claim, ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  const text = sent[0].contents.at(-1).parts.at(-1).text;
+  assert.match(text, /the app searched for the post's own caption/);
+});
+
 test("the caption note lands after the video part, so the cached prefix is unmoved", async () => {
   // Implicit caching keys off a stable prefix and the video is the largest thing in it —
   // see the note on `extraNotes` in toGeminiContents. A note placed ahead of the clip would
