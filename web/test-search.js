@@ -450,6 +450,32 @@ async function collect(stream) {
  * replayed here for the same reason: it is the citation cleanup's edit, so a test that
  * ignored it would be asserting on text no reader is shown.
  */
+/**
+ * The sources a reader actually ends up holding, by replaying the frames the way
+ * public/app.js does: a provisional frame carries the *difference* — `added` rows and
+ * `quotes` patches — and a final, unflagged one replaces the lot.
+ *
+ * Same reasoning as `readerSees` above, and the same bug class: asserting on one frame's
+ * payload cannot see whether the browser ends up with the right bibliography, because no
+ * single provisional frame carries it any more. Only the accumulation does. Take
+ * `{ upTo }` to ask what was on screen at a given point in the stream — which is how the
+ * "before the first token" tests stay meaningful.
+ */
+function readerSources(frames, { upTo = frames.length } = {}) {
+  let rows = [];
+  for (const frame of frames.slice(0, upTo)) {
+    if (frame.type !== "sources") continue;
+    if (!frame.provisional) {
+      rows = frame.sources ?? [];
+      continue;
+    }
+    rows = rows.concat(frame.added ?? []);
+    const patches = new Map((frame.quotes ?? []).map((q) => [q.n, q.quote]));
+    rows = rows.map((row) => (patches.has(row.n) ? { ...row, quote: patches.get(row.n) } : row));
+  }
+  return rows;
+}
+
 function readerSees(frames) {
   let shown = "";
   for (const frame of frames) {
@@ -483,8 +509,7 @@ test("the model searches, the sources are numbered, the answer is shown", async 
   const searchFrame = frames.find((f) => f.type === "search");
   assert.deepEqual(searchFrame.results.map((r) => r.n), [1, 2]);
 
-  const sources = frames.find((f) => f.type === "sources");
-  assert.deepEqual(sources.sources.map((s) => s.n), [1, 2]);
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1, 2]);
   assert.ok(!frames.some((f) => f.type === "unverified"));
 
   // The tool declaration went out, and the tool result came back in the next request.
@@ -716,8 +741,12 @@ test("the bibliography is sent while the searches land, before the answer is wri
     "the sources must arrive before the first token, so markers link as the answer streams",
   );
   assert.equal(frames[firstSources].provisional, true);
-  // Provisional means everything retrieved, since what gets cited is not known yet.
-  assert.deepEqual(frames[firstSources].sources.map((s) => s.n), [1, 2]);
+  // Provisional means everything retrieved, since what gets cited is not known yet — and
+  // it has to be on screen *by the first token*, which is what the slice checks.
+  assert.deepEqual(
+    readerSources(frames, { upTo: firstDelta }).map((s) => s.n),
+    [1, 2],
+  );
 
   // The last one is the real bibliography: not provisional, and narrowed to what was cited.
   const last = frames.filter((f) => f.type === "sources").at(-1);
@@ -753,7 +782,7 @@ test("a search that turns up nothing new does not re-send the same bibliography"
 
   const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
   assert.equal(provisional.length, 1, "one bibliography, not one per search");
-  assert.deepEqual(provisional[0].sources.map((s) => s.n), [1]);
+  assert.deepEqual(provisional[0].added.map((s) => s.n), [1]);
 });
 
 test("a stream that dies mid-answer keeps the text it wrote and its bibliography", async () => {
@@ -784,9 +813,11 @@ test("a stream that dies mid-answer keeps the text it wrote and its bibliography
   }
 
   assert.match(readerSees(frames), /The bridge cost \$2\.1 billion \[1\]\./);
-  const sources = frames.find((f) => f.type === "sources");
-  assert.ok(sources, "the bibliography must survive the failure");
-  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+  assert.ok(
+    frames.some((f) => f.type === "sources"),
+    "the bibliography must survive the failure",
+  );
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1]);
   // Still an error — the reader is owed the reason it stopped, just not at the cost of
   // everything that did arrive.
   assert.match(thrown?.message ?? "", /RECITATION/);
@@ -1071,8 +1102,7 @@ test("the same query asked twice is searched once", async () => {
   // The model still gets an answer for each call it made, and each claim is filed against
   // the source that was retrieved for it.
   assert.equal(frames.filter((f) => f.type === "search").length, 3);
-  const sources = frames.find((f) => f.type === "sources");
-  assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1]);
 });
 
 test("a model that keeps asking to search past its budget is made to answer, once", async () => {
@@ -1124,7 +1154,7 @@ test("a turn that spends itself searching still ends with words, not a blank", a
   const text = frames.filter((f) => f.type === "delta").map((f) => f.text).join("");
   assert.match(text, /did not get to an answer/);
   // And the sources it did retrieve are shown, even though no marker points at them.
-  assert.deepEqual(frames.find((f) => f.type === "sources").sources.map((s) => s.n), [1]);
+  assert.deepEqual(readerSources(frames).map((s) => s.n), [1]);
 });
 
 /* ---------------- what the banners say ---------------- */
@@ -1206,6 +1236,120 @@ test("the model reads a page a search returned and quotes it under the same numb
   assert.equal(sources.sources[0].quote, "The final bill came to $2.1 billion.");
 });
 
+test("a mid-turn bibliography carries what changed, not the whole ledger again", async () => {
+  // Two searches and a find. The second search adds one page to a ledger of two; the find
+  // adds no page at all and only attaches a quote to one already sent. Re-sending every row
+  // each time is what made this quadratic — six searches with two finds a round spent 151KB
+  // of frames to deliver 19KB of rows — so what each frame carries is the property under
+  // test, not just what the browser ends up holding.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    { calls: [{ name: "web_search", args: { query: "bridge opening", claim: "It opened in 2019" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: { url: "https://a.example/1", find: "the final cost", claim: "The bridge cost $4bn" },
+        },
+      ],
+    },
+    { text: "The final bill was $2.1 billion [1]." },
+  ]);
+
+  const pages = {
+    "bridge cost": ["https://a.example/1", "https://b.example/2"],
+    "bridge opening": ["https://a.example/1", "https://c.example/3"],
+  };
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => searchResult(args.claim, pages[args.query]),
+      findImpl: async (query) =>
+        findResult(query.url, query.find, ["The final bill came to $2.1 billion."]),
+    }),
+  );
+
+  const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
+  assert.equal(provisional.length, 3, "one per search, one for the find");
+
+  // First search: both its pages are new.
+  assert.deepEqual(provisional[0].added.map((s) => s.n), [1, 2]);
+  assert.deepEqual(provisional[0].quotes, []);
+
+  // Second search: [1] came back again and is not re-sent. Only [3] is new.
+  assert.deepEqual(provisional[1].added.map((s) => s.n), [3]);
+  assert.deepEqual(provisional[1].quotes, []);
+
+  // The find retrieves nothing. It carries one quote and no rows — where it used to
+  // re-send all three sources to deliver exactly this.
+  assert.deepEqual(provisional[2].added, []);
+  assert.deepEqual(provisional[2].quotes, [
+    { n: 1, quote: "The final bill came to $2.1 billion." },
+  ]);
+
+  // And replaying them the way the browser does still rebuilds the whole ledger.
+  const rebuilt = readerSources(frames.filter((f) => f.provisional === true));
+  assert.deepEqual(rebuilt.map((s) => s.n), [1, 2, 3]);
+  assert.equal(rebuilt[0].quote, "The final bill came to $2.1 billion.");
+  assert.equal(rebuilt[1].quote, undefined);
+});
+
+test("a second find on a page already quoted sends nothing at all", async () => {
+  // `sourceRows` quotes the first passage ever recorded, so a page's quote is set once and
+  // never changes. A re-read of the same page therefore has no news, and a frame saying so
+  // is the redundancy this change exists to remove.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: {
+            url: "https://a.example/1",
+            find: "the final cost",
+            claim: "The bridge cost $4bn",
+          },
+        },
+      ],
+    },
+    {
+      calls: [
+        {
+          name: "find_in_page",
+          args: {
+            url: "https://a.example/1",
+            find: "when the bridge opened",
+            claim: "The bridge cost $4bn",
+          },
+        },
+      ],
+    },
+    { text: "The final bill was $2.1 billion [1]." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
+      findImpl: async (query) => findResult(query.url, query.find, ["The final bill came to $2.1 billion."]),
+    }),
+  );
+
+  const provisional = frames.filter((f) => f.type === "sources" && f.provisional);
+  assert.equal(provisional.length, 2, "the search, and the first find's quote — nothing more");
+  assert.deepEqual(provisional[1].quotes, [
+    { n: 1, quote: "The final bill came to $2.1 billion." },
+  ]);
+});
+
 /**
  * A Gemini stub with a page server bolted on, so a turn can be watched fetching pages
  * nobody asked for yet. Anything with a JSON body is a model call; everything else is a
@@ -1236,8 +1380,16 @@ function geminiAndPages(rounds) {
   return { fetchImpl, sent, fetched };
 }
 
-/** Let the fire-and-forget prefetches settle before asserting on them. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * Let the fire-and-forget prefetches settle before asserting on them.
+ *
+ * Several macrotasks rather than one: prefetching is deliberately drained a couple of pages
+ * at a time (see the queue in `makeToolRunner`), so the last of a turn's nine is several
+ * scheduling hops behind the first even when every fetch resolves instantly.
+ */
+const settle = async () => {
+  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+};
 
 test("the top results of a search are opened while the model is still reading the snippets", async () => {
   // The two-pass shape the prompt asks for means the page a second-round `find_in_page`
@@ -1621,4 +1773,354 @@ test("a fabricated marker is deleted from the answer the reader is shown", async
   // the answer is not withdrawn over it, and the links still cover what it did cite.
   const sources = frames.filter((f) => f.type === "sources").at(-1);
   assert.deepEqual(sources.sources.map((s) => s.n), [1]);
+});
+
+/* ---------------------------------------------------------------- the caption pre-search */
+
+/**
+ * A clip whose resolve carries a caption, attached the way `resolveClipParts` would.
+ *
+ * `attachMedia` has to be on for the pre-search to exist at all — the hook it hangs off
+ * fires inside clip resolution — so these tests stub the resolver and downloader rather
+ * than turning attachment off the way every test above does.
+ */
+const CAPTION = "The Ridgeway bridge was closed on Monday after a structural failure";
+const CLIP_URL = "https://www.tiktok.com/@someone/video/6718335390845095173";
+
+function clipOptionsWithCaption(caption = CAPTION) {
+  return {
+    resolveImpl: async () => ({
+      videoID: "6718335390845095173",
+      mediaURL: "https://cdn.example/v.mp4",
+      sourceURL: CLIP_URL,
+      caption,
+      authorName: "Someone",
+    }),
+    downloadImpl: async () => ({ bytes: Buffer.alloc(32), mimeType: "video/mp4" }),
+  };
+}
+
+test("the caption is searched while the clip downloads, and reaches the model numbered", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "The closure began Monday [1]." }]);
+  const queries = [];
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async (query) => {
+        queries.push(query);
+        return searchResult(query.claim, ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  // One search, issued by the app rather than the model, off the caption's own words.
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].query, /Ridgeway bridge was closed on Monday/);
+  assert.match(queries[0].claim, /What the TikTok post's caption states/);
+
+  // It is on screen as its own item in the evidence trail, marked as the app's doing.
+  const searchFrame = frames.find((f) => f.type === "search");
+  assert.equal(searchFrame.presearch, true);
+  assert.deepEqual(searchFrame.results.map((r) => r.n), [1]);
+
+  // And the sources go out with it, before the model has written anything.
+  const firstSources = frames.findIndex((f) => f.type === "sources");
+  const firstDelta = frames.findIndex((f) => f.type === "delta");
+  assert.ok(firstSources !== -1 && firstSources < firstDelta);
+
+  // The model was handed the numbered sources as prompt context, on the user turn.
+  const userTurn = sent[0].contents.at(-1);
+  assert.equal(userTurn.role, "user");
+  const text = userTurn.parts.at(-1).text;
+  assert.match(text, /the app searched for the post's own caption/);
+  assert.match(text, /\[1\] Title 0/);
+});
+
+/** The same post, but photo-mode: no clip to download, just slides. */
+function photoClipOptionsWithCaption(caption = CAPTION) {
+  return {
+    resolveImpl: async () => ({
+      videoID: "7218335390845095174",
+      kind: "images",
+      slideCount: 2,
+      sourceURL: CLIP_URL,
+      caption,
+      authorName: "Someone",
+      images: [1, 2].map((n) => ({ url: `https://cdn.example/s${n}.jpg` })),
+    }),
+    downloadImagesImpl: async () => ({
+      slides: [1, 2].map((n) => ({ bytes: Buffer.from(`slide ${n}`), mimeType: "image/jpeg" })),
+      truncated: 0,
+    }),
+  };
+}
+
+test("a slow caption search never holds up a photo post's first model round", async () => {
+  // The regression this pins. The pre-search is only free while it is hiding inside the
+  // clip download, and a photo post's download is regularly under a second — there is no
+  // window. Waiting anyway put the search's whole latency in front of the first round, on
+  // every photo check with a caption worth searching.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok." }]);
+  const SLOW_MS = 400;
+  let calledAt = null;
+
+  const startedAt = Date.now();
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl: async (...args) => {
+        calledAt ??= Date.now();
+        return fetchImpl(...args);
+      },
+      clipOptions: photoClipOptionsWithCaption(),
+      searchImpl: async (query) => {
+        await new Promise((resolve) => setTimeout(resolve, SLOW_MS));
+        return searchResult(query.claim, ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  assert.ok(calledAt !== null, "the model was called");
+  assert.ok(
+    calledAt - startedAt < SLOW_MS,
+    `the round must not wait on the search (waited ${calledAt - startedAt}ms of ${SLOW_MS}ms)`,
+  );
+  // And it went without the note rather than with a half-built one.
+  const text = sent[0].contents.at(-1).parts.at(-1).text;
+  assert.ok(
+    !/the app searched for the post's own caption/.test(text),
+    "a search that had not landed must not appear in the prompt",
+  );
+});
+
+test("a photo post whose caption search is already back still gets the head start", async () => {
+  // The other half: not waiting is not the same as not using it. A search that finished
+  // during the resolve/download still reaches the model exactly as it does on a clip —
+  // otherwise this would have "fixed" the latency by deleting the feature for photo posts.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok [1]." }]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: photoClipOptionsWithCaption(),
+      searchImpl: async (query) => searchResult(query.claim, ["https://roads.example/notice"]),
+    }),
+  );
+
+  const text = sent[0].contents.at(-1).parts.at(-1).text;
+  assert.match(text, /the app searched for the post's own caption/);
+  assert.match(text, /\[1\] Title 0/);
+});
+
+test("a clip still waits for its caption search — the non-blocking path is photo-only", async () => {
+  // Video is the case the pre-search was built for and measured on: the download is tens of
+  // seconds, so the wait is free and the note is worth having. A slow search here must
+  // still reach the prompt, or the photo fix has quietly cost video its head start.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok [1]." }]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async (query) => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return searchResult(query.claim, ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  const text = sent[0].contents.at(-1).parts.at(-1).text;
+  assert.match(text, /the app searched for the post's own caption/);
+});
+
+test("the caption note lands after the video part, so the cached prefix is unmoved", async () => {
+  // Implicit caching keys off a stable prefix and the video is the largest thing in it —
+  // see the note on `extraNotes` in toGeminiContents. A note placed ahead of the clip would
+  // cost the hit on every follow-up.
+  const { fetchImpl, sent } = fakeGemini([{ text: "ok [1]." }]);
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async (query) => searchResult(query.claim, ["https://roads.example/notice"]),
+    }),
+  );
+
+  const parts = sent[0].contents.at(-1).parts;
+  assert.ok(parts[0].inline_data, "the clip is still the first part of the turn");
+  assert.match(parts.at(-1).text, /the app searched for the post's own caption/);
+});
+
+test("a caption not worth searching costs nothing", async () => {
+  const { fetchImpl } = fakeGemini([{ text: "Nothing to check here." }]);
+  let searched = false;
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption("😂😂 #fyp #viral"),
+      searchImpl: async () => {
+        searched = true;
+        throw new Error("a decoration-only caption must not be searched");
+      },
+    }),
+  );
+
+  assert.ok(!searched);
+  assert.ok(!frames.some((f) => f.type === "search"));
+});
+
+test("CAPTION_SEARCH_ENABLED=false turns the pre-search off and leaves the turn alone", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "Checked." }]);
+  let searched = false;
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: { CAPTION_SEARCH_ENABLED: "false" },
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async () => {
+        searched = true;
+        return searchResult("x", ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  assert.ok(!searched, "the flag is honoured");
+  assert.doesNotMatch(sent[0].contents.at(-1).parts.at(-1).text, /the app searched/);
+});
+
+test("a follow-up does not re-search the caption it already has", async () => {
+  // The clip resolves again on every turn (the history is replayed), so without the
+  // first-turn guard this would spend a query per follow-up for a caption the model has
+  // had in front of it since the beginning.
+  const { fetchImpl } = fakeGemini([{ text: "Still Monday." }]);
+  let searched = false;
+
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [
+        { role: "user", content: `Fact-check this: ${CLIP_URL}` },
+        { role: "assistant", content: "The closure began Monday." },
+        { role: "user", content: "Are you sure?" },
+      ],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async () => {
+        searched = true;
+        return searchResult("x", ["https://roads.example/notice"]);
+      },
+    }),
+  );
+
+  assert.ok(!searched);
+});
+
+test("a pre-search that fails leaves the turn exactly as it would have been", async () => {
+  const { fetchImpl, sent } = fakeGemini([{ text: "Checked it myself." }]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `Fact-check this: ${CLIP_URL}` }],
+      env: {},
+      fetchImpl,
+      clipOptions: clipOptionsWithCaption(),
+      searchImpl: async () => {
+        throw new SearchError("provider is down");
+      },
+    }),
+  );
+
+  // No frame, no note, no mention — and above all, no failed turn.
+  assert.ok(!frames.some((f) => f.type === "search"));
+  assert.doesNotMatch(sent[0].contents.at(-1).parts.at(-1).text, /the app searched/);
+  assert.match(frames.filter((f) => f.type === "delta").map((f) => f.text).join(""), /Checked it myself/);
+});
+
+test("prefetching is spread out rather than launched all at once", async () => {
+  // A round's searches return together, so nine prefetches launched together also *finish*
+  // together — and each one parses its page on the way into the cache. Measured, that
+  // pile-up was a single ~250ms block of the event loop, landing exactly when the model had
+  // begun writing and the SSE stream was pushing tokens every few milliseconds: the answer
+  // froze mid-sentence and then caught up. Draining the queue a couple at a time is what
+  // stops the arrivals coinciding. Every page still lands long inside a model round, which
+  // is the only deadline a prefetch has.
+  let inFlight = 0;
+  let peak = 0;
+  const { fetchImpl: gemini } = fakeGemini([
+    {
+      calls: [
+        { name: "web_search", args: { query: "a", claim: "claim one here" } },
+        { name: "web_search", args: { query: "b", claim: "claim two here" } },
+        { name: "web_search", args: { query: "c", claim: "claim three here" } },
+      ],
+    },
+    { text: "No source settles this." },
+  ]);
+
+  const fetched = [];
+  const fetchImpl = async (url, options) => {
+    if (String(url).includes("batchEmbedContents")) return { ok: false, status: 503 };
+    if (options?.body) return gemini(url, options);
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    inFlight -= 1;
+    fetched.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (name === "content-type" ? "text/html" : null) },
+      text: async () => "<html><title>T</title><body><p>Something long enough to keep.</p></body></html>",
+    };
+  };
+
+  let query = 0;
+  await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => {
+        query += 1;
+        return searchResult(`claim ${query}`, [
+          `https://q${query}.example/1`,
+          `https://q${query}.example/2`,
+          `https://q${query}.example/3`,
+        ]);
+      },
+    }),
+  );
+  await settle();
+
+  assert.ok(peak <= 2, `at most two pages open at once, saw ${peak}`);
+  // And every one of them still gets fetched — spreading them out must not drop any.
+  assert.equal(fetched.length, 9);
 });

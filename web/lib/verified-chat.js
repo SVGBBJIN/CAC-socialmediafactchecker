@@ -40,6 +40,7 @@ import { RESEARCH_TOOLS, validateFindQuery, FindQueryError } from "./find-schema
 import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
+import { captionQuery, captionSearchEnabled } from "./caption-search.js";
 
 /**
  * The system prompt.
@@ -71,6 +72,15 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "marker. Your training data is not a source: it is stale, it cannot be checked by the",
   "reader, and you are not permitted to cite it. If you have not looked something up, you",
   "do not know it.",
+  "",
+  "One exception, and it is a narrow one. On a post with a caption the app may have run a",
+  "single search for that caption before your first turn, to save you a round — those",
+  "sources arrive in the prompt, already numbered in the same ledger, and you may cite them",
+  "exactly as if you had retrieved them. They are the only sources you will ever be given",
+  "that you did not ask for. Treat them as a starting point and nothing more: the query came",
+  "from a caption, which is often not what the post is really claiming, so read what they",
+  "actually say, use the ones that bear on a claim you are checking, and ignore the rest.",
+  "An unused source costs nothing. Everything they do not settle, you still have to look up.",
   "",
   "WHEN THERE IS NOTHING TO CHECK",
   "Not every message is a fact-check. A greeting, a question about what you do, a thank-you",
@@ -305,6 +315,114 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
 export const PREFETCH_PER_SEARCH = 3;
 export const PREFETCH_PER_TURN = 9;
 
+/**
+ * One speculative search off the post's caption, run while the clip downloads.
+ *
+ * `resolveClipParts` calls this back the moment a link's metadata is known and before its
+ * bytes are fetched (see `onResolved` in lib/gemini.js). That gap — download, upload, and
+ * the whole of the model's first round — is the longest stretch in the request, and until
+ * now not one source was retrieved during any of it: the first search could not be issued
+ * until the model had watched the clip and said what to look for.
+ *
+ * So this fills it. The results go into the same ledger under the same numbering, reach the
+ * model as prompt context (`describePresearch`), and are offered rather than imposed — a
+ * caption is a guess about what matters, and the model is told as much.
+ *
+ * Everything about it is best-effort. A caption not worth searching, a search that fails, a
+ * provider that is down: each leaves the turn exactly as it would have been, because none of
+ * this is the answer — it is a head start on the evidence.
+ *
+ * Returns a controller rather than a promise so the caller can start it from a callback and
+ * collect from somewhere else entirely: `frames()` drains what the UI still owes the reader,
+ * and `note()` produces the text the prompt needs — waiting for it on a clip, where the
+ * download gives it a window to finish in, and taking only what has already arrived on a
+ * photo post, where it does not. See `note()`.
+ */
+function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled }) {
+  let pending = null;
+  let started = false;
+  // What the search actually produced, kept for the case where `note()` is not allowed to
+  // wait for it — see the note there. Null until it lands, and null forever if it fails.
+  let settledNote = null;
+  // Whether `note()` may block on this search. Decided from what the post turned out to
+  // be, in `start` below.
+  let blocking = true;
+  const queued = [];
+
+  return {
+    /** Fire, at most once per turn. Extra links are the reader's second paste, not a claim. */
+    start({ platform, resolved }) {
+      if (!enabled || started) return;
+      const query = captionQuery(resolved?.caption, { platform });
+      if (!query) return;
+      started = true;
+      // The whole design of this pre-search is that it runs inside a window something else
+      // has already opened: the clip download. A video's bytes take tens of seconds, so a
+      // search capped at `SEARCH_TIMEOUT_MS` finishes inside that window every time and
+      // waiting for it costs nothing. A photo post has no such window — `downloadImageSet`
+      // moves a few hundred KB to a couple of MB and is regularly done in under a second —
+      // so waiting there is not overlap at all, it is the search's full latency in front of
+      // the first model round, which is exactly what it was supposed to be hiding behind.
+      // Anything that is not a photo post keeps the original blocking behaviour, including
+      // a `kind` this app does not recognise: the default has to be the one already proven
+      // on video.
+      blocking = resolved?.kind !== "images";
+
+      pending = Promise.resolve(searchImpl(query, { env, fetchImpl, signal }))
+        .then((result) => {
+          const entries = ledger.record(result);
+          if (entries.length === 0) return null;
+          queued.push({
+            type: "search",
+            // Flagged so a consumer can say where it came from. The reader did not ask for
+            // this search and the model did not issue it; presenting it as though the model
+            // had would misdescribe the one part of the trail that is the app's own doing.
+            presearch: true,
+            query: result.query,
+            claim: result.claim,
+            provider: result.provider,
+            results: entries.map(({ n, title, url, domain }) => ({ n, title, url, domain })),
+          });
+          settledNote = CitationLedger.describePresearch(entries, result);
+          return settledNote;
+        })
+        // A speculative search that fails is a non-event: no frame, no note, no mention.
+        // The model searches for itself exactly as it did before this existed.
+        .catch(() => null);
+    },
+
+    /** Frames the UI hasn't been shown yet. Drained, so nothing is emitted twice. */
+    frames() {
+      return queued.splice(0);
+    },
+
+    /**
+     * The prompt note. Null when there is nothing to say.
+     *
+     * Two behaviours, and which one applies is decided in `start` from the media itself.
+     *
+     * On a clip this waits, exactly as it always has: the download it overlaps runs for
+     * tens of seconds, so by the time anyone asks the search is long since finished and the
+     * wait is free. That path is unchanged and deliberately so.
+     *
+     * On a photo post it takes whatever has already arrived and never waits. There is no
+     * download left to overlap — see `start` — so a wait here would be the search's own
+     * latency, paid up front, in front of the first model round. A search that got back in
+     * time still gets its head start; one that did not is simply dropped, and the model
+     * looks things up for itself the way it did before this existed — which is already how
+     * this module treats a pre-search that fails. Note that a search landing after the turn
+     * has finished reaches nobody: `frames()` is only drained while the turn is running, so
+     * on a photo post a slow pre-search costs its own cost and buys nothing. That is the
+     * trade, and it is the right way round — the alternative was charging every photo check
+     * that latency up front, before the model had been called at all.
+     */
+    async note() {
+      if (!pending) return null;
+      return blocking ? await pending : settledNote;
+    },
+  };
+}
+
 export function searchEnabled(env = process.env) {
   // Read case-insensitively, like the provider keys: an operator who typed
   // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
@@ -348,19 +466,51 @@ function makeToolRunner({
     ]);
 
   // Speculative page loads, budgeted for the whole turn — see `PREFETCH_PER_SEARCH`.
+  //
+  // Queued and drained a couple at a time rather than all launched at once, and that is a
+  // latency decision, not a politeness one. A round's searches return together, so nine
+  // simultaneous prefetches also *finish* together — and each one then parses its page
+  // synchronously on the way into the cache. Measured, that pile-up was a single unbroken
+  // ~190ms block of the event loop, landing exactly when the model had started writing and
+  // the SSE stream was trying to push tokens out every few milliseconds: the answer visibly
+  // froze mid-sentence and then caught up. Nothing was slower; it just stuttered.
+  //
+  // `extractPassagesCooperative` (lib/page-find.js) fixed the parsing half. This fixes the
+  // other half — the pages arriving at the same instant — by spreading their arrivals out.
+  // Two at a time still finishes every page well inside a model round that runs for tens of
+  // seconds, which is the only deadline any of this has: a prefetch is worth having if it
+  // lands before the model asks for the page, and not one millisecond sooner.
+  const PREFETCH_CONCURRENCY = 2;
   let prefetched = 0;
+  let running = 0;
+  const queue = [];
+  const pump = () => {
+    while (running < PREFETCH_CONCURRENCY && queue.length > 0) {
+      const url = queue.shift();
+      if (signal?.aborted) return;
+      running += 1;
+      // Deliberately not awaited by the caller: the point is that this overlaps the model
+      // call the search results are about to be handed to. A page that will not open is not
+      // a failure here — nobody asked for it yet, and `PageCache` has already forgotten it
+      // by the time a real find might.
+      pages
+        .load(url)
+        .catch(() => {})
+        .finally(() => {
+          running -= 1;
+          pump();
+        });
+    }
+  };
   const prefetch = (entries) => {
     if (!pages || prefetchPerSearch <= 0) return;
     for (const { url } of entries.slice(0, prefetchPerSearch)) {
-      if (prefetched >= prefetchPerTurn) return;
+      if (prefetched >= prefetchPerTurn) break;
       if (signal?.aborted) return;
       prefetched += 1;
-      // Deliberately not awaited: the point is that this overlaps the model call the
-      // search results are about to be handed to. A page that will not open is not a
-      // failure here — nobody asked for it yet, and `PageCache` has already forgotten it
-      // by the time a real find might.
-      pages.load(url).catch(() => {});
+      queue.push(url);
     }
+    pump();
   };
 
   return async (call, { signal: callSignal } = {}) => {
@@ -479,6 +629,11 @@ async function runFind(call, { ledger, apiKey, fetchImpl, pages, findImpl, signa
         matches: result.passages.length,
         passages: result.passages.length,
         semantic: result.semantic,
+        // Distinct from `!semantic` on its own — see the doc comment on `rankPassages` in
+        // lib/page-find.js. Carried through so a consumer watching the trace can tell "fuzzy
+        // search already nailed it, no embedding call made" apart from "the embedding call
+        // was unavailable," which is the same distinction `describeFind` draws for the model.
+        semanticSkipped: result.semanticSkipped,
       },
     };
   } catch (error) {
@@ -561,14 +716,22 @@ function sourcesFrame(rows, { cited, truncated, streamError }) {
  *   from the verdict that follows the search, which is the job the old `reset` frame did by
  *   *erasing* the preamble. **Nothing this layer emits ever un-draws text.** A consumer that
  *   ignores this frame gets a run-on paragraph, not a wrong answer.
- * - `{type: "sources", sources, provisional, fallback}` — the links, built from the ledger.
- *   Sent **as the searches land**, with `provisional: true` and the whole ledger, so the
- *   evidence is on screen and every `[n]` marker resolves to a link from the first token of
- *   the answer rather than only after the last one. Sent once more at the end without the
- *   flag, narrowed and renumbered to what the answer actually cited; a consumer replaces on
- *   each one. `fallback` says whether the links still need to be *shown* as a list — see
- *   `sourcesFrame`, and note that a consumer must keep the rows either way, because they are
- *   what turns a marker into a link.
+ * - `{type: "sources", …}` — the links, built from the ledger. It comes in two shapes, and
+ *   the flag says which:
+ *   - `{provisional: true, added, quotes}` — sent **as the searches land**, so the evidence
+ *     is on screen and every `[n]` marker resolves to a link from the first token of the
+ *     answer rather than only after the last one. It carries the *difference*: `added` is
+ *     the rows the consumer has not been sent, `quotes` is `{n, quote}` for a source it is
+ *     already holding that a find has since pulled words out of. A consumer accumulates
+ *     these. Sending the whole ledger each time — which is what this did — cost 151KB
+ *     across a heavy turn to deliver 19KB of new rows, on a stream whose other job is
+ *     getting the answer to the screen. Neither key is ever absent, only empty.
+ *   - `{sources, fallback}` — sent once, at the end, without the flag: the complete list,
+ *     narrowed and renumbered to what the answer actually cited. This one *replaces*
+ *     whatever the provisional frames built up, and it is what the finished answer is
+ *     stored with. `fallback` says whether the links still need to be *shown* as a list —
+ *     see `sourcesFrame`, and note that a consumer must keep the rows either way, because
+ *     they are what turns a marker into a link.
  * - `{type: "answer", text}` — the final text of the answer, with its citations cleaned up.
  *   Replaces everything streamed as `delta` so far. Sent only when cleanup changed something,
  *   which is why it is a replacement rather than the normal channel: the answer streams
@@ -589,10 +752,28 @@ export async function* verifiedChat({
   signal,
   prefetchPerSearch = PREFETCH_PER_SEARCH,
   prefetchPerTurn = PREFETCH_PER_TURN,
+  // Named rather than left in `geminiOptions` because this layer has to add to it: the
+  // caption search hangs off `onResolved`, and a blind `...geminiOptions` spread would let
+  // the caller's own clip options (the API route sets the cache, hints and browser worker
+  // there) silently replace the callback instead of merging with it.
+  clipOptions = {},
   ...geminiOptions
 }) {
   const enabled = searchEnabled(env);
   const ledger = new CitationLedger();
+  // Only on a fresh check. A follow-up replays the whole history, so the clip resolves
+  // again and would fire the same caption search on every question the reader asks — for a
+  // caption the model has had in front of it since the first turn. The clip is attached
+  // once, at its first mention; this is the turn-level twin of that rule.
+  const firstTurn = !messages.some((m) => m?.role === "assistant");
+  const captionSearch = makeCaptionSearch({
+    ledger,
+    env,
+    fetchImpl,
+    signal,
+    searchImpl,
+    enabled: enabled && firstTurn && captionSearchEnabled(env),
+  });
   // One cache for the whole turn, so a second find on a page already open costs the ranking
   // and nothing else. The model is expected to come back to a good source for another claim —
   // that is the point of reading one rather than searching again.
@@ -621,6 +802,42 @@ export async function* verifiedChat({
   // new — a repeat query served from the cache, or a page another search already found —
   // doesn't re-send a bibliography identical to the one already on screen.
   let sentSources = 0;
+  // Which of those it has already been sent a `quote` for. A find attaches the page's own
+  // words to a source the browser is already holding, and the first passage recorded is the
+  // one `sourceRows` quotes forever after, so a quote is set once and never changes.
+  const sentQuotes = new Set();
+
+  /**
+   * The next provisional `sources` frame — what changed — or `null` when nothing has.
+   *
+   * This used to re-send the entire ledger on every search *and* every find, which made the
+   * cost of the evidence trail quadratic in the number of things retrieved. A find is the
+   * worst of it: it adds no source at all, and was re-sending twenty rows to deliver one
+   * quote. Measured on a heavy turn — six searches, two finds a round — that is 151KB of
+   * `sources` frames carrying 19KB of actual news, on a stream that is also trying to
+   * deliver the answer the reader is watching appear, and that Vercel is forbidden from
+   * compressing because SSE here is sent `no-transform`.
+   *
+   * So a provisional frame carries `added` and `quotes` instead of `sources`. The final,
+   * unflagged frame is untouched and still carries the whole narrowed, renumbered list —
+   * it is the authoritative one, it is what the answer is stored with, and it is sent once.
+   */
+  function provisionalSources() {
+    const added = sourceRows(ledger.sources.slice(sentSources));
+    // Only entries the browser already holds need a patch; anything in `added` carries its
+    // quote inline. Reading the old `sentSources` before it moves is what keeps those two
+    // sets from overlapping.
+    const quotes = [];
+    for (const source of ledger.sources.slice(0, sentSources)) {
+      const quote = source.passages?.[0]?.text;
+      if (quote && !sentQuotes.has(source.n)) quotes.push({ n: source.n, quote });
+    }
+    for (const row of added) if (row.quote) sentQuotes.add(row.n);
+    for (const patch of quotes) sentQuotes.add(patch.n);
+    sentSources = ledger.sources.length;
+    if (added.length === 0 && quotes.length === 0) return null;
+    return { type: "sources", added, quotes, provisional: true };
+  }
   // The highest round seen to begin, and whether text is currently mid-paragraph. Together
   // they decide when a `break` goes out: a new round starting on top of text already
   // written means the model stopped to use a tool and is now resuming. See the frame's
@@ -657,6 +874,22 @@ export async function* verifiedChat({
     yield { type: "break" };
   }
 
+  /**
+   * Hand the reader anything the caption search has produced since we last looked.
+   *
+   * Drained at every frame rather than emitted where the search lands, because the search
+   * lands inside `streamChat`'s clip attachment — a stretch this generator is blocked on and
+   * cannot yield from. This is the first opportunity, and it is still early: these sources
+   * reach the screen before the model has said a word.
+   */
+  function* drainCaptionFrames() {
+    for (const frame of captionSearch.frames()) {
+      yield frame;
+      const sources = provisionalSources();
+      if (sources) yield sources;
+    }
+  }
+
   try {
     for await (const frame of streamChat({
       apiKey,
@@ -666,8 +899,20 @@ export async function* verifiedChat({
       fetchImpl,
       tools: enabled ? RESEARCH_TOOLS : null,
       toolRunner: enabled ? toolRunner : null,
+      // Started from inside the clip attachment, the moment the caption is known and before
+      // a single byte of video is fetched — see `makeCaptionSearch`.
+      clipOptions: { ...clipOptions, onResolved: (info) => captionSearch.start(info) },
+      // Collected once the download is done. On a clip that is well past when this search
+      // finished, so it is waited for; on a photo post the download is often the faster of
+      // the two and nothing is waited for — `note()` owns that split, and the reasoning for
+      // it. Returns the numbered sources as a note on the last user turn.
+      contextNotes: async () => {
+        const note = await captionSearch.note();
+        return note ? [note] : [];
+      },
       ...geminiOptions,
     })) {
+      yield* drainCaptionFrames();
       // The model went off to use a tool, or a fresh round began on top of text already
       // written. Either way what it writes next is a new paragraph, not a continuation.
       if (frame.type === "search" || frame.type === "find") needsBreak = true;
@@ -721,17 +966,25 @@ export async function* verifiedChat({
       //
       // Provisional because what the answer cites is not known yet: this is everything
       // retrieved, and the frame at the end narrows it to what was actually used.
-      if (frame.type === "search" && ledger.size > sentSources) {
-        sentSources = ledger.size;
-        yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+      if (frame.type === "search") {
+        const sources = provisionalSources();
+        if (sources) yield sources;
       }
-      // A find retrieves no new source, so it does not move `sentSources` — but it does
-      // attach the page's own words to a source already on screen, and those quotes are
-      // the best thing the provisional list can show while the model is still reading.
+      // A find retrieves no new source — but it does attach the page's own words to a
+      // source already on screen, and those quotes are the best thing the provisional list
+      // can show while the model is still reading. That is all such a frame now carries:
+      // the one `quotes` patch, rather than the whole ledger again to deliver it.
       if (frame.type === "find" && frame.matches > 0) {
-        yield { type: "sources", sources: sourceRows(ledger.sources), provisional: true };
+        const sources = provisionalSources();
+        if (sources) yield sources;
       }
     }
+    // In practice the drain inside the loop has already run — `contextNotes` waits for the
+    // caption search before the first round is even sent, so its frames are queued well
+    // before any frame arrives to drain them. This is for the turn where that doesn't hold:
+    // a stream that produced nothing at all would otherwise retrieve sources and never
+    // mention them.
+    yield* drainCaptionFrames();
   } catch (error) {
     // The caller closing the tab is what they asked for, not a failure to dress up.
     if (signal?.aborted) return;

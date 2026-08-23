@@ -128,22 +128,30 @@ export const DEFAULT_THINKING_BUDGET_TOKENS = 4096;
 export const DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS = 1024;
 
 /**
- * How much of a video Gemini is asked to look at, per frame.
+ * How much detail Gemini is asked to read, per input image or video frame.
  *
- * `generationConfig.mediaResolution` trades visual detail for tokens, and video is where
- * that trade is worth naming: a clip is sampled at a frame a second, so a 45-second TikTok
- * arrives as ~45 images. At the default that is several thousand input tokens the model
- * has to read before it can say anything — on every round of the turn, since the clip
- * stays in the conversation — and it is the largest single contributor to the gap between
- * pasting a link and seeing the first search.
+ * `generationConfig.mediaResolution` trades visual detail for tokens, and it isn't a
+ * video-only setting even though video is where the trade is most worth naming: a clip is
+ * sampled at a frame a second, so a 45-second TikTok arrives as ~45 images, several
+ * thousand input tokens the model has to read before it can say anything — on every round
+ * of the turn, since the clip stays in the conversation — and the largest single
+ * contributor to the gap between pasting a link and seeing the first search. But a photo
+ * carousel pays the same per-image cost with none of the video's frame-sampling discount
+ * baked in: up to `MAX_IMAGE_SLIDES` full-resolution stills, each one is its own tiled
+ * image the model reads in full — see `downloadImageSet` in lib/media-fetch.js. This field
+ * applies to both uniformly. `streamChat` decides whether to send it at all from whether
+ * *any* media is attached (`file_data` or `inline_data`), never from whether that media
+ * happens to be a video — see the `media` flag where the round is built.
  *
  * Deliberately **not** on by default, even though `low` is the biggest remaining speed
  * lever in this file. On short-form video the claim frequently lives in an on-screen text
- * card rather than in the audio — the system prompt says so in as many words — and reading
- * small text off a frame is exactly what resolution buys. Trading it away silently would
- * make the app faster at the thing it exists to do badly, so the choice is the operator's:
- * set `GEMINI_MEDIA_RESOLUTION=low` (or `medium`) and measure it against clips you care
- * about.
+ * card rather than in the audio — the system prompt says so in as many words — and a
+ * still photo (a screenshot, a meme, an infographic) just as often carries the claim as
+ * its own on-screen text. Reading small text off a frame or a slide is exactly what
+ * resolution buys either way. Trading it away silently would make the app faster at the
+ * thing it exists to do badly, so the choice is the operator's: set
+ * `GEMINI_MEDIA_RESOLUTION=low` (or `medium`) and measure it against posts you care about
+ * — video and photo alike, since one setting covers both.
  */
 export const MEDIA_RESOLUTIONS = {
   low: "MEDIA_RESOLUTION_LOW",
@@ -188,16 +196,28 @@ export function supportsThinkingBudget(model) {
 }
 
 /**
- * Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`.
+ * Flash 3.7 preferred, then 3.6, 3.5, 3, 2.5, 2 — full models before any Lite one, newest
+ * first within each group. `Sources/SeerCore/Gemini/GeminiModel.swift`'s
+ * `GeminiModelChain.flashPreferred` predates this chain's Lite tier and the 3.7 model;
+ * per CLAUDE.md's freeze policy this is a `web/`-only change and that gap is expected, not
+ * a bug — don't port it there.
  *
- * The Lite variants (plus 3.7, which showed up after 3.6) are appended after the full
- * chain rather than interleaved with their non-Lite siblings: a Lite model trades quality
- * for cost/speed, and this app would rather fall all the way through the full-quality
- * models first and only reach for a cheaper one once every one of those is genuinely
- * unavailable. Newest-and-strongest-Lite first among the four, same reasoning as the rest
- * of the chain.
+ * The three Lite models sit after every full model, not interleaved with same-generation
+ * ones (a `3.5-flash-lite` failure doesn't fall through to `3-flash-preview` before
+ * `3.6-flash` or `2.5-flash` have both been tried) — they're the cost/speed tier, reached
+ * only once every full model has failed or is cooling down, not a first-choice cheaper
+ * sibling of any one of them. `gemini-3.1-flash-lite` has no full, non-Lite `3.1` model
+ * anywhere in the chain — Lite-only releases happen, and `supportsThinkingBudget` below
+ * doesn't care why an ID exists, only what version number is in it.
+ *
+ * 3.7 leads rather than trailing behind 2.0 — it is a newer, full-quality model, not a
+ * cost tier, and belongs at the front of the chain for the same reason 3.6 did before it
+ * shipped. A separate, independent pass at this same chain landed on `main` while this
+ * branch was open and appended 3.7 near the Lite models instead, alongside them rather
+ * than ahead of the models it supersedes; that ordering was not kept in the merge.
  */
 export const DEFAULT_MODEL_CHAIN = [
+  "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   // 3-series Flash only ships under the preview ID; there is no `gemini-3-flash`.
@@ -205,7 +225,6 @@ export const DEFAULT_MODEL_CHAIN = [
   "gemini-2.5-flash",
   // The 2-series ID is `2.0`, not `2`.
   "gemini-2.0-flash",
-  "gemini-3.7-flash",
   "gemini-3.5-flash-lite",
   "gemini-3.1-flash-lite",
   "gemini-2.5-flash-lite",
@@ -811,6 +830,15 @@ export async function resolveClipParts(
     // Null means every failure below is reported exactly as it was before this existed.
     browserWorker = null,
     browserResolveImpl = browserResolve,
+    // Called once per link the moment its metadata is known and *before* its bytes are
+    // fetched, with `{link, platform, resolved}`. That gap is the point: resolving yields
+    // the caption, the creator and the duration, and the download that follows is the
+    // slowest thing in the request — so a caller with something useful to do with a caption
+    // (see lib/caption-search.js) can do it in time that was going to be spent waiting
+    // either way. Fires for cached and hinted links too, since a caller wanting the caption
+    // wants it however we came by it. Never awaited and never allowed to throw: this is a
+    // notification, and a caller that breaks must not take the clip down with it.
+    onResolved = null,
   } = {},
 ) {
   const caching = Boolean(cache) && cacheTTLMs > 0 && cacheMaxBytes > 0;
@@ -908,24 +936,48 @@ export async function resolveClipParts(
     // or running Instagram's post query — not the download itself, so every link is resolved
     // at once rather than one after another. With the usual two-link paste this halves the
     // wait before either download can even start.
+    // Told as soon as *this* link is known rather than once the slowest of them is, since
+    // the whole value of the hook is the head start. Swallows its own failure: a caller's
+    // bad callback is not a reason to lose the clip.
+    const announce = (link, provider, resolved) => {
+      if (!onResolved || !resolved) return resolved;
+      try {
+        onResolved({ link, platform: provider.platform, resolved });
+      } catch {
+        // Best-effort by design — see `onResolved`.
+      }
+      return resolved;
+    };
+
     const resolutions = await Promise.all(
       links.map(async ({ link, provider }) => {
         const hit = cached.get(link);
-        if (hit) return { link, provider, resolved: hit.resolved, cached: hit };
+        if (hit) {
+          announce(link, provider, hit.resolved);
+          return { link, provider, resolved: hit.resolved, cached: hit };
+        }
         // A real cache hit outranks a hint: it already holds the bytes, so it skips the
         // download too, where a hint only skips the resolve.
         const hinted = hints?.get(`${provider.platform}:${link}`);
-        if (hinted) return { link, provider, resolved: hinted, fromHint: true };
+        if (hinted) {
+          announce(link, provider, hinted);
+          return { link, provider, resolved: hinted, fromHint: true };
+        }
         try {
           const resolve = resolveImpl ?? provider.resolve;
-          return { link, provider, resolved: await resolve(link, clipOptions) };
+          const resolved = await resolve(link, clipOptions);
+          announce(link, provider, resolved);
+          return { link, provider, resolved };
         } catch (error) {
           // A throttled, refused or shape-changed resolve is a failure about *us* rather
           // than about the post — the page is public and a browser can see it. Ask one.
           // `escalate` keeps the original error if the worker can't help, so the worst case
           // is the note the user would have got anyway, arriving later.
           const resolved = await escalate(link, provider.platform, error);
-          if (resolved) return { link, provider, resolved };
+          if (resolved) {
+            announce(link, provider, resolved);
+            return { link, provider, resolved };
+          }
           return { link, provider, error: describeFailure(error) };
         }
       }),
@@ -1258,14 +1310,36 @@ function describeOEmbedFallback(meta, platform, link, reason) {
  *   an input to fetch; the API does not accept media there, and an assistant that quotes
  *   the user's link back would otherwise re-attach the video on every subsequent request.
  */
-export function toGeminiContents(messages, { clips, articles, attachVideos = true } = {}) {
+export function toGeminiContents(
+  messages,
+  { clips, articles, attachVideos = true, extraNotes = [] } = {},
+) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
   const attachedPages = new Set();
   const attachments = clips?.attachments ?? new Map();
   const pages = articles?.pages ?? new Map();
 
-  return messages.map((message) => {
+  // `extraNotes` land on the **last** user turn, and after everything else that turn had to
+  // say. Both halves of that matter, and not only for tidiness.
+  //
+  // Last, because these are things gathered for *this* request — they are not part of the
+  // conversation's history and are not replayed, so putting them on the first turn would
+  // make that turn's text differ between the request that generated them and every later
+  // one. Gemini's implicit caching keys off a stable prefix (it is on by default for every
+  // 2.5+ model in the chain), and the video sits in that prefix — attached once, at first
+  // mention, by the rules above. A note spliced in ahead of it would move the video and
+  // cost the cache hit on the single largest thing in the request.
+  //
+  // After, because the clip's own caption line and a quoted page are context about the
+  // subject, and these are context about the evidence. Reading the second before the first
+  // would be reading the answer before the question.
+  const lastUserIndex = messages.reduce(
+    (found, message, index) => (message?.role !== "assistant" ? index : found),
+    -1,
+  );
+
+  return messages.map((message, index) => {
     const isUser = message.role !== "assistant";
     const text = String(message.content ?? "");
     const parts = [];
@@ -1338,6 +1412,12 @@ export function toGeminiContents(messages, { clips, articles, attachVideos = tru
         attachedPages.add(link);
         const context = describeArticle(link, page);
         if (context) notes.push(context);
+      }
+
+      if (index === lastUserIndex) {
+        for (const note of extraNotes) {
+          if (note) notes.push(note);
+        }
       }
     }
 
@@ -1422,6 +1502,26 @@ function* framesFromLine(line) {
   const blockReason = frame?.promptFeedback?.blockReason;
   if (blockReason) {
     throw new GeminiError(`Gemini declined to answer (${blockReason}).`, { status: 502 });
+  }
+
+  // What the request actually cost, and how much of it Gemini served from cache.
+  //
+  // Reported for its own sake rather than only on the truncation path below, because
+  // `cachedContentTokenCount` is the one observable that says whether *implicit* caching is
+  // working. It is on by default for every 2.5+ model in the chain, needs no code, and
+  // keys off a stable prompt prefix — which `toGeminiContents` maintains by attaching each
+  // video exactly once at its first mention. That means the largest thing in a video
+  // fact-check is expected to be a cache hit from round 1 onward and on every follow-up
+  // turn, and until this frame existed there was no way to know whether it actually was.
+  // A silent regression there is expensive and invisible; this is what makes it neither.
+  const usage = frame?.usageMetadata;
+  if (usage && (usage.promptTokenCount != null || usage.cachedContentTokenCount != null)) {
+    yield {
+      type: "usage",
+      promptTokens: usage.promptTokenCount ?? null,
+      cachedTokens: usage.cachedContentTokenCount ?? 0,
+      totalTokens: usage.totalTokenCount ?? null,
+    };
   }
 
   const candidate = frame?.candidates?.[0];
@@ -1708,6 +1808,12 @@ export async function* streamChat({
   // one by default. /api/chat opts in — see the note there.
   attachPages = false,
   articleOptions = {},
+  // An async provider for extra prompt context the caller gathered *during* attachment —
+  // work it started off the back of `clipOptions.onResolved` and wants in front of the
+  // model. Returns strings, appended to the last user turn by `toGeminiContents`. Kept as
+  // a callback rather than a value because the whole point is that it runs concurrently
+  // with the clip download, and a value would have to have been computed before it.
+  contextNotes = null,
   tools = null,
   toolRunner = null,
   maxToolRounds = MAX_TOOL_ROUNDS,
@@ -1762,7 +1868,29 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
-    const contents = toGeminiContents(messages, { clips, articles, attachVideos: attachMedia });
+    // Anything the caller went and got while the clip was being attached, collected now
+    // that there is nothing left to overlap it with. Awaited rather than raced: by this
+    // point the download — the long pole — is already finished, so work started before it
+    // has had that whole stretch to complete and is in practice already done. A provider
+    // that hangs anyway is the caller's own bound to enforce (`lib/search.js` has a
+    // timeout of its own); a provider that *fails* costs the turn nothing, because the
+    // note it would have added is context, not the answer.
+    let extraNotes = [];
+    if (contextNotes) {
+      try {
+        extraNotes = (await contextNotes()) ?? [];
+      } catch {
+        extraNotes = [];
+      }
+    }
+    if (deadline.callerAborted) return;
+
+    const contents = toGeminiContents(messages, {
+      clips,
+      articles,
+      attachVideos: attachMedia,
+      extraNotes,
+    });
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
@@ -1836,6 +1964,14 @@ export async function* streamChat({
           turn.addCall(frame.call, frame.signature);
           continue;
         }
+        // Stamped with the round here rather than reported bare, because the number only
+        // means something against one: a cache hit on round 0 is Gemini remembering an
+        // earlier *turn*, and a hit on round 1 is it remembering the video from a moment
+        // ago. Told apart, they say different things about what is working.
+        if (frame.type === "usage") {
+          yield { ...frame, round };
+          continue;
+        }
         if (frame.type === "model") {
           // The chain is walked afresh each round, but the consumer only cares when the
           // answer changes hands — re-announcing the same model every round would make
@@ -1893,21 +2029,40 @@ export async function* streamChat({
 
       // Dispatched together, not one after another. The model is told it may ask for every
       // search it needs in a single round precisely so they can overlap here: four claims
-      // now cost one search's worth of waiting rather than four. Results are still consumed
-      // in call order, so the numbering in the ledger doesn't depend on which search won.
-      const running = calls.map((call) => {
-        const pending = Promise.resolve(toolRunner(call, { signal }));
+      // now cost one search's worth of waiting rather than four.
+      const running = calls.map((call, index) => {
+        const pending = Promise.resolve(toolRunner(call, { signal })).then((settled) => ({
+          index,
+          settled,
+        }));
         // A sibling failing first must not turn the rest of the round into unhandled
         // rejections; the real handling is the `await` below, which still throws.
         pending.catch(() => {});
         return pending;
       });
 
-      const responseParts = [];
-      for (const [index, call] of calls.entries()) {
-        const { response, frame } = await running[index];
-        if (frame) yield frame;
-        responseParts.push({ functionResponse: { name: call.name, response } });
+      // Reported as each one lands, not in call order. Overlapping the calls only shortens
+      // the round; it does nothing for the reader if the round's frames are then held behind
+      // the slowest of them, which is what awaiting in order did — four searches finishing
+      // over three seconds showed nothing until the last one, then all four at once. The
+      // evidence trail is the one thing on screen during a tool round, so each search's
+      // sources go out the moment that search has them.
+      //
+      // Nothing downstream depends on the order these arrive in. The ledger's numbering has
+      // never come from this loop: `makeToolRunner` files its results after awaiting the
+      // search, so a number has always been assigned in the order the searches *finished*.
+      // What does have to stay in call order is `responseParts`, since Gemini matches a
+      // round's function responses to its calls positionally — so that is filled by index
+      // rather than pushed.
+      const responseParts = new Array(calls.length);
+      const pending = new Set(running);
+      while (pending.size > 0) {
+        const { index, settled } = await Promise.race(pending);
+        pending.delete(running[index]);
+        if (settled.frame) yield settled.frame;
+        responseParts[index] = {
+          functionResponse: { name: calls[index].name, response: settled.response },
+        };
       }
       // Function results go back under `user`. Gemini's `Content.role` only accepts
       // `user` and `model`; the results are an input to the next turn, so they are the

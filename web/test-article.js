@@ -170,6 +170,39 @@ test("fetchArticle refuses what is not a page", async () => {
   }
 });
 
+test("fetchArticle asks for brotli, and holds the cap against what inflates", async () => {
+  // Two halves of one change — see the same pair in test-find.js. Accepting a better
+  // compression is only safe while the size cap counts decompressed bytes, because a
+  // `content-length` describes the compressed copy and cannot bound what it becomes.
+  const fetchImpl = stubFetch({ "https://news.test/x": page(ARTICLE_HTML) });
+  await fetchArticle("https://news.test/x", { fetchImpl, lookupImpl: publicLookup });
+  assert.match(fetchImpl.calls[0].init.headers["accept-encoding"], /\bbr\b/);
+
+  let pulled = 0;
+  const bomb = async () => ({
+    status: 200,
+    headers: {
+      get: (n) =>
+        String(n).toLowerCase() === "content-length" ? "30000" : "text/html; charset=utf-8",
+    },
+    body: (async function* () {
+      for (;;) {
+        pulled += 1;
+        yield Buffer.alloc(500_000, 0x61);
+      }
+    })(),
+    text: async () => {
+      throw new Error("text() must not be reached");
+    },
+  });
+  await assert.rejects(
+    fetchArticle("https://news.test/x", { fetchImpl: bomb, lookupImpl: publicLookup }),
+    (error) => error instanceof ArticleError && /too large/.test(error.message),
+  );
+  // 2MB cap, 500KB a chunk: the fifth crosses it, and the generator is left there.
+  assert.equal(pulled, 5);
+});
+
 test("fetchArticle cuts a long page and says that it did", async () => {
   const long = `<html><title>Long</title><body><p>${"word ".repeat(4000)}</p></body></html>`;
   const fetchImpl = stubFetch({ "https://news.test/long": page(long) });

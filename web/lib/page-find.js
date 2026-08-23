@@ -170,37 +170,83 @@ export function htmlToText(html) {
  * - Long paragraphs are cut at sentence boundaries. A 4,000-character block scores as a
  *   weak match for everything, and quoting the whole of it back is not a quote.
  */
-export function extractPassages(text) {
-  const blocks = [];
+/**
+ * Every passage in the page, in document order, prepared one at a time.
+ *
+ * Streaming rather than two passes — glue every block, *then* prepare every block — because
+ * a generator that does all of its splitting before its first `yield` cannot be interrupted
+ * during the half that runs first, and the cooperative wrapper below would then still block
+ * for as long as that half takes. Emitting each block's passages as soon as that block ends
+ * makes the whole thing interruptible. The output is unchanged: blocks complete in document
+ * order either way, so the passages and their indices come out in exactly the same order.
+ */
+function* preparedPassages(text) {
   let buffer = "";
+  let index = 0;
 
-  const flush = () => {
-    const trimmed = buffer.trim();
-    if (trimmed) blocks.push(trimmed);
+  function* flush() {
+    const block = buffer.trim();
     buffer = "";
-  };
-
-  for (const line of String(text ?? "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flush();
-      continue;
-    }
-    buffer = buffer ? `${buffer} ${trimmed}` : trimmed;
-    if (buffer.length >= GLUE_TARGET_CHARS && /[.!?:;"'”’)]$/.test(trimmed)) flush();
-    else if (buffer.length >= MAX_PASSAGE_CHARS) flush();
-  }
-  flush();
-
-  const passages = [];
-  for (const block of blocks) {
+    if (!block) return;
     for (const piece of splitLong(block)) {
       // Below the floor a "passage" is a nav label, a byline or a caption fragment. It has
       // no room to support a claim, and letting one win a ranking would hand the model a
       // citation pointing at "Read more".
       if (piece.length < MIN_PASSAGE_CHARS) continue;
-      passages.push(prepare(piece, passages.length));
+      yield prepare(piece, index);
+      index += 1;
     }
+  }
+
+  for (const line of String(text ?? "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      yield* flush();
+      continue;
+    }
+    buffer = buffer ? `${buffer} ${trimmed}` : trimmed;
+    if (buffer.length >= GLUE_TARGET_CHARS && /[.!?:;"'”’)]$/.test(trimmed)) yield* flush();
+    else if (buffer.length >= MAX_PASSAGE_CHARS) yield* flush();
+  }
+  yield* flush();
+}
+
+export function extractPassages(text) {
+  return [...preparedPassages(text)];
+}
+
+/**
+ * How many passages are prepared between yields back to the event loop.
+ *
+ * Tokenising a passage is a fraction of a millisecond; a few hundred of them is tens. The
+ * chunk is sized to keep any single uninterrupted run short enough that a stream writing
+ * every few milliseconds never visibly stalls behind it, without yielding so often that the
+ * scheduling costs more than the work.
+ */
+const PASSAGE_YIELD_CHUNK = 100;
+
+/**
+ * `extractPassages`, but it lets the event loop breathe.
+ *
+ * Parsing a page is the one genuinely CPU-bound thing this server does, and prefetching
+ * (see `PREFETCH_PER_SEARCH` in lib/verified-chat.js) does it up to nine times per turn on
+ * speculation. Those nine fetches are kicked off by one round's searches, so they land
+ * within a moment of each other and their parses run back to back — measured at a **189ms
+ * unbroken block** of the event loop, landing exactly when the model has started writing
+ * and the SSE stream is trying to push tokens out every few milliseconds. Nothing was
+ * slower overall; the answer simply froze mid-sentence and then caught up.
+ *
+ * The work is identical and the result is identical — this only declines to do all of it in
+ * one go. Wall-clock cost is a few extra milliseconds of scheduling per page, paid on a
+ * background task, to keep a foreground stream smooth.
+ */
+export async function extractPassagesCooperative(text, { chunk = PASSAGE_YIELD_CHUNK } = {}) {
+  const passages = [];
+  for (const passage of preparedPassages(text)) {
+    passages.push(passage);
+    // `setImmediate` rather than a resolved promise: a microtask would drain in the same
+    // tick and yield nothing at all to the I/O this is trying to get out of the way of.
+    if (passages.length % chunk === 0) await new Promise((resolve) => setImmediate(resolve));
   }
   return passages;
 }
@@ -245,6 +291,49 @@ function prepare(text, index) {
 /** Content types worth extracting text from. Anything else is a download, not a source. */
 const READABLE_TYPE = /^(?:text\/|application\/(?:xhtml\+xml|xml|json))/i;
 
+/**
+ * Read a response body, refusing rather than buffering one that runs past `maxBytes`.
+ *
+ * `response.text()` buffers the whole body and only then hands it over to be measured, so
+ * the size cap it feeds is a check on a page already held in memory in full. That was
+ * survivable while the only guard that mattered was `content-length`. It stops being
+ * survivable once the request accepts compression: a declared length describes the
+ * *compressed* copy, the runtime inflates it transparently, and a few hundred kilobytes on
+ * the wire can be gigabytes in the heap with no header seen beforehand saying so. Brotli
+ * makes that ratio worse than gzip did, which is why asking for brotli and counting bytes
+ * as they arrive are one change and not two.
+ *
+ * So the count is of decompressed bytes, taken as they land, and the read stops at the cap
+ * instead of running to the end of a body we have already decided to refuse. Breaking out
+ * of the loop cancels the underlying stream, which drops the rest of the transfer too.
+ *
+ * `exceeded` comes back as a value rather than an exception because the two callers report
+ * an oversized page with different error types.
+ *
+ * @returns `{text, exceeded}` — `text` is empty when `exceeded`, since a body cut off at an
+ *   arbitrary byte is not a page and no caller wants to parse one.
+ */
+export async function readCapped(response, maxBytes) {
+  const body = response.body;
+  // Nothing to iterate: a stubbed response in a test, or a runtime that gives no stream.
+  // `text()` is the only way through, and the size check still happens — just after the
+  // buffering rather than instead of it, which is exactly where it was before.
+  if (!body?.[Symbol.asyncIterator]) {
+    const text = await response.text();
+    return text.length > maxBytes ? { text: "", exceeded: true } : { text, exceeded: false };
+  }
+
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of body) {
+    const buffer = Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) return { text: "", exceeded: true };
+    chunks.push(buffer);
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), exceeded: false };
+}
+
 export async function fetchPage(url, { fetchImpl = fetch, signal, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const timer = new AbortController();
   const onAbort = () => timer.abort();
@@ -259,6 +348,13 @@ export async function fetchPage(url, { fetchImpl = fetch, signal, timeoutMs = FE
         "user-agent": BROWSER_UA,
         accept: "text/html,application/xhtml+xml,*/*;q=0.8",
         "accept-language": "en-US,en;q=0.9",
+        // The runtime asks for `gzip, deflate` on its own and inflates the reply before we
+        // see it. Adding brotli is the one line that changes: it is what every browser
+        // sends, so it is what a CDN's best-compressed copy is keyed to, and on real pages
+        // it is 15% (Wikipedia) to 41% (AP) fewer bytes on the wire than the gzip copy the
+        // same host would otherwise hand back. Nothing downstream can tell the difference —
+        // `undici` decodes it and this function still receives text.
+        "accept-encoding": "br, gzip, deflate",
       },
       signal: timer.signal,
     });
@@ -281,14 +377,16 @@ export async function fetchPage(url, { fetchImpl = fetch, signal, timeoutMs = FE
 
     // Checked before the body is read where the server declares it, so an enormous page is
     // refused rather than buffered. The same cap is applied to what actually arrived,
-    // because `content-length` is absent on every chunked response.
+    // because `content-length` is absent on every chunked response — and, now that this
+    // request accepts compression, because a declared length describes the compressed copy
+    // and says nothing about what it inflates to.
     const declared = Number(response.headers?.get?.("content-length") ?? "");
     if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
       throw new PageFindError("That page is too large to read.");
     }
 
-    const body = await response.text();
-    if (body.length > MAX_PAGE_BYTES) {
+    const { text: body, exceeded } = await readCapped(response, MAX_PAGE_BYTES);
+    if (exceeded) {
       throw new PageFindError("That page is too large to read.");
     }
     return htmlToText(body);
@@ -326,12 +424,39 @@ const SEMANTIC_WEIGHT = 0.45;
 const PHRASE_BONUS = 0.25;
 
 /**
- * Rank passages against a query using whichever signals are available.
+ * How confident a lexical match has to be before the embedding call is worth making at all.
  *
- * @returns `{passages, semantic}` — `semantic` says whether the embedding half ran, which
- *   the tool result passes on to the model. A find that was lexical-only is a weaker
- *   negative result: "not on this page" from half the ranking deserves less confidence
- *   than "not on this page" from both halves, and the model is told which it got.
+ * Semantic ranking exists to catch the passage that says the right thing in different
+ * words — the one case fuzzy matching cannot see, because there is no shared vocabulary for
+ * it to find. It has nothing to add once that case has already been ruled out, and a fact-
+ * check turns on figures, dates, names and quotes far more often than it turns on paraphrase
+ * — exactly what `lexicalScore`'s coverage term rewards outright and `phraseHit` rewards
+ * completely. A raw lexical score this high means most or all of the query's terms were
+ * found at or near verbatim, clustered tightly together: not "probably the passage," but the
+ * same passage a human skimming for the same words would land on.
+ *
+ * Embedding a shortlist anyway on that evidence would spend the slowest step of a find — a
+ * network call, capped at `EMBEDDING_TIMEOUT_MS` and often the largest single wait once a
+ * page is already cached — to ask a second opinion nothing left in doubt needs. So it isn't
+ * asked: see the `confident` gate below. `RELEVANCE_FLOOR` is "is this a match at all";
+ * this is "is it already certain enough that a slower, weaker-on-specifics signal price is
+ * wasted asking it to agree."
+ */
+const LEXICAL_CONFIDENT_SCORE = 0.72;
+
+/**
+ * Rank passages against a query using whichever signals are available — or needed.
+ *
+ * @returns `{passages, semantic, semanticSkipped}`. `semantic` says whether the embedding
+ *   half actually ran and contributed a score; the tool result passes it to the model,
+ *   because a find that was lexical-only is a weaker *negative* result — "not on this page"
+ *   from half the ranking deserves less confidence than from both. `semanticSkipped` is the
+ *   other reason `semantic` can be false: lexical matching alone was already confident
+ *   enough (see `LEXICAL_CONFIDENT_SCORE`) that no embedding call was made at all. The two
+ *   must stay distinguishable downstream — one is a degraded negative result, the other is
+ *   a strong positive one that simply didn't need a second opinion, and telling a model
+ *   "the semantic ranking was unavailable" about the second would undersell exactly the
+ *   passage it should trust most.
  */
 export async function rankPassages(
   query,
@@ -346,53 +471,72 @@ export async function rankPassages(
   const fuzzy = fuzzyIndex(terms, passages);
   const scored = passages.map((passage) => {
     const { score, matched } = lexicalScore(terms, weights, passage, fuzzy);
-    return { passage, lexical: score, matched, semantic: 0 };
+    // Computed here rather than in the final loop below, because the confidence gate needs
+    // it *before* deciding whether to embed — a passage phrase-matched verbatim is the
+    // strongest evidence this function can produce, stronger than any lexical score alone.
+    return { passage, lexical: score, matched, semantic: 0, phrase: phraseHit(query, passage) };
   });
 
-  // Only the lexically plausible passages are embedded. Embedding a whole page is the
+  // Only the lexically plausible passages are ever embedded. Embedding a whole page is the
   // slowest and most expensive thing this file can do, and the passages that score zero on
   // every query term are almost never the answer — but "almost never" is why the shortlist
   // is generous rather than tight, and why it falls back to the head of the page when
   // nothing matched a word at all.
   const shortlist = shortlistFor(scored);
 
-  const { queryVector, vectors } = await embedShortlist(query, shortlist, {
-    apiKey,
-    fetchImpl,
-    signal,
-    embedImpl,
-    cache: vectorCache,
-  });
+  // Fuzzy search runs first, unconditionally, above — it is arithmetic over text already in
+  // memory and costs nothing to have done. Whether the network call after it happens at all
+  // is decided here: if the shortlist's own top match already clears the confidence bar,
+  // embedding it would only be spending the slowest step of a find to double-check an
+  // answer fuzzy search already gave.
+  const confident = shortlist.some(
+    (entry) => entry.phrase || entry.lexical >= LEXICAL_CONFIDENT_SCORE,
+  );
 
   let semantic = false;
-  if (queryVector) {
-    semantic = true;
-    for (const [index, entry] of shortlist.entries()) {
-      entry.semantic = similarity(queryVector, vectors[index]);
+  if (!confident) {
+    const { queryVector, vectors } = await embedShortlist(query, shortlist, {
+      apiKey,
+      fetchImpl,
+      signal,
+      embedImpl,
+      cache: vectorCache,
+    });
+    if (queryVector) {
+      semantic = true;
+      for (const [index, entry] of shortlist.entries()) {
+        entry.semantic = similarity(queryVector, vectors[index]);
+      }
     }
   }
 
   const results = [];
   for (const entry of scored) {
-    const phrase = phraseHit(query, entry.passage);
     const blended = semantic
       ? entry.lexical * LEXICAL_WEIGHT + entry.semantic * SEMANTIC_WEIGHT
       : entry.lexical;
-    const score = Math.min(1, blended + (phrase ? PHRASE_BONUS : 0));
+    const score = Math.min(1, blended + (entry.phrase ? PHRASE_BONUS : 0));
     if (score < RELEVANCE_FLOOR) continue;
     results.push({
       text: entry.passage.text,
       score: Number(score.toFixed(3)),
       lexical: Number(entry.lexical.toFixed(3)),
       semantic: semantic ? Number(entry.semantic.toFixed(3)) : null,
-      phrase,
+      phrase: entry.phrase,
       matched: entry.matched,
       position: entry.passage.index,
     });
   }
 
   results.sort((a, b) => b.score - a.score || a.position - b.position);
-  return { passages: results.slice(0, limit), semantic, terms };
+  return {
+    passages: results.slice(0, limit),
+    semantic,
+    // Only meaningful when `semantic` is false — see the doc comment above. Left `false`
+    // (rather than omitted) on every other path so a consumer can read it unconditionally.
+    semanticSkipped: !semantic && confident,
+    terms,
+  };
 }
 
 /**
@@ -513,7 +657,11 @@ export class PageCache {
           fetchImpl: this.fetchImpl,
           signal: this.signal,
         });
-        const passages = extractPassages(text);
+        // Cooperative because most pages that reach this cache were never asked for: they
+        // are prefetched off a search's top results while the model is still reading its
+        // snippets, and a page nobody has requested has no business freezing the answer
+        // that is being written. See `extractPassagesCooperative`.
+        const passages = await extractPassagesCooperative(text);
         return { title, text, passages, vectors: new PassageVectors() };
       })();
       pending.catch(() => this.pages.delete(url));
@@ -526,8 +674,8 @@ export class PageCache {
 /**
  * Run one find: open the page, rank its passages, hand back the ones that match.
  *
- * @returns `{url, find, claim, title, passages, semantic, passageCount}`. An empty
- *   `passages` is a real and useful answer — this page does not say that — and is
+ * @returns `{url, find, claim, title, passages, semantic, semanticSkipped, passageCount}`.
+ *   An empty `passages` is a real and useful answer — this page does not say that — and is
  *   reported as such rather than as a failure.
  */
 export async function findInPage(
@@ -544,7 +692,7 @@ export async function findInPage(
     );
   }
 
-  const { passages, semantic } = await rankPassages(find, page.passages, {
+  const { passages, semantic, semanticSkipped } = await rankPassages(find, page.passages, {
     apiKey,
     fetchImpl,
     signal,
@@ -562,6 +710,7 @@ export async function findInPage(
     title: page.title,
     passages,
     semantic,
+    semanticSkipped,
     passageCount: page.passages.length,
   };
 }

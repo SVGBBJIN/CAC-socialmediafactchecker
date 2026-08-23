@@ -110,6 +110,48 @@ export function splitClaims(rawAnswer) {
 }
 
 /**
+ * What changed between two successive parses of the *same* answer as it streams.
+ *
+ * `splitClaims` is already incremental — it is called on the partial text after every delta
+ * — but a consumer that re-renders everything it returns on every token spends the whole
+ * stream rebuilding markup that has not changed. This says which of the two things worth
+ * doing to apply a parse:
+ *
+ * - `rebuild` — the set of claim *boxes* is different (a new `[[claim: …]]` marker arrived,
+ *   which is the only way the count grows). Nothing short of re-laying-out the grid adds a
+ *   box to it, so the consumer redraws.
+ * - `settled` — indices whose `VERDICT:` line has arrived since the last parse. That is the
+ *   exact moment a claim stops being in progress and becomes readable: its analysis, its
+ *   citations and its verdict are all whole, and the box holding it can drop its shimmer
+ *   for the real thing while its neighbours are still being written.
+ *
+ * The two are exclusive by construction: on a rebuild the consumer is redrawing every box
+ * anyway and can paint the settled ones as it goes, so `settled` is empty rather than a
+ * second list of work to do on markup that does not exist yet.
+ *
+ * Nothing here guesses. A claim is settled when the model wrote the closing line the system
+ * prompt asked it for, the same marker `splitVerdict` already reads — this is not the
+ * sentence-level claim detection lib/verified-chat.js describes tearing out.
+ *
+ * @param previous the last parse applied, or null/undefined for the first one.
+ * @param next the current parse — `splitClaims`'s return, so possibly null.
+ */
+export function claimDiff(previous, next) {
+  const before = previous ?? [];
+  const after = next ?? [];
+  const rebuild =
+    after.length !== before.length || after.some((claim, i) => claim.title !== before[i].title);
+
+  const settled = [];
+  if (!rebuild) {
+    for (const [i, claim] of after.entries()) {
+      if (claim.verdictKey && !before[i].verdictKey) settled.push(i);
+    }
+  }
+  return { rebuild, settled };
+}
+
+/**
  * The one verdict a multi-claim check's library row and search need — the worst finding
  * among its claims, on the theory that "one of these is false" is the headline even when
  * the rest check out. Contradicted outranks disputed outranks insufficient outranks

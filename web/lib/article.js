@@ -36,7 +36,7 @@
 // inside a checked page are part of the thing being checked rather than instructions to
 // follow.
 
-import { htmlToText } from "./page-find.js";
+import { htmlToText, readCapped } from "./page-find.js";
 import {
   assertPublicHost,
   parseProbeURL,
@@ -188,6 +188,12 @@ async function requestPage(url, { fetchImpl, timeoutMs, signal }) {
       "user-agent": USER_AGENT,
       accept: "text/html,application/xhtml+xml,*/*;q=0.8",
       "accept-language": "en-US,en;q=0.9",
+      // Same reasoning as `fetchPage` in lib/page-find.js: the runtime already asks for
+      // gzip, and brotli is the copy a CDN has actually optimised because it is what
+      // browsers ask for. Safe here for the same reason it is safe there — the body is
+      // read through `readCapped`, so the cap counts inflated bytes rather than trusting a
+      // `content-length` that describes the compressed ones.
+      "accept-encoding": "br, gzip, deflate",
     },
   });
 }
@@ -263,8 +269,8 @@ export async function fetchArticle(
       if (Number.isFinite(declared) && declared > MAX_ARTICLE_BYTES) {
         throw new ArticleError("that page is too large to read.");
       }
-      const body = await response.text();
-      if (body.length > MAX_ARTICLE_BYTES) {
+      const { text: body, exceeded } = await readCapped(response, MAX_ARTICLE_BYTES);
+      if (exceeded) {
         throw new ArticleError("that page is too large to read.");
       }
 

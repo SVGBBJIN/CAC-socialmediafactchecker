@@ -22,7 +22,9 @@ import {
 import {
   htmlToText,
   extractPassages,
+  extractPassagesCooperative,
   fetchPage,
+  readCapped,
   rankPassages,
   findInPage,
   PageCache,
@@ -186,24 +188,142 @@ test("the semantic half blends in when embeddings are available", async () => {
 });
 
 test("a failed embedding call degrades the ranking instead of the answer", async () => {
-  const { passages, semantic } = await rankPassages("vaccine coverage decline", passagesOf(PAGE), {
-    apiKey: "k",
-    embedImpl: async () => null,
-    limit: 2,
-  });
+  // Paraphrased below LEXICAL_CONFIDENT_SCORE deliberately — "vaccine coverage decline"
+  // shares the page's own words closely enough to skip embedding outright (see the tests
+  // below), which would make `embedImpl` here dead code and this test pass for the wrong
+  // reason. This wording needs the embedding call to still run at all.
+  const { passages, semantic, semanticSkipped } = await rankPassages(
+    "did the vaccination percentage fall",
+    passagesOf(PAGE),
+    { apiKey: "k", embedImpl: async () => null, limit: 2 },
+  );
   assert.equal(semantic, false);
+  assert.equal(semanticSkipped, false, "this failed outright, it was never skipped as confident");
   assert.ok(passages.length >= 1, "lexical scoring still ran");
 });
 
 test("a short embedding batch is discarded rather than mis-zipped", async () => {
   // One vector missing means every passage after it would be scored against the wrong
-  // vector. Silently mis-ranking a page is worse than not ranking it.
-  const { semantic } = await rankPassages("vaccine coverage", passagesOf(PAGE), {
+  // vector. Silently mis-ranking a page is worse than not ranking it. Same paraphrase
+  // reasoning as the test above — this has to actually reach the embedding call.
+  const { semantic } = await rankPassages("did the vaccination percentage fall", passagesOf(PAGE), {
     apiKey: "k",
     embedImpl: async (texts) => texts.slice(1).map(() => normalise([1, 0])),
     limit: 2,
   });
   assert.equal(semantic, false);
+});
+
+/* ---------------- fuzzy first: skipping the embedding call outright ---------------- */
+
+test("a confident lexical match skips the embedding call entirely", async () => {
+  // "vaccine coverage decline" against a page that says almost exactly that is the common
+  // case a fact-check actually hits: a figure, a name or a quote repeated close to verbatim.
+  // Fuzzy search alone already settles it, and the point of this feature is that the
+  // network call never happens at all — not that it happens and is then outscored.
+  let embedCalls = 0;
+  const { passages, semantic, semanticSkipped } = await rankPassages(
+    "vaccine coverage decline",
+    passagesOf(PAGE),
+    {
+      apiKey: "k",
+      embedImpl: async () => {
+        embedCalls += 1;
+        throw new Error("embedding should never have been called");
+      },
+      limit: 2,
+    },
+  );
+
+  assert.equal(embedCalls, 0);
+  assert.equal(semantic, false, "no semantic signal was used");
+  assert.equal(semanticSkipped, true, "and that's because it was confident, not because it failed");
+  assert.match(passages[0].text, /Vaccine coverage among adults declined/);
+});
+
+test("an exact phrase match skips embedding even below the lexical threshold", async () => {
+  // A verbatim figure is the strongest evidence this file can produce on its own — stronger
+  // than the raw lexical score needs to be by itself. `phraseHit` alone must be enough to
+  // trip the gate.
+  let embedCalls = 0;
+  const { semanticSkipped } = await rankPassages("from 62 per cent to 58 per cent", passagesOf(PAGE), {
+    apiKey: "k",
+    embedImpl: async () => {
+      embedCalls += 1;
+      return null;
+    },
+    limit: 2,
+  });
+  assert.equal(embedCalls, 0);
+  assert.equal(semanticSkipped, true);
+});
+
+test("no lexical hit at all is not confidence — embedding still runs", async () => {
+  // The gate is "fuzzy search already found it," not "fuzzy search ran." A query with zero
+  // lexical overlap is the opposite of confident, and it is exactly the case embedding
+  // exists to rescue. Same stub shape as "the semantic half blends in", above: the query and
+  // the road-safety passage both get vector [1,0] on the strength of "crash", everything
+  // else gets [0,1] — a real embedding call would find the paraphrase; this fakes that call.
+  let embedCalls = 0;
+  const target = "The review also covered road safety, where fatalities were unchanged";
+  const { passages, semantic, semanticSkipped } = await rankPassages("crash deaths", passagesOf(PAGE), {
+    apiKey: "k",
+    embedImpl: async (texts) => {
+      embedCalls += 1;
+      return texts.map((text) => normalise(text.includes(target) || text.includes("crash") ? [1, 0] : [0, 1]));
+    },
+    limit: 2,
+  });
+  assert.equal(embedCalls, 1, "no lexical hit is the case embedding exists to rescue, not skip");
+  assert.equal(semanticSkipped, false);
+  assert.equal(semantic, true, "embedding ran and found the passage lexical matching missed");
+  assert.match(passages[0].text, /road safety/);
+});
+
+test("findInPage carries semanticSkipped through to the tool result", async () => {
+  const result = await findInPage(
+    { url: "https://example.gov/review", find: "vaccine coverage decline", claim: "Coverage fell." },
+    {
+      apiKey: "k",
+      fetchImpl: async () => response(`<title>Review</title><body>${PAGE.replace(/\n\n/g, "<p>")}</body>`),
+      embedImpl: async () => {
+        throw new Error("must not be called");
+      },
+    },
+  );
+  assert.equal(result.semantic, false);
+  assert.equal(result.semanticSkipped, true);
+});
+
+test("describeFind tells the model a confident lexical match apart from a failed embedding", () => {
+  const entry = { n: 3, title: "Review", url: "https://example.gov/review" };
+  const confident = CitationLedger.describeFind(entry, {
+    passages: [{ text: "Vaccine coverage declined.", score: 0.9, phrase: false }],
+    passageCount: 4,
+    semantic: false,
+    semanticSkipped: true,
+    find: "vaccine coverage decline",
+  });
+  assert.match(confident, /matched confidently enough by wording alone/);
+  assert.doesNotMatch(confident, /unavailable/);
+
+  const degraded = CitationLedger.describeFind(entry, {
+    passages: [{ text: "Vaccine coverage declined.", score: 0.6, phrase: false }],
+    passageCount: 4,
+    semantic: false,
+    semanticSkipped: false,
+    find: "vaccine coverage decline",
+  });
+  assert.match(degraded, /the semantic ranking was unavailable/);
+
+  const both = CitationLedger.describeFind(entry, {
+    passages: [{ text: "Vaccine coverage declined.", score: 0.9, phrase: false }],
+    passageCount: 4,
+    semantic: true,
+    semanticSkipped: false,
+    find: "vaccine coverage decline",
+  });
+  assert.match(both, /ranked by meaning and by wording/);
 });
 
 test("similarity maps onto 0..1 and survives a zero vector", () => {
@@ -343,6 +463,66 @@ test("fetchPage refuses a page that declares itself enormous, before reading it"
   assert.equal(read, false);
 });
 
+test("fetchPage asks for brotli as well as the gzip the runtime already requests", async () => {
+  // A CDN's best-compressed copy is the one browsers ask for, and on real pages it is 15%
+  // (Wikipedia) to 41% (AP) smaller than the gzip copy the same host hands anything that
+  // doesn't. `undici` decodes it, so nothing below this line can tell the difference — the
+  // header is the whole change, which is exactly why it needs pinning.
+  let headers = null;
+  await fetchPage("https://example.gov/report", {
+    fetchImpl: async (_url, options) => {
+      headers = options.headers;
+      return response("<title>T</title><p>Some readable prose about a figure.</p>");
+    },
+  });
+  assert.match(headers["accept-encoding"], /\bbr\b/);
+  assert.match(headers["accept-encoding"], /\bgzip\b/);
+});
+
+test("a body that inflates past the cap is dropped mid-read, not buffered whole", async () => {
+  // The point of `readCapped`, and the reason accepting brotli is safe. `content-length`
+  // describes the *compressed* copy, so a page can declare 40KB and inflate to gigabytes;
+  // the old `await response.text()` would have had all of it in the heap before anything
+  // measured it. Here the count is of bytes as they arrive, and the stream is abandoned the
+  // moment it passes the cap — so the chunks after that point are never even pulled.
+  let pulled = 0;
+  await assert.rejects(
+    fetchPage("https://example.gov/bomb", {
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        // Small on the wire. Enormous once inflated — which is the whole attack.
+        headers: { get: (n) => (n === "content-length" ? "40000" : "text/html") },
+        body: (async function* () {
+          for (;;) {
+            pulled += 1;
+            yield Buffer.alloc(1_000_000, 0x61);
+          }
+        })(),
+        text: async () => {
+          throw new Error("text() must not be reached — that is the buffering being avoided");
+        },
+      }),
+    }),
+    /too large/,
+  );
+  // 3MB cap, 1MB a chunk: the fourth is what crosses it and nothing is pulled after.
+  assert.equal(pulled, 4);
+});
+
+test("readCapped still measures a stubbed response that has no stream to walk", async () => {
+  // Every fetch stub in this file returns `{text}` and no `body`, and a runtime could do
+  // the same. The fallback must keep the cap rather than quietly stop enforcing it.
+  assert.deepEqual(await readCapped({ text: async () => "abc" }, 10), {
+    text: "abc",
+    exceeded: false,
+  });
+  assert.deepEqual(await readCapped({ text: async () => "abcdefghijk" }, 10), {
+    text: "",
+    exceeded: true,
+  });
+});
+
 /* ---------------- the page cache ---------------- */
 
 test("PageCache fetches a page once per turn and re-fetches after a failure", async () => {
@@ -364,6 +544,11 @@ test("PageCache fetches a page once per turn and re-fetches after a failure", as
 });
 
 test("a page's passages are embedded once however many times it is read", async () => {
+  // Worded as a paraphrase rather than the page's own vocabulary — "immunisation"/"decline"
+  // against a page that says "vaccine coverage declined" — so the lexical match stays below
+  // LEXICAL_CONFIDENT_SCORE and the embedding path this test exists to check actually runs.
+  // A query that shares the page's exact words would clear the confidence gate and skip
+  // embedding entirely, which is a different behaviour with its own tests below.
   const batches = [];
   const embedImpl = async (texts) => {
     // The query is always first; the rest are passages.
@@ -374,8 +559,12 @@ test("a page's passages are embedded once however many times it is read", async 
   const url = "https://example.gov/review";
   const at = (n) => ({ url, find: n, claim: "The claim being checked here.", max_passages: 2 });
 
-  const first = await findInPage(at("did vaccine coverage fall"), { apiKey: "k", cache, embedImpl });
-  const second = await findInPage(at("did vaccine coverage fall in 2023"), { apiKey: "k", cache, embedImpl });
+  const first = await findInPage(at("did the vaccination percentage fall"), { apiKey: "k", cache, embedImpl });
+  const second = await findInPage(at("was there a drop among adults getting immunised"), {
+    apiKey: "k",
+    cache,
+    embedImpl,
+  });
 
   assert.equal(first.semantic, true);
   assert.equal(second.semantic, true, "the cached vectors still give a semantic ranking");
@@ -392,6 +581,10 @@ test("later batches for a page are pinned to the model that embedded it", async 
   // Cosine between two models' vectors is arithmetic over unrelated spaces. Once a page
   // belongs to one model, every later batch for it either uses that model or gives up the
   // semantic half — it must never quietly blend the two.
+  //
+  // Both queries are paraphrases the page's own wording doesn't hand a lexical win, and for
+  // the same reason as the test above: a confident lexical match would skip embedding, and
+  // this test is specifically about what happens across two embedding calls.
   const asked = [];
   const embedImpl = async (texts, options) => {
     asked.push(options.models ?? null);
@@ -401,7 +594,7 @@ test("later batches for a page are pinned to the model that embedded it", async 
   const cache = new PageCache({ fetchPageImpl: async () => ({ title: "T", text: PAGE }) });
   const at = (n) => ({ url: "https://example.gov/a", find: n, claim: "A claim to check here." });
 
-  await findInPage(at("coverage in 2023"), { apiKey: "k", cache, embedImpl });
+  await findInPage(at("did the agency change its methods since 2019"), { apiKey: "k", cache, embedImpl });
   await findInPage(at("road safety figures"), { apiKey: "k", cache, embedImpl });
 
   assert.equal(asked[0], null, "a fresh page takes whichever model answers");
@@ -409,6 +602,8 @@ test("later batches for a page are pinned to the model that embedded it", async 
 });
 
 test("a page whose second batch fails keeps its cached vectors and drops to lexical", async () => {
+  // Both queries paraphrased below the confidence gate, same reasoning as above — this
+  // test is about a batch that fails outright, which needs the call to happen at all.
   let call = 0;
   const embedImpl = async (texts) => {
     call += 1;
@@ -417,7 +612,11 @@ test("a page whose second batch fails keeps its cached vectors and drops to lexi
   const cache = new PageCache({ fetchPageImpl: async () => ({ title: "T", text: PAGE }) });
   const at = (n) => ({ url: "https://example.gov/a", find: n, claim: "A claim to check here." });
 
-  const first = await findInPage(at("coverage in 2023"), { apiKey: "k", cache, embedImpl });
+  const first = await findInPage(at("did the agency change its methods since 2019"), {
+    apiKey: "k",
+    cache,
+    embedImpl,
+  });
   const second = await findInPage(at("road safety figures"), { apiKey: "k", cache, embedImpl });
 
   assert.equal(first.semantic, true);
@@ -650,4 +849,32 @@ test("a page's own footnote numbers are stripped, because they collide with our 
   assert.ok(!/citation needed/i.test(text));
   assert.match(text, /completed in 1889/);
   assert.match(text, /lost the title in 1930/);
+});
+
+test("the cooperative parse produces exactly what the blocking one does", () => {
+  // Prefetched pages are parsed in chunks so the parse cannot freeze a stream that is
+  // writing tokens (see `extractPassagesCooperative`). It is the same work, interrupted —
+  // if it ever stopped being the same work, every ranking downstream of it would quietly
+  // shift, so this pins it rather than trusting the refactor.
+  const html =
+    "<html><title>t</title><body>" +
+    Array.from({ length: 400 }, (_, i) => `<p>Paragraph ${i} with a figure of ${i * 7} in it.</p>`).join("") +
+    `<div>short</div><p>${"a long run of words ".repeat(200)}</p><li>Read more</li></body></html>`;
+  const { text } = htmlToText(html);
+
+  const blocking = extractPassages(text);
+  // A deliberately tiny chunk, so the yields land in the middle of the work rather than
+  // after all of it — the arrangement that would expose an off-by-one in the indices.
+  return extractPassagesCooperative(text, { chunk: 7 }).then((cooperative) => {
+    assert.equal(cooperative.length, blocking.length);
+    assert.deepEqual(
+      cooperative.map((p) => [p.index, p.text, p.normalised]),
+      blocking.map((p) => [p.index, p.text, p.normalised]),
+    );
+  });
+});
+
+test("the cooperative parse handles an empty page without hanging", async () => {
+  assert.deepEqual(await extractPassagesCooperative(""), []);
+  assert.deepEqual(await extractPassagesCooperative(null), []);
 });

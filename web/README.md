@@ -347,10 +347,12 @@ undownloadable clip is, and the turn proceeds from the link and the searches.
 npm test                              # unit tests, no network, no dependencies
 ```
 
-`lib/gemini.js` mirrors the model chain in `Sources/SeerCore/Gemini/GeminiModel.swift` —
-Flash 3.6, then 3.5, 3-preview, 2.5, 2.0. Model IDs get retired and key tiers differ;
-pinning one ID breaks in the field. See the comments in the Swift file for the full
-reasoning.
+`lib/gemini.js`'s chain — Flash 3.7, then 3.6, 3.5, 3-preview, 2.5, 2.0, then the Lite tier
+(3.5-flash-lite, 3.1-flash-lite, 2.5-flash-lite) once every full model above has failed —
+used to mirror `Sources/SeerCore/Gemini/GeminiModel.swift` exactly; the Lite tier and Flash
+3.7 are `web/`-only, per CLAUDE.md's freeze policy. Model IDs get retired and key tiers
+differ; pinning one ID breaks in the field. See the comments on `DEFAULT_MODEL_CHAIN` for
+the full reasoning, and the Swift file's own (smaller, unmirrored) chain for its part.
 
 ## Graceful degradation
 

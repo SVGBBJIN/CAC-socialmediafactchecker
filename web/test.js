@@ -1052,6 +1052,99 @@ function twoRoundGemini() {
 
 const SEARCH_TOOL = [{ function_declarations: [{ name: "web_search", parameters: { type: "object" } }] }];
 
+/** A first round that asks for several searches at once, then answers. */
+function multiCallGemini(names) {
+  const sent = [];
+  const fetchImpl = async (_url, options) => {
+    sent.push(JSON.parse(options.body));
+    const parts =
+      sent.length === 1
+        ? names.map((query) => ({ functionCall: { name: "web_search", args: { query } } }))
+        : [{ text: "the answer" }];
+    return sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts } }] })}\n\n`]);
+  };
+  return { fetchImpl, sent };
+}
+
+test("a round's tool frames go out as each call lands, not behind the slowest one", async () => {
+  // The evidence trail is the only thing on screen during a tool round. Overlapping the
+  // calls shortens the round, but it buys the reader nothing if the frames are then held in
+  // call order behind whichever search took longest — which is how four searches finishing
+  // over three seconds used to show nothing at all and then everything at once.
+  const { fetchImpl } = multiCallGemini(["slow", "fast"]);
+  const release = new Map();
+  const held = new Map(
+    ["slow", "fast"].map((query) => [
+      query,
+      new Promise((resolve) => release.set(query, resolve)),
+    ]),
+  );
+
+  const frames = [];
+  const iterator = streamChat({
+    apiKey: "k",
+    messages: [{ role: "user", content: "check this" }],
+    models: ["gemini-3.6-flash"],
+    maxToolRounds: 1,
+    tools: SEARCH_TOOL,
+    toolRunner: async (call) => {
+      const query = call.args.query;
+      await held.get(query);
+      return { response: { result: query }, frame: { type: "search", query } };
+    },
+    fetchImpl,
+  });
+
+  // Consume in the background so the generator is actually pulling while the calls settle.
+  const pump = (async () => {
+    for await (const value of iterator) frames.push(value);
+  })();
+
+  // The *second* call finishes first. In call order its frame would be stuck behind "slow".
+  release.get("fast")();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(
+    frames.filter((f) => f.type === "search").map((f) => f.query),
+    ["fast"],
+    "the finished search reached the consumer without waiting for its sibling",
+  );
+
+  release.get("slow")();
+  await pump;
+  assert.deepEqual(
+    frames.filter((f) => f.type === "search").map((f) => f.query),
+    ["fast", "slow"],
+  );
+});
+
+test("function responses are still matched to their calls positionally", async () => {
+  // Gemini pairs a round's functionResponse parts with its functionCall parts by position,
+  // so however the frames above are reordered, this must not be.
+  const { fetchImpl, sent } = multiCallGemini(["first", "second"]);
+
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "check this" }],
+      models: ["gemini-3.6-flash"],
+      maxToolRounds: 1,
+      tools: SEARCH_TOOL,
+      toolRunner: async (call) => {
+        // The second call settles first, and the first one settles a tick later.
+        if (call.args.query === "first") await new Promise((resolve) => setTimeout(resolve, 5));
+        return { response: { result: call.args.query } };
+      },
+      fetchImpl,
+    }),
+  );
+
+  const responses = sent[1].contents.at(-1).parts;
+  assert.deepEqual(
+    responses.map((part) => part.functionResponse.response.result),
+    ["first", "second"],
+  );
+});
+
 test("a round that can still search thinks on a shorter leash than the round that answers", async () => {
   // The largest avoidable wait in a video fact-check: the first round's whole output is a
   // list of searches, and the reader sits through however much invisible reasoning the
@@ -1122,6 +1215,54 @@ test("a turn with no video is never sent a media resolution", async () => {
     }),
   );
   assert.ok(!("mediaResolution" in sent.generationConfig));
+});
+
+test("a photo carousel is sent at the configured resolution too — the field is about media, not video specifically", async () => {
+  // `mediaResolution` describes token cost per image or video frame alike (Gemini's own
+  // docs say "per input image or video frame"), and `streamChat`'s `media` flag — the
+  // gate on whether the field is sent at all — is computed from `inline_data`/`file_data`
+  // presence, not from any video-specific marker. A photo post's slides ride as
+  // `inline_data` parts exactly like a downloaded clip does, so this is already covered
+  // with no code change; this test is what keeps it that way; a future refactor that
+  // narrows the gate to "has a video" specifically would fail it.
+  let sent;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${IG_SOURCE_URL}` }],
+      models: ["gemini-3.6-flash"],
+      mediaResolution: "MEDIA_RESOLUTION_LOW",
+      attachMedia: true,
+      clipOptions: {
+        providers: [
+          {
+            platform: "Instagram",
+            find: findInstagramLinks,
+            matches: () => true,
+            resolve: async () => ({
+              sourceURL: IG_SOURCE_URL,
+              videoID: IG_SHORTCODE,
+              kind: "images",
+              mimeType: "image/jpeg",
+              slideCount: 2,
+              authorName: "instagram",
+              caption: "carousel",
+              images: [1, 2].map((n) => ({ url: `https://scontent.cdninstagram.com/s${n}.jpg` })),
+            }),
+            downloadImages: async () => ({
+              slides: [1, 2].map((n) => ({ bytes: Buffer.from(`slide ${n}`), mimeType: "image/jpeg" })),
+              truncated: 0,
+            }),
+          },
+        ],
+      },
+      fetchImpl: async (_url, options) => {
+        sent = JSON.parse(options.body);
+        return sseResponse([frame("looked at both slides")]);
+      },
+    }),
+  );
+  assert.equal(sent.generationConfig.mediaResolution, "MEDIA_RESOLUTION_LOW");
 });
 
 test("a clip is sent at the configured resolution; a model that refuses it keeps the answer", async () => {
@@ -2083,6 +2224,48 @@ test("a clip past the inline ceiling goes through the Files API and is deleted a
   assert.deepEqual(deleted, [], "nothing is cleaned up until the caller says so");
   await clips.cleanup();
   assert.deepEqual(deleted, ["files/abc"], "an uploaded clip does not stay in the Files quota");
+});
+
+test("a cached clip under the inline ceiling costs nothing on a follow-up turn", async () => {
+  // Why `INLINE_BYTE_LIMIT` is not allowed to drift downward to save on re-sends.
+  //
+  // An inline clip is free to replay: the cache holds its bytes, and every later turn of the
+  // conversation re-inlines them without touching the network. An *uploaded* clip is not,
+  // because `cleanup()` deletes it at the end of every turn — so lowering the threshold to
+  // avoid re-sending base64 across tool rounds buys that back at the price of a fresh upload
+  // *and* a fresh wait for the file to leave PROCESSING on every single follow-up. That is a
+  // much larger, much more visible cost than the one it was trying to save, and it lands on
+  // the turns that used to be the cheapest. This test is what says so.
+  resetClipCache();
+  const messages = [{ role: "user", content: SOURCE_URL }];
+  let downloads = 0;
+  let uploads = 0;
+
+  const options = {
+    apiKey: "k",
+    cache: true,
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => {
+      downloads += 1;
+      // Comfortably inline, and comfortably the size of a real short-form clip.
+      return { bytes: Buffer.alloc(5 * 1024 * 1024), mimeType: "video/mp4" };
+    },
+    uploadImpl: async () => {
+      uploads += 1;
+      return { name: "files/abc", uri: "https://files/abc", mimeType: "video/mp4", state: "ACTIVE" };
+    },
+    deleteImpl: async () => {},
+  };
+
+  for (let turn = 0; turn < 3; turn += 1) {
+    const clips = await resolveClipParts(messages, options);
+    // What `streamChat` does in its `finally` at the end of every turn.
+    await clips.cleanup();
+  }
+
+  assert.equal(downloads, 1, "the clip cache serves the bytes after the first turn");
+  assert.equal(uploads, 0, "and nothing is uploaded, so no follow-up waits on PROCESSING");
+  resetClipCache();
 });
 
 test("a video that can't be fetched becomes a note, not a failed conversation", async () => {
@@ -3907,4 +4090,157 @@ test("a chain that fails some other way is not waited out", async () => {
     /./,
   );
   assert.deepEqual(waits, [], "a mixed failure is not a capacity spike");
+});
+/* ---------------- implicit caching: the prompt prefix must not move ---------------- */
+
+/**
+ * Gemini's implicit caching is on by default for every 2.5+ model in `DEFAULT_MODEL_CHAIN`
+ * and needs no code — but it only pays out while the prompt *prefix* is stable, and the
+ * largest thing in a video fact-check's prefix is the video. `toGeminiContents` keeps it
+ * there by attaching each clip exactly once at its first mention. Nothing enforced that,
+ * so a note appended in the wrong place could have silently cost the hit on every turn of
+ * every conversation, and the only symptom would have been the bill.
+ */
+const CLIP_LINK = SOURCE_URL;
+
+function contentsForClip(messages, extraNotes = []) {
+  const clips = {
+    attachments: new Map([
+      [
+        CLIP_LINK,
+        {
+          videoID: `TikTok:${VIDEO_ID}`,
+          platform: "TikTok",
+          part: { inline_data: { mime_type: "video/mp4", data: "AAAA" } },
+          resolved: resolvedClip(),
+          link: CLIP_LINK,
+        },
+      ],
+    ]),
+  };
+  return toGeminiContents(messages, { clips, extraNotes });
+}
+
+test("a follow-up turn keeps the same leading prefix as the check that started it", async () => {
+  const first = [{ role: "user", content: `Fact-check this: ${CLIP_LINK}` }];
+  const followUp = [
+    ...first,
+    { role: "assistant", content: "The closure began Monday." },
+    { role: "user", content: "Are you sure?" },
+  ];
+
+  const a = contentsForClip(first);
+  const b = contentsForClip(followUp);
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(a[0])),
+    JSON.parse(JSON.stringify(b[0])),
+    "the turn carrying the video is byte-identical across turns, so it stays a cache hit",
+  );
+});
+
+test("an extra note rides on the last user turn, never ahead of the video", async () => {
+  const messages = [
+    { role: "user", content: `Fact-check this: ${CLIP_LINK}` },
+    { role: "assistant", content: "The closure began Monday." },
+    { role: "user", content: "Are you sure?" },
+  ];
+  const withNote = contentsForClip(messages, ["[a note from the app]"]);
+  const without = contentsForClip(messages);
+
+  // The video turn is untouched by the note — that is the whole property.
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(withNote[0])),
+    JSON.parse(JSON.stringify(without[0])),
+  );
+  assert.match(withNote.at(-1).parts.at(-1).text, /\[a note from the app\]/);
+});
+
+test("on a single-turn check the note still lands after the video part", async () => {
+  const contents = contentsForClip(
+    [{ role: "user", content: `Fact-check this: ${CLIP_LINK}` }],
+    ["[a note from the app]"],
+  );
+  const parts = contents[0].parts;
+  assert.ok(parts[0].inline_data, "video first");
+  assert.equal(parts.at(-1).text.indexOf("[a note from the app]") > 0, true);
+  // The clip's own caption line comes before the evidence note: context about the subject,
+  // then context about the evidence.
+  const text = parts.at(-1).text;
+  assert.ok(text.indexOf("Attached: the TikTok video") < text.indexOf("[a note from the app]"));
+});
+
+test("usageMetadata is reported so implicit cache hits are visible", async () => {
+  const fetchImpl = async () =>
+    sseResponse([
+      `data: ${JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "ok" }] } }],
+        usageMetadata: { promptTokenCount: 9000, cachedContentTokenCount: 8100, totalTokenCount: 9100 },
+      })}\n\n`,
+    ]);
+
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl,
+    }),
+  );
+
+  const usage = frames.find((f) => f.type === "usage");
+  assert.equal(usage.cachedTokens, 8100);
+  assert.equal(usage.promptTokens, 9000);
+  assert.equal(usage.round, 0);
+});
+
+test("a response with no usage metadata reports none", async () => {
+  const fetchImpl = async () => sseResponse([frame("ok")]);
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-3.6-flash"],
+      fetchImpl,
+    }),
+  );
+  assert.ok(!frames.some((f) => f.type === "usage"));
+});
+
+/* ---------------- onResolved fires before the download ---------------- */
+
+test("onResolved reports a clip's caption before its bytes are fetched", async () => {
+  // The gap this hook exists for: the caption is known at resolve time, and the download
+  // that follows is the slowest thing in the request. See lib/caption-search.js.
+  const order = [];
+  await resolveClipParts([{ role: "user", content: SOURCE_URL }], {
+    apiKey: "k",
+    resolveImpl: async () => {
+      order.push("resolve");
+      return resolvedClip();
+    },
+    downloadImpl: async () => {
+      order.push("download");
+      return { bytes: Buffer.alloc(8), mimeType: "video/mp4" };
+    },
+    onResolved: ({ platform, resolved }) => {
+      order.push(`onResolved:${platform}:${Boolean(resolved.caption)}`);
+    },
+  });
+
+  assert.deepEqual(order, ["resolve", "onResolved:TikTok:true", "download"]);
+});
+
+test("a callback that throws does not take the clip down with it", async () => {
+  const clips = await resolveClipParts([{ role: "user", content: SOURCE_URL }], {
+    apiKey: "k",
+    resolveImpl: async () => resolvedClip(),
+    downloadImpl: async () => ({ bytes: Buffer.alloc(8), mimeType: "video/mp4" }),
+    onResolved: () => {
+      throw new Error("a caller's bad callback");
+    },
+  });
+
+  const contents = toGeminiContents([{ role: "user", content: SOURCE_URL }], { clips });
+  assert.ok(contents[0].parts[0].inline_data, "the clip attached anyway");
 });

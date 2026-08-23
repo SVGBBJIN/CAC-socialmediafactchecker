@@ -171,6 +171,43 @@ export class CitationLedger {
   }
 
   /**
+   * The caption search's sources, as a note in the prompt rather than a tool result.
+   *
+   * This search was issued by the app before the model's first turn — see
+   * lib/caption-search.js — so there is no `functionCall` for it to be the response to. It
+   * arrives as prompt context instead, in the same bracketed shape `describeClip` and
+   * `describeArticle` already use for everything else the app went and fetched on the
+   * model's behalf.
+   *
+   * Two things it must say and `describe` does not. Where the sources came from, because
+   * the model did not ask for them and unexplained numbered sources invite the assumption
+   * that they are already-verified findings. And that they are *offered*, not binding: the
+   * query came from a caption, which is a guess about what is worth checking, and a model
+   * that felt obliged to use a bad guess would be worse off than one that searched for
+   * itself. They cost nothing to ignore — they are already paid for.
+   */
+  static describePresearch(entries, searchResult) {
+    if (entries.length === 0) return null;
+    const lines = entries.map(
+      (e) =>
+        `[${e.n}] ${e.title}\n    ${e.url}\n    ${e.snippet || "(no snippet)"}${
+          e.published ? `\n    published: ${e.published}` : ""
+        }`,
+    );
+    return (
+      `[Before you started, the app searched for the post's own caption and retrieved ` +
+      `${entries.length} source${entries.length === 1 ? "" : "s"} (query: ` +
+      `"${searchResult.query}", via ${searchResult.provider}, ${searchResult.retrievedAt}). ` +
+      `They are numbered in the same ledger as anything you retrieve yourself and you may ` +
+      `cite them the same way:\n\n${lines.join("\n\n")}\n\n` +
+      `These are a head start, not an instruction. The caption is not always what the post ` +
+      `is really claiming, so use the ones that actually bear on a claim you are checking ` +
+      `and ignore the rest — an unused source costs nothing. Search for whatever they do ` +
+      `not settle, and cite nothing they do not support.]`
+    );
+  }
+
+  /**
    * One find's passages, as the model reads them.
    *
    * Written to make the passages the evidence and the marker their address. Two details
@@ -186,13 +223,30 @@ export class CitationLedger {
    */
   static describeFind(entry, findResult) {
     const where = `[${entry.n}] ${entry.title} — ${entry.url}`;
+    // Three states, not two, and they read very differently to the model. `semantic` true
+    // is the strong case either way — meaning and wording agree. Lexical-only splits in
+    // two: `semanticSkipped` is a *confident* result (the wording matched well enough on
+    // its own that a second opinion was never asked for — see LEXICAL_CONFIDENT_SCORE in
+    // lib/page-find.js), where plain "the semantic ranking was unavailable" would undersell
+    // exactly the finding the model should trust most. The unqualified case — no key, no
+    // shortlist, a failed batch — is the one that phrase was written for, and keeps it.
+    const rankingNote = findResult.semantic
+      ? "ranked by meaning and by wording"
+      : findResult.semanticSkipped
+        ? "matched confidently enough by wording alone that no further check was needed"
+        : "ranked by wording only — the semantic ranking was unavailable";
     if (findResult.passages.length === 0) {
+      // Unreachable in practice — a lexical match confident enough to skip embedding is
+      // confident enough to clear the relevance floor — but handled rather than assumed,
+      // since a scoring change elsewhere could make it possible.
       return (
         `Nothing on ${where} matches "${findResult.find}". The page was read in full ` +
-        `(${findResult.passageCount} passages${findResult.semantic ? ", ranked by meaning and by wording" : ", ranked by wording only — the semantic ranking was unavailable"}).\n\n` +
+        `(${findResult.passageCount} passages, ${rankingNote}).\n\n` +
         `This is a real finding about the page, not an error: it does not say what you were ` +
         `looking for. Do not cite [${entry.n}] for that claim.` +
-        (findResult.semantic ? "" : " If the claim may be phrased very differently on the page, one search with other wording is worth a try.")
+        (findResult.semantic || findResult.semanticSkipped
+          ? ""
+          : " If the claim may be phrased very differently on the page, one search with other wording is worth a try.")
       );
     }
 
@@ -202,9 +256,7 @@ export class CitationLedger {
     );
     return (
       `Read ${where}\nLooking for: "${findResult.find}"\n` +
-      `${findResult.passages.length} of ${findResult.passageCount} passages match${
-        findResult.semantic ? "" : " (ranked by wording only — the semantic ranking was unavailable)"
-      }.\n\n${lines.join("\n\n")}\n\n` +
+      `${findResult.passages.length} of ${findResult.passageCount} passages match (${rankingNote}).\n\n${lines.join("\n\n")}\n\n` +
       `This is the page's own text, quoted exactly. Cite it as [${entry.n}] — reading a page ` +
       `does not create a new source, so do not give it a new number. Quote it directly where ` +
       `the wording matters, and if these passages do not settle the claim, say so rather ` +

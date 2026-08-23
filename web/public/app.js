@@ -25,7 +25,7 @@ import {
   timeline,
   activeAt,
 } from "./timestamps.js";
-import { VERDICTS, splitVerdict, splitClaims, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
 
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
@@ -516,6 +516,97 @@ async function pingLink(url) {
  * page the ping couldn't establish anything about, falls back to asking the user rather
  * than either silently blocking them or guessing it'll work.
  */
+/**
+ * Verification already in flight (or just finished) for a URL, so the Check button doesn't
+ * pay for it a second time.
+ *
+ * Everything `verifyLinkViewable` does is work the user has committed to the moment they
+ * paste a link: the probe follows the redirects, and on TikTok/Instagram the resolve is the
+ * *same* embed-page fetch and parse the check itself would run. It is also a second or
+ * three of dead air between the click and anything appearing on screen, because none of it
+ * can start until the click happens.
+ *
+ * So it starts on the paste instead. `warmLink` kicks off exactly the call the click was
+ * going to make and files the promise here; the click then awaits a request that has had a
+ * head start rather than issuing its own. Because it is the *promise* that is cached, a
+ * paste followed immediately by a click makes one request between them, not two — the same
+ * count as before this existed. The only request this adds is for a link that is pasted and
+ * then never checked.
+ *
+ * ## Two things come back from a warm-up, and they go stale at completely different rates
+ *
+ * The **verdict** — is this a link this app can check, and where did it land — does not
+ * really expire. A TikTok URL that resolved a minute ago is the same URL now, and the worst
+ * case if the post vanished in between is that the check reports it, which is what a check
+ * is for.
+ *
+ * The **hint** does. It carries CDN URLs signed for a short window, and `runCheck`'s own
+ * `@param hint` note is unambiguous about the consequence: a hint older than that is "one
+ * failed download and a re-resolve — slower than simply resolving. Seconds old is the only
+ * age at which this is worth anything." A stale hint is not a wasted optimisation, it is a
+ * *negative* one — the download attempt 403s, `fetchClipMedia` re-resolves, and the turn has
+ * paid a whole extra CDN round trip to end up exactly where it would have started.
+ *
+ * Holding both to one lifetime is what makes this dangerous, and it is the mistake this
+ * originally shipped with: a single 45s TTL meant the ordinary paste → read the page → click
+ * flow handed the server a hint that was almost certainly expired, and made the common case
+ * slower than having no warm-up at all. So they are separated. The verdict is reused for as
+ * long as it is plausibly about the same link; the hint is dropped the moment it is old
+ * enough to be a liability, and the check then resolves server-side exactly as it did before
+ * any of this existed. Dropping it costs one resolve. Keeping it costs a failed download
+ * *and* that same resolve.
+ */
+const WARM_TTL_MS = 5 * 60 * 1000;
+const HINT_MAX_AGE_MS = 8_000;
+const warmedLinks = new Map(); // url → { startedAt, settledAt, pending }
+
+function warmedEntry(url) {
+  const warm = warmedLinks.get(url);
+  if (!warm) return null;
+  if (Date.now() - warm.startedAt > WARM_TTL_MS) {
+    warmedLinks.delete(url);
+    return null;
+  }
+  return warm;
+}
+
+/**
+ * A warm verdict with its hint kept only if the hint is still worth having.
+ *
+ * Aged from when the resolve *finished*, not when it was kicked off: the signed URLs inside
+ * it were minted at the far end of that request, so a slow resolve produces a hint that is
+ * already younger than its own start time would suggest.
+ */
+function usableWarmResult(warm, result) {
+  if (!result?.hint) return result;
+  const mintedAt = warm.settledAt ?? warm.startedAt;
+  if (Date.now() - mintedAt <= HINT_MAX_AGE_MS) return result;
+  const { hint, ...withoutHint } = result;
+  return withoutHint;
+}
+
+/**
+ * Start verifying a link the moment it looks like one, before anything is clicked.
+ *
+ * Deliberately silent: it reports nothing, changes nothing on screen, and swallows its own
+ * failures. A warm-up that surfaced a dead link would be putting a dialog in front of
+ * someone mid-paste, and one that surfaced an error would be worse — the click re-reads the
+ * same rejected promise and reports it in the one place that is allowed to.
+ */
+function warmLink(url) {
+  if (!url || warmedEntry(url)) return;
+  // One at a time. A reader editing a URL by hand would otherwise leave a warm entry per
+  // keystroke-that-parsed, each holding a resolve nobody is going to use.
+  warmedLinks.clear();
+  const warm = { startedAt: Date.now(), settledAt: null, pending: null };
+  warm.pending = verifyLinkViewable(url).then((result) => {
+    warm.settledAt = Date.now();
+    return result;
+  });
+  warm.pending.catch(() => {});
+  warmedLinks.set(url, warm);
+}
+
 async function verifyLinkViewable(url) {
   const platform = platformFor(url);
 
@@ -709,7 +800,21 @@ function showLinkConfirm(url, result) {
  * putting a dialog in front of someone who was only asking a question.
  */
 async function confirmAndRunCheck(url, { entry = null, raw = "" } = {}) {
-  const result = await verifyLinkViewable(url);
+  // Whatever `warmLink` started when this was pasted — see there for why reusing the promise
+  // rather than the result is what keeps the request count the same, and why the hint that
+  // comes back with it is aged separately from the verdict. A rejected warm-up is not a
+  // cached failure: it is discarded and the verification is run again here, where its outcome
+  // has somewhere to go.
+  const warm = warmedEntry(url);
+  let result;
+  try {
+    result = warm ? usableWarmResult(warm, await warm.pending) : await verifyLinkViewable(url);
+  } catch {
+    result = await verifyLinkViewable(url);
+  } finally {
+    // Spent either way: a warm entry is worth exactly one check.
+    warmedLinks.delete(url);
+  }
   const target = result.url ?? url;
   if (result.ok) {
     // Verification just resolved this post; hand that along so the check doesn't repeat it.
@@ -1035,9 +1140,57 @@ function createProgressTicker(barId) {
   };
 }
 
+/**
+ * The live "how long has this been running" readout next to a stage label — one instance
+ * per turn type, same split as `createProgressTicker` above and for the same reason: each
+ * drives a different part of the UI even though only one is ever running at once.
+ *
+ * Deliberately not the same thing as the progress bar. That one is eased *because* a raw
+ * elapsed clock reads as slower than a bar that keeps creeping forward — see the note on
+ * `.mini-progress` in index.html. This is exactly that raw clock, shown anyway: a reader
+ * who wants to know precisely how long a turn has been going gets to, right next to the bar
+ * that exists to keep the wait from *feeling* that long.
+ */
+function createElapsedTicker(elementId) {
+  let start = 0;
+  let timer = null;
+
+  function paint() {
+    const node = document.getElementById(elementId);
+    if (node) node.textContent = formatClock((Date.now() - start) / 1000);
+  }
+
+  return {
+    start() {
+      start = Date.now();
+      paint();
+      if (timer) clearInterval(timer);
+      timer = setInterval(paint, 1000);
+    },
+    /** Re-applies the current elapsed time to whatever node currently owns this id — same
+     * reasoning as `createProgressTicker`'s `resync`: a markup rebuild mid-run (a new claim
+     * skeleton appearing) swaps in a fresh node that would otherwise sit at "0:00" until the
+     * next tick. */
+    resync() {
+      paint();
+    },
+    /** Milliseconds since `start()`, for the caller to keep once the turn finishes — the
+     * ticker itself holds nothing once `stop()` clears its timer. */
+    elapsedMs() {
+      return Date.now() - start;
+    },
+    stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+    },
+  };
+}
+
 const runProgress = createProgressTicker("runProgressBar");
 const followupProgress = createProgressTicker("followupProgressBar");
 const chatProgress = createProgressTicker("chatProgressBar");
+const runElapsed = createElapsedTicker("runElapsed");
+const followupElapsed = createElapsedTicker("followupElapsed");
+const chatElapsed = createElapsedTicker("chatElapsed");
 
 /* ---------------------------------------------------------------- claim grid */
 /*
@@ -1191,7 +1344,7 @@ function chatThreadHTML(newestIndex) {
           <div class="thread-q">${escapeHTML(c.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
           ${incompleteHTML(c.incomplete, animate)}
-          ${durationHTML(c.durationMs, animate)}
+          ${durationHTML(c.durationMs, animate, "Answered in")}
           ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
@@ -1212,7 +1365,7 @@ function renderChatPane({ newest = -1 } = {}) {
         ${
           pendingChat.error
             ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
-            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span></div>
+            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span><span class="elapsed-time" id="chatElapsed">0:00</span></div>
                <div class="mini-progress"><div class="mini-progress-bar" id="chatProgressBar"></div></div>`
         }
       </div>`
@@ -1246,6 +1399,7 @@ async function runChat(question) {
   clearPendingImage();
   renderChatPane();
   chatProgress.start();
+  chatElapsed.start();
   updateComposerMode();
 
   const controller = new AbortController();
@@ -1254,7 +1408,6 @@ async function runChat(question) {
   el.newCheckBtn.disabled = true;
   let settled = false;
 
-  const startedAt = performance.now();
   try {
     const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
     const history = chatThread.flatMap((c) => [
@@ -1269,7 +1422,7 @@ async function runChat(question) {
       },
     });
     chatProgress.finish();
-    chatThread.push({ question, answer, sources, incomplete, durationMs: performance.now() - startedAt });
+    chatThread.push({ question, answer, sources, incomplete, durationMs: chatElapsed.elapsedMs() });
     settled = true;
   } catch (error) {
     if (error.name === "AbortError") {
@@ -1281,6 +1434,7 @@ async function runChat(question) {
     pendingChat = { question, error: error.message };
   } finally {
     chatProgress.stop();
+    chatElapsed.stop();
     if (settled) pendingChat = null;
     inFlight = null;
     el.checkBtn.disabled = false;
@@ -1763,11 +1917,55 @@ function renderRunningCard() {
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus">Sending to the model…</div>
         <div class="source-counter" id="runCounter">&nbsp;</div>
+        <div class="elapsed-time" id="runElapsed">0:00</div>
         <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
+        <div class="live-sources" id="runSources"></div>
       </div>
     </div>`;
   refreshTimeline();
   runProgress.start();
+  runElapsed.start();
+}
+
+/**
+ * The sources retrieved so far, on screen while they are still being read.
+ *
+ * The longest silence in a check is between the last search landing and the first token of
+ * the answer — the model is reading everything it just retrieved, which on a multi-claim
+ * video is most of the wait. The server sends the ledger as it fills for exactly this
+ * reason (`provisional` in lib/verified-chat.js): the reader can spend that stretch reading
+ * the sources rather than watching a spinner, and a check that is visibly accumulating
+ * named, clickable evidence reads as working in a way a source *count* does not.
+ *
+ * Capped, because this is a status strip and not the bibliography: past a handful the row
+ * wraps into a block that pushes the spinner and the progress bar up the card every time a
+ * search lands. The finished card lists all of them.
+ *
+ * Appends rather than redrawing, and that is not a micro-optimisation: the ledger only ever
+ * grows, so a redraw would replay every pill's arrival animation on every update and turn a
+ * row that should tick along one source at a time into one that flashes whole. Only the
+ * pills that are actually new animate.
+ */
+const LIVE_SOURCE_LIMIT = 6;
+function renderLiveSources(sources) {
+  const node = document.getElementById("runSources");
+  if (!node) return;
+  // Always last, so it is pulled off before counting what is already drawn and put back
+  // after — otherwise it would be counted as a source and the next real pill would replace it.
+  node.querySelector(".source-pill.more")?.remove();
+
+  const shown = sources.slice(0, LIVE_SOURCE_LIMIT);
+  for (const s of shown.slice(node.childElementCount)) {
+    node.insertAdjacentHTML(
+      "beforeend",
+      `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(s.title ?? s.domain)}">${escapeHTML(s.domain)}</a>`,
+    );
+  }
+
+  const rest = sources.length - shown.length;
+  if (rest > 0) {
+    node.insertAdjacentHTML("beforeend", `<span class="source-pill more">+${rest}</span>`);
+  }
 }
 
 /** The status strip `renderClaimSkeletons` puts above the growing grid of skeleton boxes —
@@ -1779,24 +1977,63 @@ function claimGridStatusHTML(stage) {
     <div class="claim-grid-status">
       <div class="status-text stage-text" id="runStatus">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
+      <div class="elapsed-time" id="runElapsed">0:00</div>
       <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
     </div>`;
+  // No `#runSources` here on purpose. The live source row belongs to the wait *before* the
+  // first claim appears, where the card is otherwise empty and the reader has nothing to do
+  // — see `renderLiveSources`. Once the grid exists there is real text arriving in it, each
+  // claim carrying its own citations, and a second copy of the same links in a strip above
+  // would push the boxes around every time a search landed. `renderLiveSources` is a no-op
+  // from here on, since the node it looks for is gone.
 }
 
-/** One placeholder box for a claim the model has named but not finished checking — the
- * title is real (lifted straight off the `[[claim: …]]` marker that just streamed in), the
- * body underneath it is not: a shimmer standing in for the analysis and verdict still to
- * come, in the same shape `claimPanesHTML` below renders once they're real. */
-function skeletonClaimHTML(title, index, total, spanFull) {
-  return `
-    <div class="claim-card claim-pane skeleton"${spanFull ? ' style="grid-column:1/-1"' : ""}>
-      <div class="claim-eyebrow pending">Claim ${index + 1} of ${total} &middot; checking&hellip;</div>
-      <p class="claim-title in">${escapeHTML(title)}</p>
-      <div class="skeleton-body" aria-hidden="true">
+/** The body of a claim box that is still being written: a shimmer standing in for the
+ * analysis and verdict still to come, in the same shape `settledBodyHTML` renders once
+ * they're real. */
+const SKELETON_BODY_HTML = `
+      <div class="claim-body skeleton-body" aria-hidden="true">
         <span class="skeleton-line"></span>
         <span class="skeleton-line"></span>
         <span class="skeleton-line short"></span>
-      </div>
+      </div>`;
+
+/** The body of a claim whose `VERDICT:` line has arrived — the same analysis-then-badge
+ * pair `claimPanesHTML` renders at the end, minus the footer, which belongs to the finished
+ * card rather than to a claim that merely happens to be last so far. `sources` is whatever
+ * the stream has sent by now (see the `provisional` frames in lib/verified-chat.js), which
+ * is what lets a `[3]` written mid-stream be a live link where it stands rather than inert
+ * text waiting for the turn to end.
+ *
+ * `animate` is false when a *later* claim's marker forced the whole grid to be redrawn: this
+ * box's text was already on screen and already read, and replaying its entrance every time a
+ * sibling appears is the re-animation `revealAttrs` exists to avoid. Only the box that has
+ * genuinely just settled fades in. */
+function settledBodyHTML(claim, sources, seekable, animate = true) {
+  return `
+      <div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
+      ${badgeHTML(claim.verdictKey, animate)}`;
+}
+
+/** The position label on a claim box. Shared by the loading grid and the finished card so
+ * a box that settles mid-stream doesn't relabel itself when the final render lands. */
+function claimEyebrowText(index, total) {
+  return total > 1 ? `Claim ${index + 1} of ${total}` : "Claim checked";
+}
+
+/** One box in the loading grid: title always real (lifted straight off the `[[claim: …]]`
+ * marker that streamed in), body either settled or shimmering. */
+function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
+  const done = Boolean(claim.verdictKey);
+  return `
+    <div class="claim-card claim-pane${done ? "" : " skeleton"}"${spanFull ? ' style="grid-column:1/-1"' : ""} data-claim="${index}">
+      <div class="claim-eyebrow${done ? "" : " pending"}">${
+        done
+          ? escapeHTML(claimEyebrowText(index, total))
+          : `Claim ${index + 1} of ${total} &middot; checking&hellip;`
+      }</div>
+      <p class="claim-title in">${escapeHTML(claim.title)}</p>
+      ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
     </div>`;
 }
 
@@ -1809,17 +2046,66 @@ function skeletonClaimHTML(title, index, total, spanFull) {
  * wait for; the marker *is* the count, arriving incrementally, so the grid is built the same
  * way the finished result reads it (see `claimGridColumns`/`claimPanesHTML`), just with each
  * box showing its title over a shimmer where the analysis and verdict will land.
+ *
+ * Boxes that have *already* settled by the time a later marker forces this redraw keep their
+ * real text rather than reverting to a shimmer — see `settleClaimPane` for the in-place
+ * version that runs when no redraw is needed.
  */
-function renderClaimSkeletons(titles, stage) {
-  const count = titles.length;
+function renderClaimSkeletons(claims, stage, sources, seekable) {
+  const count = claims.length;
   const cols = claimGridColumns(count);
   const spanLast = claimGridSpanLast(count, cols);
   setClaimsGridMode("grid-loading", cols);
   el.claimsPane.innerHTML =
     claimGridStatusHTML(stage) +
-    titles.map((title, i) => skeletonClaimHTML(title, i, count, i === count - 1 && spanLast)).join("");
+    claims
+      .map((claim, i) =>
+        loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
+      )
+      .join("");
+  revealIn(el.claimsPane);
   refreshTimeline();
   runProgress.resync();
+  runElapsed.resync();
+}
+
+/**
+ * One box in the loading grid dropping its shimmer for the real thing, without touching any
+ * of its neighbours.
+ *
+ * This is the whole point of parsing claims as they stream. A four-claim check writes them
+ * one after another, so the first claim's analysis and verdict are finished and sitting in
+ * the buffer for the best part of a minute before the last one's are — and until now every
+ * box shimmered for that whole minute and the answer arrived all at once at the end. A
+ * claim whose `VERDICT:` line has landed is complete in every sense the reader cares about,
+ * so it is handed over the moment that happens.
+ *
+ * Surgical rather than a re-render on purpose: rebuilding the grid's markup on each settle
+ * would restart every sibling's shimmer, throw away the entrance transition of the box that
+ * just settled, and drop the reader's scroll position inside any box tall enough to have
+ * one. A no-op if the box isn't there — the reader navigated away, or the finished card has
+ * already replaced the loading view.
+ */
+function settleClaimPane(index, claim, total, sources, seekable) {
+  const pane = el.claimsPane.querySelector(`.claim-pane[data-claim="${index}"]`);
+  if (!pane) return;
+  const body = pane.querySelector(".claim-body");
+  if (!body) return;
+
+  body.insertAdjacentHTML("afterend", settledBodyHTML(claim, sources, seekable));
+  body.remove();
+  pane.classList.remove("skeleton");
+  if (!prefersReducedMotion()) pane.classList.add("just-settled");
+  const eyebrow = pane.querySelector(".claim-eyebrow");
+  if (eyebrow) {
+    eyebrow.classList.remove("pending");
+    eyebrow.textContent = claimEyebrowText(index, total);
+  }
+  revealIn(pane);
+  // The `[t=…]` chips this box just gained are seek controls like any other — read them
+  // back now rather than at the end, so a settled claim's timestamps play the clip
+  // immediately instead of waiting out the claims still being written.
+  refreshTimeline();
 }
 
 function renderErrorCard(entry) {
@@ -1832,30 +2118,6 @@ function renderErrorCard(entry) {
     </div>`;
   refreshTimeline();
   document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
-}
-
-/** "4.2s" under a minute (one decimal below 10s, since a whole-second reading feels too
- * coarse for the common case; whole seconds above it, where a decimal stops being useful),
- * "1m 03s" past it. `null` for anything that isn't a real elapsed time — a turn from before
- * this feature existed, or one that never finished — so callers can skip rendering rather
- * than print "NaNs". */
-function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms < 0) return null;
-  const totalSeconds = ms / 1000;
-  if (totalSeconds < 60) return `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.round(totalSeconds % 60);
-  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
-}
-
-/** How long a turn took end to end — the request going out to the full answer landing,
- * timed in `streamChat`'s caller (`runCheck`/`runFollowup`/`runChat`) rather than here. A
- * plain muted note, not a `.badge`: it's metadata about the exchange, not a finding the app
- * is asserting the way a verdict is. */
-function durationHTML(ms, animate) {
-  const label = formatDuration(ms);
-  if (!label) return "";
-  return `<div ${revealAttrs("timing-note", animate)}>Answered in ${escapeHTML(label)}</div>`;
 }
 
 /**
@@ -1895,6 +2157,43 @@ function badgeHTML(verdictKey, animate) {
 function verdictHTML(entry, animate) {
   if (entry.incomplete && !entry.verdictKey) return "";
   return badgeHTML(entry.verdictKey ?? "insufficient", animate);
+}
+
+/**
+ * "4.2s" under a minute — one decimal below 10s, since a whole-second reading feels too
+ * coarse for the common case; whole seconds above it, where a decimal stops being useful —
+ * "1m 03s" past it. `null` for anything that isn't a real elapsed time, so `durationHTML`
+ * can skip rendering rather than print "NaNs".
+ *
+ * A different shape from `formatClock` on purpose: that one is a video's own clock, read
+ * against a scrubber where M:SS is the only format a viewer expects. This is a duration
+ * with no scrubber behind it, so the coarser-grained, more colloquial reading — "4.2s"
+ * rather than "0:04" — is the one that answers "how long did that take" without making the
+ * reader do the arithmetic themselves.
+ */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+/**
+ * How long a finished turn took, wall-clock — captured once by `createElapsedTicker`
+ * between the request going out and the stream ending, and stored on the entry (or the
+ * follow-up / chat turn) alongside the text it produced, so it survives a reload the same
+ * as everything else in `library`.
+ *
+ * Nothing is rendered for a turn that predates this feature, or an aborted one that never
+ * reached `entry.status = "done"` — an absent number is silence, not a claim that the turn
+ * was instant.
+ */
+function durationHTML(ms, animate, label = "Checked in") {
+  const duration = formatDuration(ms);
+  if (!duration) return "";
+  return `<div ${revealAttrs("check-duration", animate)}>${escapeHTML(label)} ${escapeHTML(duration)}</div>`;
 }
 
 /**
@@ -2033,7 +2332,7 @@ function threadHTML(entry, newestIndex) {
           <div class="thread-q">${escapeHTML(f.question)}</div>
           <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
           ${incompleteHTML(f.incomplete, animate)}
-          ${durationHTML(f.durationMs, animate)}
+          ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
           ${sourcePillsHTML(f.sources, animate)}
         </div>`;
@@ -2048,7 +2347,7 @@ function threadHTML(entry, newestIndex) {
           ${
             pendingFollowup.error
               ? `<div class="thread-error">${escapeHTML(pendingFollowup.error)}</div>`
-              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span></div>
+              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span><span class="elapsed-time" id="followupElapsed">0:00</span></div>
                  <div class="mini-progress"><div class="mini-progress-bar" id="followupProgressBar"></div></div>`
           }
         </div>`
@@ -2081,7 +2380,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
   return claims
     .map((claim, index) => {
       const isLast = index === claims.length - 1;
-      const eyebrow = claims.length > 1 ? `Claim ${index + 1} of ${claims.length}` : "Claim checked";
+      const eyebrow = claimEyebrowText(index, claims.length);
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
            ${durationHTML(entry.durationMs, animate)}
@@ -2185,7 +2484,7 @@ function requestHeaders() {
  * An error with *no* text before it is unchanged: there is nothing to preserve, so it
  * throws and the caller reports it as the whole outcome of the turn.
  */
-async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, clipHints } = {}) {
+async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, onSources, clipHints } = {}) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
@@ -2209,6 +2508,9 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, c
   let buffer = "";
   let answer = "";
   let sources = [];
+  // The ledger as the provisional frames have built it up so far. Separate from `sources`,
+  // which stays empty until the final frame says what the answer actually cited.
+  let live = [];
   let searchCount = 0;
   let truncated = false;
   let failure = null;
@@ -2243,7 +2545,29 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, c
       } else if (frame.type === "search") onSearchCount?.(++searchCount);
       else if (frame.type === "truncated") truncated = true;
       else if (frame.type === "sources") {
-        if (!frame.provisional) sources = frame.sources;
+        // Provisional frames are the ledger mid-turn: everything retrieved so far, before
+        // the answer has said which of it was worth citing. They are not what the finished
+        // entry is stored with — the last, unflagged frame narrows and renumbers to what was
+        // actually cited, and that is the one that wins here — but they *are* what makes a
+        // marker a link while the answer is still being written, which is the whole reason
+        // the server sends them early (see `sourcesFrame` in lib/verified-chat.js).
+        //
+        // They arrive as a difference rather than a fresh copy of the ledger, so they are
+        // accumulated here: `added` are rows not seen yet, `quotes` attach a page's own
+        // words to a row already held. Rebuilding the array rather than mutating in place
+        // keeps every reader of `liveSources` looking at one immutable snapshot.
+        if (frame.provisional) {
+          if (frame.added?.length) live = live.concat(frame.added);
+          if (frame.quotes?.length) {
+            const patches = new Map(frame.quotes.map((q) => [q.n, q.quote]));
+            live = live.map((row) => (patches.has(row.n) ? { ...row, quote: patches.get(row.n) } : row));
+          }
+          onSources?.(live);
+        } else {
+          sources = frame.sources;
+          live = frame.sources ?? [];
+          onSources?.(live);
+        }
       } else if (frame.type === "error") failure = frame.message;
     }
 
@@ -2380,9 +2704,14 @@ async function runCheck(url, existingId, hint) {
   // is discovered (see renderClaimSkeletons) — can carry the stage label and source count
   // forward into the rebuilt markup instead of them resetting to their initial text.
   const stage = { text: "Sending to the model…", searchCount: 0 };
-  let discoveredTitles = [];
+  let drawn = [];
+  // The ledger as the stream has it so far. The server sends it as the searches land
+  // (`provisional: true`) precisely so a marker can be a link before the turn ends — see
+  // `sourcesFrame` in lib/verified-chat.js — and a claim that settles mid-stream is exactly
+  // the consumer that needs it.
+  let liveSources = [];
+  const seekable = seekableEntry(entry);
 
-  const startedAt = performance.now();
   try {
     const message = { role: "user", content: prompt, ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([message], {
@@ -2402,18 +2731,36 @@ async function runCheck(url, existingId, hint) {
         // keep arriving.
         runProgress.bump(Math.min(35 + n * 5, 70));
       },
-      // The model writes one `[[claim: …]]` marker per claim as it drafts the answer,
-      // well before the full answer (and its citations) are finished — there's no
-      // separate "how many claims" signal to wait for, the marker *is* the count,
-      // arriving incrementally. The single loading card grows into a grid of skeleton
-      // boxes the first time this finds one, and adds another box each time it finds the
-      // next — see renderClaimSkeletons.
+      onSources: (rows) => {
+        liveSources = rows;
+        renderLiveSources(rows);
+      },
+      // The model writes one `[[claim: …]]` marker per claim as it drafts the answer, and
+      // closes each one with its own `VERDICT:` line before opening the next — there's no
+      // separate "how many claims" or "this one is done" signal to wait for, those two
+      // markers *are* both, arriving incrementally. So the loading view tracks the answer
+      // twice over: the single card grows into a grid of skeleton boxes as markers appear,
+      // and each box hands over its shimmer for the real analysis, citations and verdict
+      // the moment that claim's verdict line lands — which on a four-claim check is most of
+      // a minute before the last one's does. See `claimDiff`, `renderClaimSkeletons` and
+      // `settleClaimPane`.
       onDelta: (text) => {
         if (selectedId !== id) return; // navigated away — nothing to rebuild
-        const titles = (splitClaims(text) ?? []).map((c) => c.title);
-        if (titles.length === discoveredTitles.length) return;
-        discoveredTitles = titles;
-        renderClaimSkeletons(discoveredTitles, stage);
+        const claims = splitClaims(text) ?? [];
+        const { rebuild, settled } = claimDiff(drawn, claims);
+        if (!rebuild && settled.length === 0) return;
+        drawn = claims;
+        if (rebuild) {
+          renderClaimSkeletons(claims, stage, liveSources, seekable);
+        } else {
+          for (const index of settled) {
+            settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
+          }
+        }
+        // Claims finishing is the most concrete progress this turn produces. The elapsed-time
+        // curve knows nothing about it, so the settled fraction pulls the bar along itself.
+        const done = claims.filter((claim) => claim.verdictKey).length;
+        if (done > 0) runProgress.bump(70 + Math.round((done / claims.length) * 25));
       },
     });
 
@@ -2425,7 +2772,6 @@ async function runCheck(url, existingId, hint) {
     entry.claims = claims; // null (render as one card, see renderResultCard), or one block per claim
     entry.sources = sources;
     entry.incomplete = incomplete;
-    entry.durationMs = performance.now() - startedAt;
     // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
     // would then stamp it "Insufficient evidence" — a finding, in the app's own voice, that
     // the model never made and the reader has no way to tell from one it did. Left null when
@@ -2435,13 +2781,28 @@ async function runCheck(url, existingId, hint) {
     entry.verdictKey = claims
       ? aggregateVerdictKey(claims) ?? (incomplete ? null : "insufficient")
       : verdictKey ?? (incomplete ? null : "insufficient");
+    entry.durationMs = runElapsed.elapsedMs();
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) {
       await resolveIris();
       // The wait above can outlast the user's patience for this entry — they may have
       // already clicked to a different check. Re-check rather than trust the guard above.
-      if (selectedId === id) renderResultCard(entry);
+      if (selectedId === id) {
+        // The finished card still has to be built — the loading grid has no footer, no
+        // sources row and no follow-up thread, and the text it painted predates citation
+        // cleanup. But when every claim already settled on screen, the reader has been
+        // reading this text for the last half-minute, so it is swapped in place rather than
+        // faded in from nothing. Re-running the entrance on text that is already there and
+        // already read is the flash `revealAttrs` exists to prevent, and it would land at
+        // the one moment the check looks finished.
+        const alreadyOnScreen =
+          Array.isArray(claims) &&
+          claims.length > 0 &&
+          claims.length === drawn.length &&
+          drawn.every((claim) => claim.verdictKey);
+        renderResultCard(entry, { animateAnalysis: !alreadyOnScreen });
+      }
     }
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -2456,6 +2817,7 @@ async function runCheck(url, existingId, hint) {
     // reader navigated away from mid-flight would otherwise leave the ticker running against
     // a bar that's no longer on screen.
     runProgress.stop();
+    runElapsed.stop();
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
@@ -2472,6 +2834,7 @@ async function runFollowup(entry, question) {
   clearPendingImage();
   renderResultCard(entry, { animateAnalysis: false });
   followupProgress.start();
+  followupElapsed.start();
   updateComposerMode();
 
   const controller = new AbortController();
@@ -2480,7 +2843,6 @@ async function runFollowup(entry, question) {
   el.newCheckBtn.disabled = true;
   let settled = false;
 
-  const startedAt = performance.now();
   try {
     const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
     const { answer, sources, incomplete } = await streamChat([...historyFor(entry), message], {
@@ -2495,7 +2857,7 @@ async function runFollowup(entry, question) {
     // Kept in the thread even when it came back damaged. A partial answer is text the model
     // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
     // so the next turn is not built on prose the reader was never told was cut off.
-    entry.followups.push({ question, answer, sources, incomplete, durationMs: performance.now() - startedAt });
+    entry.followups.push({ question, answer, sources, incomplete, durationMs: followupElapsed.elapsedMs() });
     persistLibrary();
     renderLibrary(el.searchInput.value);
     settled = true;
@@ -2509,6 +2871,7 @@ async function runFollowup(entry, question) {
     pendingFollowup = { entryId: entry.id, question, error: error.message };
   } finally {
     followupProgress.stop();
+    followupElapsed.stop();
     if (settled) pendingFollowup = null;
     inFlight = null;
     el.checkBtn.disabled = false;
@@ -2713,7 +3076,42 @@ el.linkInput.addEventListener("keydown", (event) => {
   }
 });
 
-el.linkInput.addEventListener("input", updateComposerMode);
+/**
+ * Start verifying a link as soon as the composer holds one, so the Check button doesn't have
+ * to wait for it — see `warmLink`.
+ *
+ * Debounced, and not lightly: someone typing a URL by hand passes through a dozen strings
+ * that parse as links and are none of them the one they meant, and each one that got through
+ * would spend a `/api/resolve-media` call — which shares `/api/chat`'s rate-limit window, not
+ * the looser one `/api/probe-link` gives itself. Burning a reader's fact-check allowance on
+ * prefixes of a URL they are still typing would be a self-inflicted 429, and a 429 is the
+ * slowest thing this app can do. Hence a long idle window rather than a twitchy one; the
+ * paste listener below is what actually covers the common case.
+ */
+let warmTimer = null;
+el.linkInput.addEventListener("input", () => {
+  updateComposerMode();
+  if (warmTimer) clearTimeout(warmTimer);
+  // Nothing to warm while a turn is running: the button is disabled, so there is no click
+  // coming that this could get ahead of.
+  if (inFlight) return;
+  const url = normalizeLink(el.linkInput.value);
+  if (!url) return;
+  warmTimer = setTimeout(() => warmLink(url), 700);
+});
+
+// A paste needs no debounce and is the case this is actually for: the string arrived whole,
+// it is not going to be edited into a different link a keystroke later, and the click is
+// usually the very next thing that happens — often inside the debounce window above, which
+// would otherwise mean the commonest path never got warmed at all. Deferred by a turn
+// because the value isn't in the field yet when this fires.
+el.linkInput.addEventListener("paste", () => {
+  setTimeout(() => {
+    if (inFlight) return;
+    const url = normalizeLink(el.linkInput.value);
+    if (url) warmLink(url);
+  }, 0);
+});
 el.searchInput.addEventListener("input", () => renderLibrary(el.searchInput.value));
 
 // Fires once the browser has actually decoded the video's dimensions — overrides
