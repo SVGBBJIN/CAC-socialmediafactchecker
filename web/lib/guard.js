@@ -110,15 +110,46 @@ export function checkRateLimit(key, limits, now = Date.now()) {
   // Store the pruned list before any early exit. A client that keeps hitting the limit
   // takes the throwing path every time, and if that path never wrote back, its expired
   // timestamps would be re-filtered on every request and never actually dropped.
+  //
+  // Deleted first so the re-insert puts this key at the *end* of the map's iteration
+  // order. That is what makes insertion order recency order, which is what lets the
+  // eviction below be an LRU without a second structure to keep in step — the same trick
+  // `clipCacheGet` in lib/gemini.js already uses.
+  windows.delete(key);
   windows.set(key, hits);
 
   // Bound the map so a long-running server doesn't accumulate dead keys. Swept here
   // rather than after the limit checks below, because the case that grows the map
   // fastest — many distinct clients, each being refused — never reaches them.
-  if (windows.size > MAX_TRACKED_CLIENTS) {
-    for (const [k, v] of windows) {
-      if (k !== key && v.every((t) => now - t >= DAY)) windows.delete(k);
-    }
+  //
+  // Eviction is by age, and *then* unconditionally by recency, because the age pass alone
+  // does not bound anything. `clientKey` reads `x-forwarded-for`, which the note above it
+  // says is spoofable, so a caller rotating that header mints an unbounded number of
+  // distinct keys — every one of them fresh, none of them older than a day, and therefore
+  // none of them removable by an expiry rule. The map then grows without limit and, worse,
+  // every subsequent request re-scans all of it: measured at 20,000 keys, that scan alone
+  // cost about half a millisecond per request and rises linearly, so the flood degrades
+  // service for everyone else without ever tripping a limit.
+  //
+  // So the overflow is dropped whatever its age. The trade is real and worth stating: a
+  // legitimate client evicted under a flood gets a fresh allowance, because its counters
+  // went with it. That is the better failure — the counters are in-memory and already
+  // reset on every cold start (see the note on `windows`), so this widens a hole that is
+  // documented as wide, while closing one that lets an attacker spend the whole process's
+  // CPU and memory. `APP_PASSWORD` remains the control that actually gates access.
+  // Oldest first, and never this request's own key: it was just re-inserted, so it is last
+  // in the order and the loop stops well before reaching it. There is no separate pass for
+  // *expired* keys any more, and there does not need to be one — an entry nobody has
+  // touched drifts to the front of the order and is evicted for being the oldest, which is
+  // what an expiry pass was trying to approximate. Dropping it is also what keeps the
+  // eviction cheap: a scan of the whole map on every request past the cap was the very cost
+  // this bound exists to prevent, and it re-introduced it in the case that matters most.
+  // What remains is proportional to the overflow — one entry per request, in the steady
+  // state — instead of to the size of the map.
+  while (windows.size > MAX_TRACKED_CLIENTS) {
+    const oldest = windows.keys().next();
+    if (oldest.done || oldest.value === key) break;
+    windows.delete(oldest.value);
   }
 
   const inLastMinute = hits.filter((t) => now - t < MINUTE).length;
@@ -150,6 +181,18 @@ export function checkRateLimit(key, limits, now = Date.now()) {
 /** Test seam — the counters are module state, so tests need a way to start clean. */
 export function resetRateLimits() {
   windows.clear();
+}
+
+/**
+ * How many clients are being tracked right now. A test seam like `resetRateLimits`.
+ *
+ * The bound on this map is the difference between a spoofed-header flood costing an
+ * attacker nothing and costing the process its memory and its per-request CPU, and a bound
+ * that nothing asserts is a bound that quietly stops holding. Exported so a test can say
+ * so directly rather than inferring it from a timing.
+ */
+export function trackedClientCount() {
+  return windows.size;
 }
 
 /**

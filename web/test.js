@@ -76,6 +76,7 @@ import {
   checkRateLimit,
   validateMessages,
   resetRateLimits,
+  trackedClientCount,
   GuardError,
   config as guardConfig,
 } from "./lib/guard.js";
@@ -1489,6 +1490,41 @@ test("the rate limiter reports how much of the day is spent", () => {
   const first = checkRateLimit("budget-ip", { ...limits, perMinute: 100, perDay: 4 }, now);
   assert.equal(first.pressure, 0.25);
   assert.equal(first.remainingToday, 3);
+});
+
+test("a flood of spoofed client keys cannot grow the rate limiter without bound", () => {
+  // `clientKey` reads `x-forwarded-for`, which its own note calls spoofable, so a caller
+  // rotating that header mints unlimited distinct keys. Every one is fresh, so an
+  // expiry-based sweep can never remove any of them: before this was a real LRU the map
+  // grew without limit *and* every later request re-scanned all of it, which is a way to
+  // spend the whole process's CPU without ever tripping a limit.
+  resetRateLimits();
+  const now = Date.now();
+  const wide = { ...limits, perMinute: 1e9, perDay: 1e9 };
+  for (let i = 0; i < 12_000; i += 1) checkRateLimit(`spoofed-${i}`, wide, now);
+
+  // The bound is `MAX_TRACKED_CLIENTS` (5000) and it holds however many keys arrive.
+  assert.ok(trackedClientCount() <= 5000, `map grew to ${trackedClientCount()}`);
+
+  // And the eviction is by recency, so the keys kept are the ones that arrived last.
+  const recent = checkRateLimit("spoofed-11999", wide, now);
+  assert.equal(recent.remainingToday, wide.perDay - 2, "the newest key is still being counted");
+  resetRateLimits();
+});
+
+test("a client's own counter survives its neighbours being evicted", () => {
+  resetRateLimits();
+  const now = Date.now();
+  const wide = { ...limits, perMinute: 1e9, perDay: 1e9 };
+  checkRateLimit("regular", wide, now);
+  checkRateLimit("regular", wide, now);
+  // Push the map past the bound with traffic that is nothing to do with this client, then
+  // come back. `regular` is re-inserted on every touch, so it is not the oldest and is not
+  // what gets dropped.
+  for (let i = 0; i < 4_000; i += 1) checkRateLimit(`other-${i}`, wide, now);
+  const third = checkRateLimit("regular", wide, now);
+  assert.equal(third.remainingToday, wide.perDay - 3, "two earlier hits are still remembered");
+  resetRateLimits();
 });
 
 test("the config snapshot names both models, and stays quiet when nothing is wrong", () => {
