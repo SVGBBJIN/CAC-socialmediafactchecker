@@ -191,6 +191,82 @@ test("falls through a 404 model to the next in the chain", async () => {
   assert.match(answer[0].note, /retired-model/);
 });
 
+test("a 404'd model is remembered, so the next request doesn't pay for it again", async () => {
+  const health = new ModelHealth();
+  health.markExhausted("retired-model", { reason: "unavailable", cooldownMs: MAX_COOLDOWN_MS });
+
+  const tried = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["retired-model", "gemini-2.0-flash"],
+      health,
+      fetchImpl: async (url) => {
+        tried.push(url);
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  // Same point as the quota case above: a model that is not coming back this request
+  // should not be asked again on the next one either.
+  assert.equal(tried.length, 1);
+  assert.match(tried[0], /gemini-2\.0-flash/);
+  const answer = answerFrames(frames);
+  assert.equal(answer[0].degraded, true);
+  assert.equal(answer[0].reason, "unavailable");
+});
+
+test("a 404 learned this request is remembered for the next one too", async () => {
+  const health = new ModelHealth();
+  let calls = 0;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["retired-model", "gemini-2.0-flash"],
+      health,
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            ok: false,
+            status: 404,
+            text: async () => JSON.stringify({ error: { message: "models/x is not found" } }),
+          };
+        }
+        return sseResponse([frame("ok")]);
+      },
+    }),
+  );
+
+  assert.equal(health.isAvailable("retired-model"), false);
+});
+
+test("an invalid key is never mistaken for a model that's gone — it isn't remembered per-model", async () => {
+  const health = new ModelHealth();
+  await assert.rejects(
+    collect(
+      streamChat({
+        apiKey: "bad-key",
+        messages: [{ role: "user", content: "hi" }],
+        models: ["gemini-3.6-flash"],
+        health,
+        fetchImpl: async () => ({
+          ok: false,
+          status: 403,
+          text: async () => JSON.stringify({ error: { message: "API_KEY_INVALID" } }),
+        }),
+      }),
+    ),
+  );
+
+  // Terminal — nothing about the model itself was learned, because nothing about the
+  // model itself was the problem. A fixed key should be able to use it immediately.
+  assert.equal(health.isAvailable("gemini-3.6-flash"), true);
+});
+
 test("a bad key is terminal, not a reason to try four more models", async () => {
   let calls = 0;
   await assert.rejects(
