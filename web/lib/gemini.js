@@ -201,6 +201,12 @@ export function supportsThinkingBudget(model) {
  * sibling of any one of them. `gemini-3.1-flash-lite` has no full, non-Lite `3.1` model
  * anywhere in the chain — Lite-only releases happen, and `supportsThinkingBudget` below
  * doesn't care why an ID exists, only what version number is in it.
+ *
+ * 3.7 leads rather than trailing behind 2.0 — it is a newer, full-quality model, not a
+ * cost tier, and belongs at the front of the chain for the same reason 3.6 did before it
+ * shipped. A separate, independent pass at this same chain landed on `main` while this
+ * branch was open and appended 3.7 near the Lite models instead, alongside them rather
+ * than ahead of the models it supersedes; that ordering was not kept in the merge.
  */
 export const DEFAULT_MODEL_CHAIN = [
   "gemini-3.7-flash",
