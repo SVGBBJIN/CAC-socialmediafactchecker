@@ -286,6 +286,7 @@ test("findInPage carries semanticSkipped through to the tool result", async () =
     {
       apiKey: "k",
       fetchImpl: async () => response(`<title>Review</title><body>${PAGE.replace(/\n\n/g, "<p>")}</body>`),
+      lookupImpl: publicLookup,
       embedImpl: async () => {
         throw new Error("must not be called");
       },
@@ -406,6 +407,18 @@ test("a caller that went away is not counted against the model", async () => {
 
 /* ---------------- fetching ---------------- */
 
+/**
+ * The DNS answer a public host gives, stubbed.
+ *
+ * `fetchPage` vets every hop's address before connecting to it (see its own note), so a
+ * test that does not supply this would resolve `example.gov` for real — which is a network
+ * call, and this suite has none. Same stub, same reason, as `test-article.js`'s.
+ */
+const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+
+/** A private answer, for the tests that check the vetting actually refuses one. */
+const privateLookup = async () => [{ address: "169.254.169.254", family: 4 }];
+
 function response(body, { ok = true, status = 200, type = "text/html" } = {}) {
   return {
     ok,
@@ -418,6 +431,7 @@ function response(body, { ok = true, status = 200, type = "text/html" } = {}) {
 test("fetchPage extracts a page's text", async () => {
   const page = await fetchPage("https://example.gov/report", {
     fetchImpl: async () => response("<title>T</title><p>The figure was revised to 4.2% in March.</p>"),
+    lookupImpl: publicLookup,
   });
   assert.equal(page.title, "T");
   assert.match(page.text, /revised to 4.2% in March/);
@@ -425,7 +439,10 @@ test("fetchPage extracts a page's text", async () => {
 
 test("fetchPage reports an unreachable page as a finding about the source", async () => {
   await assert.rejects(
-    fetchPage("https://example.gov/gone", { fetchImpl: async () => response("", { ok: false, status: 404 }) }),
+    fetchPage("https://example.gov/gone", {
+      fetchImpl: async () => response("", { ok: false, status: 404 }),
+      lookupImpl: publicLookup,
+    }),
     (error) => {
       assert.ok(error instanceof PageFindError);
       // The message is a prompt: it tells the model what it may still do with the source.
@@ -435,10 +452,133 @@ test("fetchPage reports an unreachable page as a finding about the source", asyn
   );
 });
 
+test("fetchPage refuses a URL that resolves inside the network", async () => {
+  // The gap this closes: `find_in_page` returns a page's text *verbatim* into the model's
+  // context, and `sourceRows` prints the best passage under the answer. An unvetted fetch
+  // here is therefore the one exit in the app that would read an internal service out loud.
+  let fetched = 0;
+  await assert.rejects(
+    fetchPage("http://169.254.169.254/latest/meta-data/", {
+      fetchImpl: async () => {
+        fetched += 1;
+        return response("secrets");
+      },
+      lookupImpl: privateLookup,
+    }),
+    (error) => error instanceof PageFindError && /cannot be opened/.test(error.message),
+  );
+  assert.equal(fetched, 0, "nothing may be fetched before the address is vetted");
+});
+
+test("fetchPage vets every redirect hop, not just the first", async () => {
+  // A public page answering 302 with a private Location is the standard way past a check
+  // that only looked at the URL it was handed — which is exactly what `redirect: "follow"`
+  // used to delegate to the runtime.
+  const fetched = [];
+  const lookupImpl = async (host) =>
+    host === "example.gov"
+      ? [{ address: "93.184.216.34", family: 4 }]
+      : [{ address: "127.0.0.1", family: 4 }];
+
+  await assert.rejects(
+    fetchPage("https://example.gov/report", {
+      fetchImpl: async (url) => {
+        fetched.push(url);
+        return {
+          ok: false,
+          status: 302,
+          headers: {
+            get: (n) =>
+              n.toLowerCase() === "location" ? "http://metadata.internal.test/creds" : null,
+          },
+          text: async () => "",
+        };
+      },
+      lookupImpl,
+    }),
+    (error) => error instanceof PageFindError && /cannot be opened/.test(error.message),
+  );
+  assert.deepEqual(fetched, ["https://example.gov/report"], "the redirect target is never fetched");
+});
+
+test("fetchPage follows a redirect that stays public", async () => {
+  const fetched = [];
+  const page = await fetchPage("https://example.gov/report", {
+    fetchImpl: async (url) => {
+      fetched.push(url);
+      if (fetched.length === 1) {
+        return {
+          ok: false,
+          status: 301,
+          headers: {
+            get: (n) => (n.toLowerCase() === "location" ? "https://example.gov/report-final" : null),
+          },
+          text: async () => "",
+        };
+      }
+      return response("<title>Final</title><p>The figure was revised to 4.2% in March.</p>");
+    },
+    lookupImpl: publicLookup,
+  });
+  assert.equal(page.title, "Final");
+  assert.deepEqual(fetched, ["https://example.gov/report", "https://example.gov/report-final"]);
+});
+
+test("fetchPage gives up on a redirect chain rather than following it forever", async () => {
+  let hops = 0;
+  await assert.rejects(
+    fetchPage("https://example.gov/loop", {
+      fetchImpl: async () => {
+        hops += 1;
+        return {
+          ok: false,
+          status: 302,
+          headers: {
+            get: (n) => (n.toLowerCase() === "location" ? `https://example.gov/loop${hops}` : null),
+          },
+          text: async () => "",
+        };
+      },
+      lookupImpl: publicLookup,
+      maxRedirects: 3,
+    }),
+    /redirects in circles/,
+  );
+  assert.equal(hops, 4, "the initial request plus the cap, and then it stops");
+});
+
+test("fetchPage refuses a redirect out of http(s)", async () => {
+  await assert.rejects(
+    fetchPage("https://example.gov/report", {
+      fetchImpl: async () => ({
+        ok: false,
+        status: 303,
+        headers: { get: (n) => (n.toLowerCase() === "location" ? "file:///etc/passwd" : null) },
+        text: async () => "",
+      }),
+      lookupImpl: publicLookup,
+    }),
+    (error) => error instanceof PageFindError && /cannot be opened/.test(error.message),
+  );
+});
+
+test("a refused page reaches the model as a finding, never as a thrown turn", async () => {
+  // `runFind` in lib/verified-chat.js only catches `PageFindError`; anything else is
+  // rethrown and takes the whole answer down with it. So the refusal has to arrive wearing
+  // the type the tool layer already knows how to report.
+  const error = await fetchPage("http://10.0.0.1/admin", {
+    fetchImpl: async () => response("internal"),
+    lookupImpl: async () => [{ address: "10.0.0.1", family: 4 }],
+  }).catch((e) => e);
+  assert.ok(error instanceof PageFindError);
+  assert.equal(error.retryable, false, "a private address answers the same way next time");
+});
+
 test("fetchPage refuses a PDF rather than tokenising its binary", async () => {
   await assert.rejects(
     fetchPage("https://example.gov/f.pdf", {
       fetchImpl: async () => response("%PDF-1.7", { type: "application/pdf" }),
+      lookupImpl: publicLookup,
     }),
     /not a readable page/,
   );
@@ -457,6 +597,7 @@ test("fetchPage refuses a page that declares itself enormous, before reading it"
           return "x";
         },
       }),
+      lookupImpl: publicLookup,
     }),
     /too large/,
   );
@@ -474,6 +615,7 @@ test("fetchPage asks for brotli as well as the gzip the runtime already requests
       headers = options.headers;
       return response("<title>T</title><p>Some readable prose about a figure.</p>");
     },
+    lookupImpl: publicLookup,
   });
   assert.match(headers["accept-encoding"], /\bbr\b/);
   assert.match(headers["accept-encoding"], /\bgzip\b/);
@@ -503,6 +645,7 @@ test("a body that inflates past the cap is dropped mid-read, not buffered whole"
           throw new Error("text() must not be reached — that is the buffering being avoided");
         },
       }),
+      lookupImpl: publicLookup,
     }),
     /too large/,
   );
@@ -629,7 +772,11 @@ test("a page whose second batch fails keeps its cached vectors and drops to lexi
 test("findInPage returns passages under the page's existing number", async () => {
   const result = await findInPage(
     { url: "https://example.gov/review", find: "did vaccine coverage fall in 2023", claim: "Coverage fell in 2023.", max_passages: 2 },
-    { apiKey: null, fetchImpl: async () => response(`<title>Review</title><body>${PAGE.replace(/\n\n/g, "<p>")}</body>`) },
+    {
+      apiKey: null,
+      fetchImpl: async () => response(`<title>Review</title><body>${PAGE.replace(/\n\n/g, "<p>")}</body>`),
+      lookupImpl: publicLookup,
+    },
   );
 
   assert.equal(result.title, "Review");
@@ -642,7 +789,7 @@ test("findInPage says so when a page has no readable text", async () => {
   await assert.rejects(
     findInPage(
       { url: "https://example.com/app", find: "anything at all", claim: "The claim is checkable." },
-      { apiKey: null, fetchImpl: async () => response("<div id=root></div>") },
+      { apiKey: null, fetchImpl: async () => response("<div id=root></div>"), lookupImpl: publicLookup },
     ),
     /no readable text/,
   );

@@ -1377,7 +1377,12 @@ function geminiAndPages(rounds) {
         "</body></html>",
     };
   };
-  return { fetchImpl, sent, fetched };
+  // `fetchPage` vets every hop's address before connecting (see its note in
+  // lib/page-find.js), so a suite that stubs the network has to stub the resolver too —
+  // otherwise `a.example` is looked up for real, fails, and the prefetch these tests are
+  // about never happens.
+  const lookupImpl = async () => [{ address: "93.184.216.34", family: 4 }];
+  return { fetchImpl, sent, fetched, lookupImpl };
 }
 
 /**
@@ -1396,7 +1401,7 @@ test("the top results of a search are opened while the model is still reading th
   // lands on is nearly always one the first round already retrieved. Waiting to be told
   // which puts the whole page fetch in series behind a model call that was itself waiting
   // on the search — the same seconds spent twice.
-  const { fetchImpl, fetched } = geminiAndPages([
+  const { fetchImpl, fetched, lookupImpl } = geminiAndPages([
     { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
     { text: "The final bill was $2.1 billion [1]." },
   ]);
@@ -1407,6 +1412,7 @@ test("the top results of a search are opened while the model is still reading th
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
+      lookupImpl,
       attachMedia: false,
       searchImpl: async () =>
         searchResult("The bridge cost $4bn", [
@@ -1425,7 +1431,7 @@ test("the top results of a search are opened while the model is still reading th
 });
 
 test("a page opened ahead of time is not opened again when the model asks for it", async () => {
-  const { fetchImpl, fetched } = geminiAndPages([
+  const { fetchImpl, fetched, lookupImpl } = geminiAndPages([
     { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $4bn" } }] },
     {
       calls: [
@@ -1448,6 +1454,7 @@ test("a page opened ahead of time is not opened again when the model asks for it
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
+      lookupImpl,
       attachMedia: false,
       searchImpl: async () => searchResult("The bridge cost $4bn", ["https://a.example/1"]),
     }),
@@ -1474,7 +1481,7 @@ test("prefetching is bounded across a whole turn, not just per search", async ()
     },
     { text: "No source settles this." },
   ];
-  const { fetchImpl, fetched } = geminiAndPages(rounds);
+  const { fetchImpl, fetched, lookupImpl } = geminiAndPages(rounds);
 
   let query = 0;
   await collect(
@@ -1483,6 +1490,7 @@ test("prefetching is bounded across a whole turn, not just per search", async ()
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
+      lookupImpl,
       attachMedia: false,
       searchImpl: async () => {
         query += 1;
@@ -2107,6 +2115,7 @@ test("prefetching is spread out rather than launched all at once", async () => {
       messages: [{ role: "user", content: "Is this true?" }],
       env: {},
       fetchImpl,
+      lookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
       attachMedia: false,
       searchImpl: async () => {
         query += 1;

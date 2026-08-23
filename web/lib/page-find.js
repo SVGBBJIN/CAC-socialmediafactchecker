@@ -29,6 +29,15 @@
 
 import { embedTexts, similarity } from "./embeddings.js";
 import { fuzzyIndex, idfWeights, lexicalScore, phraseHit, queryTerms, tokenise } from "./fuzzy.js";
+// The address vetting `lib/link-probe.js` was written for, applied here for the same
+// reason it is applied in `lib/article.js`: this fetches a host it did not choose. See
+// the note on `fetchPage`.
+import {
+  assertPublicHost,
+  parseProbeURL,
+  ProbeRefused,
+  MAX_REDIRECTS,
+} from "./link-probe.js";
 
 /** Longest one page fetch may take. */
 export const FETCH_TIMEOUT_MS = 12_000;
@@ -291,6 +300,9 @@ function prepare(text, index) {
 /** Content types worth extracting text from. Anything else is a download, not a source. */
 const READABLE_TYPE = /^(?:text\/|application\/(?:xhtml\+xml|xml|json))/i;
 
+/** Statuses that mean "the page is somewhere else", per `fetchArticle`'s identical list. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 /**
  * Read a response body, refusing rather than buffering one that runs past `maxBytes`.
  *
@@ -334,62 +346,134 @@ export async function readCapped(response, maxBytes) {
   return { text: Buffer.concat(chunks).toString("utf8"), exceeded: false };
 }
 
-export async function fetchPage(url, { fetchImpl = fetch, signal, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+/**
+ * Open one page and return its readable text.
+ *
+ * ## Why this follows redirects by hand
+ *
+ * This is the second place in the app that fetches a host it did not choose, and until now
+ * it was the only one not vetting the address it was about to connect to. `lib/link-probe.js`
+ * and `lib/article.js` both re-resolve and re-classify **every hop** before fetching it,
+ * precisely because a public host answering 302 with `Location: http://169.254.169.254/…`
+ * is the standard way past a check that only looked at the URL it was handed. Handing the
+ * whole chain to `redirect: "follow"` delegates that decision to the runtime, which has no
+ * opinion about it.
+ *
+ * The gap mattered more here than anywhere else, not less. The probe reads headers and
+ * returns no byte of the body; this returns the body, as text, into the model's context —
+ * where `find_in_page` will quote it back verbatim as a passage, and `sourceRows` will
+ * print that quote under the answer. So the one exit with no address check was also the one
+ * that hands what it finds to the reader.
+ *
+ * Reaching it takes a page in a search result that redirects inward, which is not the
+ * easiest thing to arrange — but it is squarely within what this app invites: the material
+ * being checked is written by whoever made the post, the model picks its queries from that
+ * material, and `PREFETCH_PER_SEARCH` opens the top results of every search before anyone
+ * asks for them. A check that costs one DNS lookup per hop is not worth skipping over how
+ * many steps the chain takes.
+ *
+ * `assertPublicHost`'s stated DNS-rebinding residual applies here as it does in
+ * `fetchArticle`, and is bounded the same way: the readable-type and byte caps below mean
+ * what a won race yields is a page of text this app was already willing to show, not an
+ * arbitrary internal response.
+ *
+ * `ProbeRefused` is translated into `PageFindError` on the way out rather than left to
+ * propagate. `runFind` in lib/verified-chat.js only catches `PageFindError`; anything else
+ * is rethrown and takes the whole turn down, so a refused URL has to arrive as the same
+ * kind of "this source cannot be read" the model already knows how to react to.
+ */
+export async function fetchPage(
+  url,
+  { fetchImpl = fetch, signal, timeoutMs = FETCH_TIMEOUT_MS, lookupImpl, maxRedirects = MAX_REDIRECTS } = {},
+) {
   const timer = new AbortController();
   const onAbort = () => timer.abort();
   if (signal?.aborted) timer.abort();
   else signal?.addEventListener("abort", onAbort, { once: true });
+  // One deadline for the whole chain, not one per hop: a redirect loop that answers
+  // promptly at every step must not be able to buy itself unbounded time.
   const deadline = setTimeout(() => timer.abort(), timeoutMs);
 
   try {
-    const response = await fetchImpl(url, {
-      redirect: "follow",
-      headers: {
-        "user-agent": BROWSER_UA,
-        accept: "text/html,application/xhtml+xml,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
-        // The runtime asks for `gzip, deflate` on its own and inflates the reply before we
-        // see it. Adding brotli is the one line that changes: it is what every browser
-        // sends, so it is what a CDN's best-compressed copy is keyed to, and on real pages
-        // it is 15% (Wikipedia) to 41% (AP) fewer bytes on the wire than the gzip copy the
-        // same host would otherwise hand back. Nothing downstream can tell the difference —
-        // `undici` decodes it and this function still receives text.
-        "accept-encoding": "br, gzip, deflate",
-      },
-      signal: timer.signal,
-    });
+    let current = parseProbeURL(url);
+    let redirects = 0;
 
-    if (!response.ok) {
-      throw new PageFindError(
-        `Could not open the page: HTTP ${response.status}. The search snippet is all this ` +
-          `source can support — cite it for no more than that, or find another source.`,
-        { retryable: response.status >= 500 || response.status === 429 },
-      );
-    }
+    for (;;) {
+      // Every hop, not just the first. See the note above.
+      await assertPublicHost(current.hostname, lookupImpl);
 
-    const type = response.headers?.get?.("content-type") ?? "";
-    if (type && !READABLE_TYPE.test(type)) {
-      throw new PageFindError(
-        `That URL is ${type.split(";")[0]}, not a readable page — most likely a PDF or a ` +
-          `media file. Nothing can be quoted from it here.`,
-      );
-    }
+      const response = await fetchImpl(current.toString(), {
+        // Manual, so the check above runs against each hop instead of only the one the
+        // caller named. A stubbed response in a test has no `status` in the 3xx range and
+        // falls straight through to the read below, exactly as it did before.
+        redirect: "manual",
+        headers: {
+          "user-agent": BROWSER_UA,
+          accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+          "accept-language": "en-US,en;q=0.9",
+          // The runtime asks for `gzip, deflate` on its own and inflates the reply before we
+          // see it. Adding brotli is the one line that changes: it is what every browser
+          // sends, so it is what a CDN's best-compressed copy is keyed to, and on real pages
+          // it is 15% (Wikipedia) to 41% (AP) fewer bytes on the wire than the gzip copy the
+          // same host would otherwise hand back. Nothing downstream can tell the difference —
+          // `undici` decodes it and this function still receives text.
+          "accept-encoding": "br, gzip, deflate",
+        },
+        signal: timer.signal,
+      });
 
-    // Checked before the body is read where the server declares it, so an enormous page is
-    // refused rather than buffered. The same cap is applied to what actually arrived,
-    // because `content-length` is absent on every chunked response — and, now that this
-    // request accepts compression, because a declared length describes the compressed copy
-    // and says nothing about what it inflates to.
-    const declared = Number(response.headers?.get?.("content-length") ?? "");
-    if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
-      throw new PageFindError("That page is too large to read.");
-    }
+      const location = response.headers?.get?.("location");
+      if (REDIRECT_STATUSES.has(response.status) && location) {
+        redirects += 1;
+        if (redirects > maxRedirects) {
+          throw new PageFindError("That page redirects in circles and could not be opened.");
+        }
+        let next;
+        try {
+          next = new URL(location, current);
+        } catch {
+          throw new PageFindError("That page redirects somewhere invalid.");
+        }
+        // A redirect out of http(s) is refused by the same rule the first URL was checked
+        // against — `parseProbeURL` states it once rather than restating it here.
+        current = parseProbeURL(next.toString());
+        continue;
+      }
 
-    const { text: body, exceeded } = await readCapped(response, MAX_PAGE_BYTES);
-    if (exceeded) {
-      throw new PageFindError("That page is too large to read.");
+      // `ok` is unavailable on a manual-redirect response in some runtimes and is not what
+      // decides this anyway; the status range is.
+      if (!(response.status >= 200 && response.status < 300)) {
+        throw new PageFindError(
+          `Could not open the page: HTTP ${response.status}. The search snippet is all this ` +
+            `source can support — cite it for no more than that, or find another source.`,
+          { retryable: response.status >= 500 || response.status === 429 },
+        );
+      }
+
+      const type = response.headers?.get?.("content-type") ?? "";
+      if (type && !READABLE_TYPE.test(type)) {
+        throw new PageFindError(
+          `That URL is ${type.split(";")[0]}, not a readable page — most likely a PDF or a ` +
+            `media file. Nothing can be quoted from it here.`,
+        );
+      }
+
+      // Checked before the body is read where the server declares it, so an enormous page is
+      // refused rather than buffered. The same cap is applied to what actually arrived,
+      // because `content-length` is absent on every chunked response — and, now that this
+      // request accepts compression, because a declared length describes the compressed copy
+      // and says nothing about what it inflates to.
+      const declared = Number(response.headers?.get?.("content-length") ?? "");
+      if (Number.isFinite(declared) && declared > MAX_PAGE_BYTES) {
+        throw new PageFindError("That page is too large to read.");
+      }
+
+      const { text: body, exceeded } = await readCapped(response, MAX_PAGE_BYTES);
+      if (exceeded) {
+        throw new PageFindError("That page is too large to read.");
+      }
+      return htmlToText(body);
     }
-    return htmlToText(body);
   } catch (error) {
     if (error instanceof PageFindError) throw error;
     if (signal?.aborted) throw error;
@@ -398,6 +482,12 @@ export async function fetchPage(url, { fetchImpl = fetch, signal, timeoutMs = FE
         `The page did not respond within ${Math.round(timeoutMs / 1000)}s.`,
         { retryable: true },
       );
+    }
+    // A URL we decline to fetch at all — a private address, a non-http scheme, embedded
+    // credentials. Reported to the model as an unreadable source rather than thrown past
+    // `runFind`, and never retryable: the answer will be the same next time.
+    if (error instanceof ProbeRefused) {
+      throw new PageFindError(`That page cannot be opened: ${error.message}`);
     }
     throw new PageFindError(`Could not fetch the page: ${error.message}`, { retryable: true });
   } finally {
@@ -638,10 +728,14 @@ function shortlistFor(scored) {
  * being blended are the same ones.
  */
 export class PageCache {
-  constructor({ fetchImpl = fetch, signal, fetchPageImpl = fetchPage } = {}) {
+  constructor({ fetchImpl = fetch, signal, fetchPageImpl = fetchPage, lookupImpl } = {}) {
     this.fetchImpl = fetchImpl;
     this.signal = signal;
     this.fetchPageImpl = fetchPageImpl;
+    // Carried rather than left to default so a caller with its own resolver — a test, or a
+    // deployment that resolves through something other than the system one — reaches the
+    // address check in `fetchPage` too. Undefined means "use the real DNS lookup".
+    this.lookupImpl = lookupImpl;
     this.pages = new Map();
   }
 
@@ -656,6 +750,7 @@ export class PageCache {
         const { title, text } = await this.fetchPageImpl(url, {
           fetchImpl: this.fetchImpl,
           signal: this.signal,
+          lookupImpl: this.lookupImpl,
         });
         // Cooperative because most pages that reach this cache were never asked for: they
         // are prefetched off a search's top results while the model is still reading its
@@ -680,9 +775,9 @@ export class PageCache {
  */
 export async function findInPage(
   { url, find, claim, max_passages: maxPassages = 4 },
-  { apiKey, fetchImpl = fetch, signal, cache, embedImpl = embedTexts } = {},
+  { apiKey, fetchImpl = fetch, signal, cache, embedImpl = embedTexts, lookupImpl } = {},
 ) {
-  const pages = cache ?? new PageCache({ fetchImpl, signal });
+  const pages = cache ?? new PageCache({ fetchImpl, signal, lookupImpl });
   const page = await pages.load(url);
 
   if (page.passages.length === 0) {

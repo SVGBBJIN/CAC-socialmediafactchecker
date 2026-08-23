@@ -749,6 +749,12 @@ export async function* verifiedChat({
   fetchImpl = fetch,
   searchImpl = search,
   findImpl = findInPage,
+  // The DNS resolver `fetchPage` vets each hop's address with, injectable for the same
+  // reason `fetchImpl` is: a page fetch now checks where it is about to connect (see
+  // `fetchPage` in lib/page-find.js), and a test that stubs the network must not be made
+  // to resolve a hostname for real to reach the code it is exercising. Undefined — the
+  // default everywhere but a test — means the system resolver.
+  lookupImpl,
   signal,
   prefetchPerSearch = PREFETCH_PER_SEARCH,
   prefetchPerTurn = PREFETCH_PER_TURN,
@@ -777,7 +783,7 @@ export async function* verifiedChat({
   // One cache for the whole turn, so a second find on a page already open costs the ranking
   // and nothing else. The model is expected to come back to a good source for another claim —
   // that is the point of reading one rather than searching again.
-  const pages = new PageCache({ fetchImpl, signal });
+  const pages = new PageCache({ fetchImpl, signal, lookupImpl });
   const toolRunner = enabled
     ? makeToolRunner({
         ledger,
