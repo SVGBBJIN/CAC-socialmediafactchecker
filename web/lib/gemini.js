@@ -187,8 +187,23 @@ export function supportsThinkingBudget(model) {
   return !/(?:^|[^0-9])2\.0(?:[^0-9]|$)/.test(String(model));
 }
 
-/** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
+/**
+ * Flash 3.7 preferred, then 3.6, 3.5, 3, 2.5, 2 — full models before any Lite one, newest
+ * first within each group. `Sources/SeerCore/Gemini/GeminiModel.swift`'s
+ * `GeminiModelChain.flashPreferred` predates this chain's Lite tier and the 3.7 model;
+ * per CLAUDE.md's freeze policy this is a `web/`-only change and that gap is expected, not
+ * a bug — don't port it there.
+ *
+ * The three Lite models sit after every full model, not interleaved with same-generation
+ * ones (a `3.5-flash-lite` failure doesn't fall through to `3-flash-preview` before
+ * `3.6-flash` or `2.5-flash` have both been tried) — they're the cost/speed tier, reached
+ * only once every full model has failed or is cooling down, not a first-choice cheaper
+ * sibling of any one of them. `gemini-3.1-flash-lite` has no full, non-Lite `3.1` model
+ * anywhere in the chain — Lite-only releases happen, and `supportsThinkingBudget` below
+ * doesn't care why an ID exists, only what version number is in it.
+ */
 export const DEFAULT_MODEL_CHAIN = [
+  "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   // 3-series Flash only ships under the preview ID; there is no `gemini-3-flash`.
@@ -196,6 +211,9 @@ export const DEFAULT_MODEL_CHAIN = [
   "gemini-2.5-flash",
   // The 2-series ID is `2.0`, not `2`.
   "gemini-2.0-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash-lite",
 ];
 
 export function modelChainFromEnv(env = process.env) {
