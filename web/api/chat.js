@@ -110,6 +110,15 @@ export default async function handler(req, res) {
     // Vercel's edge buffers proxied responses without this.
     "x-accel-buffering": "no",
   });
+  // Nagle's algorithm holds a small TCP segment back, hoping to coalesce it with the next
+  // one — a reasonable default for a bulk transfer, and the wrong one for a stream whose
+  // whole point is that each `data: …\n\n` line reaches the reader as soon as it exists.
+  // `res.write` here is exactly that: single short writes, spaced out by however long the
+  // model took to produce the next token, so there is no "next write" for Nagle to
+  // coalesce this one with — only a delay waiting to see if one arrives. Off by default in
+  // Node, and off is what a chat stream wants. Undefined on some non-Node test doubles, so
+  // guarded rather than assumed.
+  res.socket?.setNoDelay?.(true);
 
   const controller = new AbortController();
   // If the user hits Stop or closes the tab, stop paying for tokens nobody will read.
