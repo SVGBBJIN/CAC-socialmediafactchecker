@@ -187,7 +187,16 @@ export function supportsThinkingBudget(model) {
   return !/(?:^|[^0-9])2\.0(?:[^0-9]|$)/.test(String(model));
 }
 
-/** Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`. */
+/**
+ * Flash 3.6 preferred, then 3.5, 3, 2.5, 2 — same order as `GeminiModelChain.flashPreferred`.
+ *
+ * The Lite variants (plus 3.7, which showed up after 3.6) are appended after the full
+ * chain rather than interleaved with their non-Lite siblings: a Lite model trades quality
+ * for cost/speed, and this app would rather fall all the way through the full-quality
+ * models first and only reach for a cheaper one once every one of those is genuinely
+ * unavailable. Newest-and-strongest-Lite first among the four, same reasoning as the rest
+ * of the chain.
+ */
 export const DEFAULT_MODEL_CHAIN = [
   "gemini-3.6-flash",
   "gemini-3.5-flash",
@@ -196,6 +205,10 @@ export const DEFAULT_MODEL_CHAIN = [
   "gemini-2.5-flash",
   // The 2-series ID is `2.0`, not `2`.
   "gemini-2.0-flash",
+  "gemini-3.7-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-2.5-flash-lite",
 ];
 
 export function modelChainFromEnv(env = process.env) {
