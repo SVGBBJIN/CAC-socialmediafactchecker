@@ -140,7 +140,7 @@ let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check
 // link has ever been checked, not only after: a pasted link is intercepted by the regex in
 // confirmAndRunCheck/normalizeLink and starts a real check instead of landing here. Not
 // persisted, same as pendingFollowup above — a reload starts the conversation over.
-let chatThread = []; // { question, answer, sources, incomplete }
+let chatThread = []; // { question, answer, sources, incomplete, durationMs }
 let pendingChat = null; // { question, error? }
 
 /* ---------------------------------------------------------------- settings */
@@ -2160,6 +2160,27 @@ function verdictHTML(entry, animate) {
 }
 
 /**
+ * "4.2s" under a minute — one decimal below 10s, since a whole-second reading feels too
+ * coarse for the common case; whole seconds above it, where a decimal stops being useful —
+ * "1m 03s" past it. `null` for anything that isn't a real elapsed time, so `durationHTML`
+ * can skip rendering rather than print "NaNs".
+ *
+ * A different shape from `formatClock` on purpose: that one is a video's own clock, read
+ * against a scrubber where M:SS is the only format a viewer expects. This is a duration
+ * with no scrubber behind it, so the coarser-grained, more colloquial reading — "4.2s"
+ * rather than "0:04" — is the one that answers "how long did that take" without making the
+ * reader do the arithmetic themselves.
+ */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+/**
  * How long a finished turn took, wall-clock — captured once by `createElapsedTicker`
  * between the request going out and the stream ending, and stored on the entry (or the
  * follow-up / chat turn) alongside the text it produced, so it survives a reload the same
@@ -2170,8 +2191,9 @@ function verdictHTML(entry, animate) {
  * was instant.
  */
 function durationHTML(ms, animate, label = "Checked in") {
-  if (!Number.isFinite(ms)) return "";
-  return `<div ${revealAttrs("check-duration", animate)}>${escapeHTML(label)} ${escapeHTML(formatClock(ms / 1000))}</div>`;
+  const duration = formatDuration(ms);
+  if (!duration) return "";
+  return `<div ${revealAttrs("check-duration", animate)}>${escapeHTML(label)} ${escapeHTML(duration)}</div>`;
 }
 
 /**
