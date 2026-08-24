@@ -110,10 +110,15 @@ actually holding the door, so treat it as required rather than optional.
 
 ```
 web/
-  public/          Front end — index.html, app.js. No key, ever.
+  public/index.html  The whole UI's markup and CSS. No key, ever.
+  public/app.js    The front end: intake, streaming, rendering, the video pane.
+  public/claims.js `[[claim: …]]` / `VERDICT:` → one block per claim. Pure, DOM-free.
+  public/timestamps.js  `[t=M:SS]` → seconds, clock text, and playback windows. Pure.
+  public/device.js Width vs. pointer capability, kept separate. Pure.
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   api/probe-link.js  Pings a pasted link so intake knows what's really there.
+  api/resolve-media.js  Resolves a TikTok/Instagram post to an MP4 the video pane can play.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
   lib/degradation.js  When to stop asking for the best model, and how the UI says so.
   lib/verified-chat.js  The fact-check turn: both research tools, system prompt, frames.
@@ -125,6 +130,7 @@ web/
   lib/find-schema.js  JSON Schema for a find, and both tool declarations together.
   lib/citations.js The ledger: every source the model may cite, numbered as retrieved.
   lib/citation-cleanup.js  Merge, dedupe, cap, renumber, and delete invented markers.
+  lib/caption-search.js  A post's caption → one speculative search, run while it downloads.
   lib/tiktok.js    TikTok link → embed page → CDN URL → the MP4 bytes.
   lib/instagram.js  Instagram link → post query → CDN URL → the MP4 bytes.
   lib/media-fetch.js  What both of those share: deadline, host allowlist, capped read.
@@ -140,6 +146,7 @@ web/
                    that could not be downloaded and whose resolve carried nothing.
   lib/gemini-files.js  Resumable upload, for clips too large to send inline.
   lib/guard.js     Passphrase check, rate limits, request validation.
+  lib/retry.js     Exponential backoff with full jitter, a per-delay cap and a budget.
   lib/static.js    Request path → file on disk, with the containment rule.
   bin/search.mjs   Run one search from the terminal, through the same code path.
   bin/find.mjs     Run one in-page find from the terminal, with both scores shown.
@@ -155,7 +162,16 @@ web/
                    which deliberately don't, and what happens when it can't help.
   test-post-preview.js  Tests for the page-preview tier: what it reads, what it refuses,
                    and the order the three metadata tiers run in.
+  test-caption-search.js  Tests for which captions earn a speculative search and what it asks.
+  test-claims.js   Tests for splitting an answer into claim blocks and reading each verdict.
+  test-timestamps.js  Tests for the `[t=…]` syntax and the playback windows it produces.
+  test-device.js   Tests for device classification, with plain objects standing in for window.
 ```
+
+Every suite in that list runs from `npm test` (515 tests as of this writing) and none of
+them touch the network or need an install. The three `public/` modules are pure and
+DOM-free precisely so they can be in that list — anything needing a browser isn't covered
+here.
 
 The browser worker itself lives outside this directory, in [`worker/`](../worker/), because
 it needs Playwright and `web/` has no dependencies and no build step. It is optional — with
@@ -414,11 +430,33 @@ spend; it does not reserve any of it for what the reader sees.
 default, 4096 out of a 16384 total, aims to leave three-quarters of the budget for what
 gets shown. It is sent only to models believed to support it (the "3" series and 2.5, not
 `gemini-2.0-flash`), matched on the version number so a new preview ID doesn't need a code
-change; if that guess is wrong for some future model, Gemini's "unknown field" 400 is
-treated the same as an unsupported model — fall through to the next one, not fail the
-turn. That guess has not been checked against a live thinking-capable response. Set
+change.
+
+**When that guess is wrong, the field is dropped and the same model is tried again — it is
+not fallen through.** Falling through was the one move guaranteed not to work:
+`supportsThinkingBudget` guesses about every model by the same version-number rule, so a
+model refusing the field is a strong signal the *next* one will refuse it too, and walking
+the chain just collected the identical 400 at every step and failed the turn. So a 400
+naming `thinkingConfig` as an unknown field retries the same model with the field removed,
+and the refusal is remembered in `thinkingConfigRefused` — per model, for the life of the
+process — so it is learned once rather than rediscovered on every request. The retry cannot
+be refused for the same reason twice, because the second attempt no longer carries the
+field; anything else that refuses it still meets the ordinary fall-through rules underneath.
+`mediaResolution` is repaired the same way, for the same reason. Set
 `THINKING_BUDGET_TOKENS=0` to turn the field off entirely rather than requesting a zero
 budget, which not every model may accept.
+
+**The rounds that still hold their tools think on a smaller budget.**
+`TOOL_ROUND_THINKING_BUDGET_TOKENS` (default 1024) applies to any round where `tools` is
+still declared — a round deciding what to look up rather than writing the verdict. Handing
+those the full 4096 is the largest avoidable wait in a video check: a thinking model given
+room to deliberate uses it, so the reader sat through thousands of tokens of invisible
+reasoning before the first search was dispatched, and again the next round. The budget is a
+ceiling rather than a target, so a round that was going to be brief costs exactly what it
+did before; what it removes is the rambling one. It never *raises*
+`THINKING_BUDGET_TOKENS` — the smaller of the two is what gets sent — and 0 means "use the
+same budget every round". The answering round, where `tools` is withdrawn, keeps the full
+budget, because that is where reasoning becomes the verdict.
 
 ## Every claim carries a citation
 
@@ -491,6 +529,34 @@ ambiguous at forty, and a number lets the reader tell slow from stuck without gu
 The model's thinking is announced but never shown. Its content is withheld on purpose —
 musings in the middle of a fact-check read as findings — but withholding it *silently* is
 what made a model that thinks for thirty seconds look like a model doing nothing.
+
+### The one search nobody asked for
+
+The first search of a check cannot start until the model has watched the clip and decided
+what to look up — so the resolve, the download, the upload and the whole of the first round
+all happen before a single source is retrieved. That is the longest stretch of the request,
+and for most of it nothing a search would interfere with is happening.
+
+The caption, though, is known much earlier: it comes back from the *resolve* step, before
+the download starts, and on a link intake already warmed it is in hand before the request
+reaches the server. On short-form political video the caption is frequently where the claim
+actually lives — the clip is B-roll — which is why the prompt already gets it as its own
+line. So `lib/caption-search.js` turns it into one ordinary `web_search`, issued while the
+bytes are still moving. The query costs nothing in wall-clock terms: it runs in time the
+request was going to spend anyway.
+
+Its results go into the same ledger, numbered the same way, and the prompt names them for
+what they are — the only sources the model will ever be handed that it did not ask for,
+worth reading and free to ignore. `captionQuery` returns `null` for most captions and that
+is the expected answer, not a failure: hashtags and emoji are stripped first, and what's
+left has to clear a word count and a character count, so "😂😂 #fyp" and "wait for it" earn
+no query. Turn the whole thing off with `CAPTION_SEARCH_ENABLED=false`.
+
+**This is not the claim-detection heuristic** described under "The audit that used to be
+here" above, and the difference is the same one that makes `[[claim: …]]` safe: this reads
+metadata the platform handed us rather than guessing at prose the model already wrote, it
+never rejects or rewrites an answer, and a bad guess costs exactly one query — which
+`cleanCitations` then drops from the source list, so it cannot even reach the reader.
 
 ### Looking everything up at once
 
@@ -751,17 +817,25 @@ looks like "search is broken" rather than "the key wasn't picked up". For the sa
 - **An invalid key is terminal.** Gemini reports it as HTTP 400 / `API_KEY_INVALID`, not
   401 — so it is matched on the message, not the status, and never falls through to the
   next model with the same dead credential.
-- **At most four rounds of tool calls per message.** Each round is a model call plus its
-  searches, so the cap bounds latency and spend at once. Past it the tools are *withdrawn*
-  rather than refused — a model told not to use a tool it can still see will often try
-  anyway; a model with no tool declared answers with what it has.
+- **At most three rounds of tool calls per message** (`MAX_TOOL_ROUNDS`). Each round is a
+  model call plus every tool call it asked for in that call, and the calls within a round
+  run at once — so a round costs about one search rather than one per claim, which is what
+  makes three enough: everything worth looking up in the first, a follow-up for the queries
+  that landed badly in the second, the answer in the third. The cap is on rounds rather than
+  searches because rounds are what cost time; each one re-sends the whole conversation,
+  video included. Past the budget the tools are *withdrawn* rather than refused — a model
+  told not to use a tool it can still see will often try anyway; a model with no tool
+  declared answers with what it has — and a model that asks anyway is told so in words
+  (`ANSWER_NOW`), because a turn that ends on an unrunnable tool call reaches the reader as
+  sources with nothing underneath them. The system prompt states the same number, so
+  changing one means changing both.
 - **The answer is never regenerated.** There is no repair round: a turn is one pass, so a
   message costs what its tool rounds cost and no more. The old citation audit could double
   that — a full second answer, for a verdict the reader had already watched arrive.
 - **A 15s ceiling on each search**, independent of the Gemini timeouts. A hung search
   otherwise holds the whole chat request open behind it.
 - **Replies are capped in tokens, not just requests in messages.** Every other cap in
-  `guard.js` bounds input; `MAX_OUTPUT_TOKENS` (default 4096) bounds the one thing that
+  `guard.js` bounds input; `MAX_OUTPUT_TOKENS` (default 16384) bounds the one thing that
   wasn't bounded at all — a single reply could otherwise run until the model stopped on
   its own, and output tokens are the expensive side of the meter. Sent as Gemini's
   `maxOutputTokens`, which arrives as `finishReason: "MAX_TOKENS"` if hit — the same
