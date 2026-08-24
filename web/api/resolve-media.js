@@ -24,6 +24,30 @@ import { hostAllowed } from "../lib/media-fetch.js";
 import { hintFromResolved } from "../lib/resolve-hint.js";
 import { authorize, config, GuardError } from "../lib/guard.js";
 
+/**
+ * Longest this route may spend resolving one post, across every retry inside it.
+ *
+ * The platform modules bound each individual *request* (`EMBED_TIMEOUT_MS`,
+ * `QUERY_TIMEOUT_MS`) and each retry *sequence* (`RESOLVE_RETRY.budgetMs`), but a share
+ * link runs two of those sequences back to back and nothing was bounding the pair. This is
+ * that outer bound.
+ *
+ * Sized against what the caller is: the video pane, filling a player the reader is looking
+ * at. Past twenty seconds they have concluded it is broken, and the pane's own fallback —
+ * showing the post as a link — is a better answer than a spinner that eventually resolves.
+ */
+const RESOLVE_BUDGET_MS = 20_000;
+
+/**
+ * Per-request timeout inside that budget, below each platform's own default.
+ *
+ * The defaults (15s for both TikTok's embed read and Instagram's post query) are sized for
+ * the fact-check path, where a slow resolve still beats no clip. Here a single request
+ * eating three quarters of the whole budget leaves no room for the retry that would have
+ * succeeded, so it is cut to give the budget somewhere to spend itself.
+ */
+const RESOLVE_TIMEOUT_MS = 8_000;
+
 function sendJSON(res, status, payload, headers = {}) {
   res.writeHead(status, { "content-type": "application/json", ...headers });
   res.end(JSON.stringify(payload));
@@ -112,8 +136,27 @@ export default async function handler(req, res) {
     }
   };
 
+  // A deadline of our own, plus the browser going away, as one signal.
+  //
+  // Neither existed before, and the gap is not small: `resolveTikTokVideo` retries under a
+  // `budgetMs` of its own, and it makes two of those calls in a row on a share link
+  // (follow the redirect, then read the embed page), so a resolve that keeps almost-failing
+  // can run for the better part of a minute. Nothing here was watching. On a serverless
+  // host that is a function instance held open for an answer nobody is waiting for — the
+  // reader gave up, or navigated away, long before it lands — and it is billed and
+  // rate-limited as if it were work.
+  //
+  // So: one budget across the whole resolve, and `res.on("close")` aborts it the moment the
+  // tab goes, exactly as /api/chat already does with its own stream. The video pane's own
+  // `/api/resolve-media` calls are already superseded by a token (see `renderVideoPane` in
+  // public/app.js), so a request whose answer has stopped mattering is a request worth
+  // stopping.
+  const controller = new AbortController();
+  const budget = setTimeout(() => controller.abort(), RESOLVE_BUDGET_MS);
+  res.on("close", () => controller.abort());
+
   try {
-    const resolved = await resolve(url);
+    const resolved = await resolve(url, { signal: controller.signal, timeoutMs: RESOLVE_TIMEOUT_MS });
 
     // A photo-mode TikTok or an Instagram carousel of stills. There is no single URL a
     // `<video>` can play, so the slides are handed back as a list and the pane renders them
@@ -163,11 +206,18 @@ export default async function handler(req, res) {
       hint: hintFromResolved({ ...resolved, mediaURL }),
     });
   } catch (error) {
+    // The reader closed the tab. There is nobody to answer and nothing to log.
+    if (res.writableEnded || !res.writable) return;
+    if (controller.signal.aborted) {
+      return sendJSON(res, 504, { error: "That post took too long to resolve." });
+    }
     if (error instanceof TikTokError || error instanceof InstagramError) {
       // A link that will never work is the caller's problem; anything else is upstream's.
       return sendJSON(res, error.kind === "notAVideo" ? 400 : 502, { error: error.message });
     }
     console.error("[resolve-media]", error);
     return sendJSON(res, 500, { error: "Could not resolve that video." });
+  } finally {
+    clearTimeout(budget);
   }
 }

@@ -20,6 +20,7 @@ import {
   isContextLimitFailure,
   isUnsupportedThinkingConfig,
   supportsThinkingBudget,
+  resetFieldSupport,
   retryAfterMs,
   REQUEST_TIMEOUT_MS,
   resolveClipParts,
@@ -76,6 +77,7 @@ import {
   checkRateLimit,
   validateMessages,
   resetRateLimits,
+  trackedClientCount,
   GuardError,
   config as guardConfig,
 } from "./lib/guard.js";
@@ -939,8 +941,9 @@ test("fall-through rules", () => {
   // A broken credential must never be spent down the chain, whichever status carries it.
   assert.equal(shouldFallThrough(400, "API key not valid. Pass a valid API key."), false);
   assert.equal(shouldFallThrough(403, "API_KEY_INVALID"), false);
-  // A guess about which models accept thinkingConfig costs a fall-through when wrong,
-  // not the whole chain.
+  // The last resort under the repair, not the first response to it: `walkChain` remembers
+  // the refusal and asks the same model again without the field, and only a *second*
+  // refusal of a request that no longer carries it reaches this rule.
   assert.equal(shouldFallThrough(400, 'Unknown name "thinkingConfig" at generation_config'), true);
 });
 
@@ -997,19 +1000,24 @@ test("thinkingBudgetTokens: 0 turns the field off rather than sending a zero bud
   assert.ok(!("thinkingConfig" in sent.generationConfig));
 });
 
-test("a model that rejects thinkingConfig outright is skipped, not fatal", async () => {
-  // The defensive fallback for `supportsThinkingBudget` guessing wrong about a given
-  // model: this app has no live confirmation either way, so a bad guess must degrade to
-  // the next model in the chain rather than take the whole turn down.
+test("a model that rejects thinkingConfig is asked again without it, not abandoned", async () => {
+  // The safety net for `supportsThinkingBudget` guessing wrong, and the shape of the net
+  // matters. Falling through to the next model was the one move guaranteed not to help:
+  // the next model is guessed about by the same version-number rule, so it refuses the
+  // same field, and one wrong guess walked the whole chain and failed the turn over a
+  // reasoning cap that was never part of what the user asked for.
+  resetFieldSupport();
   const tried = [];
+  const bodies = [];
   const frames = await collect(
     streamChat({
       apiKey: "k",
       messages: [{ role: "user", content: "hi" }],
-      models: ["gemini-3.6-flash", "gemini-3.5-flash"],
+      models: ["gemini-x9-flash", "gemini-x8-flash"],
       thinkingBudgetTokens: 4096,
-      fetchImpl: async (url) => {
+      fetchImpl: async (url, options) => {
         tried.push(url);
+        bodies.push(JSON.parse(options.body));
         if (tried.length === 1) {
           return {
             ok: false,
@@ -1026,7 +1034,71 @@ test("a model that rejects thinkingConfig outright is skipped, not fatal", async
   );
 
   assert.equal(tried.length, 2);
+  assert.ok(
+    tried[0].includes("gemini-x9-flash") && tried[1].includes("gemini-x9-flash"),
+    "the preferred model was retried, not abandoned for one it would have refused too",
+  );
+  assert.deepEqual(bodies[0].generationConfig.thinkingConfig, { thinkingBudget: 4096 });
+  assert.ok(!("thinkingConfig" in bodies[1].generationConfig), "the retry dropped the field");
   assert.equal(answerFrames(frames).at(-1).text, "answered anyway");
+  // Withdrawing a cap we chose to send is not a degradation the reader needs a banner for.
+  assert.equal(frames.find((f) => f.type === "model").degraded, false);
+
+  // The refusal is a fact about that model, not about the request, so the next turn goes
+  // out without the field rather than buying the same 400 again.
+  const second = [];
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-x9-flash"],
+      thinkingBudgetTokens: 4096,
+      fetchImpl: async (_url, options) => {
+        second.push(JSON.parse(options.body));
+        return sseResponse([frame("fine")]);
+      },
+    }),
+  );
+  assert.ok(!("thinkingConfig" in second[0].generationConfig));
+  resetFieldSupport();
+});
+
+test("one wrong guess about thinkingConfig no longer costs the whole chain", async () => {
+  // The regression this repair exists for. Every model in a chain is guessed about by the
+  // same rule, so when the guess is wrong they all refuse — and falling through meant one
+  // failed round trip per model and then a dead turn. Now the first model repairs itself
+  // and answers, and the models below it are never called at all.
+  resetFieldSupport();
+  const tried = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "hi" }],
+      models: ["gemini-y9-flash", "gemini-y8-flash", "gemini-y7-flash", "gemini-y6-flash"],
+      thinkingBudgetTokens: 4096,
+      fetchImpl: async (url, options) => {
+        tried.push(url);
+        // Every model in this chain refuses the field, which is the realistic shape of a
+        // wrong guess: it is wrong about a version family, not about one ID.
+        if (JSON.parse(options.body).generationConfig.thinkingConfig) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () =>
+              JSON.stringify({
+                error: { message: 'Unknown name "thinkingConfig" at generation_config' },
+              }),
+          };
+        }
+        return sseResponse([frame("answered")]);
+      },
+    }),
+  );
+
+  assert.equal(tried.length, 2, "one refusal and one repair, not one failure per model");
+  assert.ok(tried.every((url) => url.includes("gemini-y9-flash")), "it never left the first model");
+  assert.equal(answerFrames(frames).at(-1).text, "answered");
+  resetFieldSupport();
 });
 
 /* ---------------- what the reader waits through ---------------- */
@@ -1489,6 +1561,41 @@ test("the rate limiter reports how much of the day is spent", () => {
   const first = checkRateLimit("budget-ip", { ...limits, perMinute: 100, perDay: 4 }, now);
   assert.equal(first.pressure, 0.25);
   assert.equal(first.remainingToday, 3);
+});
+
+test("a flood of spoofed client keys cannot grow the rate limiter without bound", () => {
+  // `clientKey` reads `x-forwarded-for`, which its own note calls spoofable, so a caller
+  // rotating that header mints unlimited distinct keys. Every one is fresh, so an
+  // expiry-based sweep can never remove any of them: before this was a real LRU the map
+  // grew without limit *and* every later request re-scanned all of it, which is a way to
+  // spend the whole process's CPU without ever tripping a limit.
+  resetRateLimits();
+  const now = Date.now();
+  const wide = { ...limits, perMinute: 1e9, perDay: 1e9 };
+  for (let i = 0; i < 12_000; i += 1) checkRateLimit(`spoofed-${i}`, wide, now);
+
+  // The bound is `MAX_TRACKED_CLIENTS` (5000) and it holds however many keys arrive.
+  assert.ok(trackedClientCount() <= 5000, `map grew to ${trackedClientCount()}`);
+
+  // And the eviction is by recency, so the keys kept are the ones that arrived last.
+  const recent = checkRateLimit("spoofed-11999", wide, now);
+  assert.equal(recent.remainingToday, wide.perDay - 2, "the newest key is still being counted");
+  resetRateLimits();
+});
+
+test("a client's own counter survives its neighbours being evicted", () => {
+  resetRateLimits();
+  const now = Date.now();
+  const wide = { ...limits, perMinute: 1e9, perDay: 1e9 };
+  checkRateLimit("regular", wide, now);
+  checkRateLimit("regular", wide, now);
+  // Push the map past the bound with traffic that is nothing to do with this client, then
+  // come back. `regular` is re-inserted on every touch, so it is not the oldest and is not
+  // what gets dropped.
+  for (let i = 0; i < 4_000; i += 1) checkRateLimit(`other-${i}`, wide, now);
+  const third = checkRateLimit("regular", wide, now);
+  assert.equal(third.remainingToday, wide.perDay - 3, "two earlier hits are still remembered");
+  resetRateLimits();
 });
 
 test("the config snapshot names both models, and stays quiet when nothing is wrong", () => {
