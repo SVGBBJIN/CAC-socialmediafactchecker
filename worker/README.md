@@ -12,21 +12,28 @@ worker configured, `web/` behaves exactly as it did before this existed.
 instagram.com's own client runs. Both are anonymous HTTP, both need no credential, and both
 are the right default — that is what makes a reel cost what a TikTok costs.
 
-They fail in three ways that have nothing to do with the post being unavailable:
+They fail in four ways that have nothing to do with the post being unavailable:
 
 | Failure | What it means | Can a browser get past it? |
 |---|---|---|
 | `rateLimited` | 429 — Instagram's normal answer to anonymous datacenter traffic | Yes, with a real session |
 | `forbidden` | The endpoint declining us specifically | Usually |
 | `malformed` | The payload shape moved; our parser is behind | Yes — the *page* is fine |
+| `upstream` | The catch-all: the platform answered, but not with anything usable | Often — it is the default kind, so it covers whatever hasn't been classified yet |
 | `unavailable` | Private, deleted, region-blocked | **No** — a browser sees the same nothing |
 | `notAVideo` | Never a post | **No** |
 | `tooLarge` | About the file we already found | **No** |
 | `expired` | Signed URL aged out | **No** — already repaired over plain HTTP, more cheaply |
 
-Only the first three escalate. The set lives in `ESCALATED_KINDS` in
+Only the first four escalate. The set lives in `ESCALATED_KINDS` in
 `web/lib/browser-resolve.js`, and a kind that isn't in it never spends browser time — a new
 failure mode has to be classified deliberately before it can start costing seconds.
+
+`upstream` is worth reading twice, because it is the one that isn't a diagnosis. It is the
+default `kind` on both `TikTokError` and `InstagramError`, so it means "something went wrong
+at the platform and nothing narrowed it further" — which is exactly the population a real
+browser is most likely to succeed on, and also the one most likely to waste a resolve. That
+is the trade the clip budget bounds rather than the classifier.
 
 ## What this is not
 

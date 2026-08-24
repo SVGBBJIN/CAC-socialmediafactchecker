@@ -17,8 +17,10 @@ import { authorize, config, validateMessages, GuardError } from "../lib/guard.js
 
 // `SYSTEM_PROMPT` still overrides, but the default is the fact-checking prompt in
 // lib/verified-chat.js — the one that tells the model its facts come from `web_search`
-// and that its answer is audited against what that tool returned. Overriding it replaces
-// the instruction, not the enforcement: the audit runs either way.
+// and that a marker is only ever an address into the citation ledger. Overriding it
+// replaces the instruction, not the enforcement: `cleanCitations` still deletes every
+// marker the ledger can't resolve, whatever prompt produced it. (It does not reject or
+// regenerate an answer — that auditor was removed; see lib/citations.js.)
 const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || FACT_CHECK_SYSTEM_PROMPT;
 
 // How long the stream may go without writing before we send an SSE comment to keep it

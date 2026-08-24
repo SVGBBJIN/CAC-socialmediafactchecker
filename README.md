@@ -20,8 +20,11 @@ either" — and every time it went unanswered, the same thing happened: a fix la
 `web/`, and `Sources/` either got the same fix rediscovered from scratch later, worse the
 first time, or never got it at all.
 
-- **The web side is where fixes land.** Over three months: 42 commits to `web/`, 12 to
-  `Sources/`.
+- **The web side is where fixes land.** Over the repository's whole history to date
+  (2026-07-27 → 2026-08-23): 97 commits touching `web/`, 19 touching `Sources/`. The gap has
+  widened since the freeze was decided, which is the freeze working rather than failing —
+  `Sources/` was last touched on 2026-08-06, and by a layout change to
+  `LibraryConceptView.swift`, the one carve-out the policy allows.
 - **Fixes got made twice.** The Files API poll ramp was written for `web/` on 2026-07-30
   and rediscovered from scratch for Swift on 2026-08-02 — initially in the worse shape of
   the two, bounding the wait by a poll count where the web version had already worked out
@@ -38,7 +41,7 @@ first time, or never got it at all.
   is a bug to report or a known, accepted property of frozen code.
 
 **The decision: `web/` is canonical, full stop, and `Sources/` is frozen rather than a
-second target for incremental parity patches.** Three months of evidence all point the
+second target for incremental parity patches.** Every line of evidence above points the
 same direction, and continuing to patch `Sources/` piecemeal every time an audit finds the
 next divergence is the pattern that produced this section in the first place. Concretely,
 frozen means:
@@ -293,7 +296,7 @@ route that holds the key. No build step, no dependencies.
 ```bash
 cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
 cd web && npm run dev                  # → http://127.0.0.1:3000
-npm test                               # 361 tests, no network
+npm test                               # 515 tests, no network
 ```
 
 Unlike the iOS path, the key here never reaches the client at all — there is a server to
