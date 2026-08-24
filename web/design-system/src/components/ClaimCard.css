@@ -1,0 +1,37 @@
+/* Ported from web/public/index.html — the split-pane claim card: eyebrow, title, analysis
+   text, verdict badge, sources. */
+.claim-card {
+  flex: 1 1 auto;
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.claim-eyebrow {
+  display: inline-flex; align-items: center;
+  align-self: flex-start;
+  margin-bottom: 10px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-family: var(--font-mono); font-size: 10.5px;
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.claim-eyebrow.pending { color: var(--accent); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
+
+.claim-title {
+  font-family: var(--font-display); font-size: 15.5px; font-weight: 600; color: var(--ink);
+  line-height: 1.4; margin: 0 0 10px; word-break: break-word;
+}
+
+.claim-text {
+  font-family: var(--font-display); font-size: 16.5px; line-height: 1.55; color: var(--ink);
+  margin: 0 0 16px;
+}
+.claim-text code { font-family: var(--font-mono); font-size: 0.85em; background: var(--surface-raised); padding: 0.1em 0.35em; border-radius: 4px; }
+.claim-text a.citation { color: var(--accent); text-decoration: none; }
+.claim-text a.citation:hover { text-decoration: underline; }
