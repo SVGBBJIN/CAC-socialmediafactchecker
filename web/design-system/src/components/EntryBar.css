@@ -1,0 +1,39 @@
+/* Ported from web/public/index.html — the link-entry composer row. */
+.entry-bar {
+  display: flex; gap: 8px;
+  padding: 18px 24px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.entry-bar input {
+  flex: 1;
+  padding: 11px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+}
+.entry-bar input::placeholder { color: #616977; }
+.entry-bar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.entry-bar button {
+  flex: 0 0 auto; width: 42px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 9px;
+  border: 1px solid var(--accent);
+  background: rgba(79,209,197,0.12);
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.entry-bar button:hover { background: rgba(79,209,197,0.2); }
+.entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.entry-bar button:disabled { opacity: 0.5; cursor: default; }
+.check-btn-icon { display: block; width: 18px; height: 18px; }
+.check-btn-label {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+}

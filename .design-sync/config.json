@@ -1,0 +1,12 @@
+{
+  "projectId": "9310f352-c8b4-4404-9a33-59321721029b",
+  "shape": "package",
+  "pkg": "@seer/design-system",
+  "globalName": "SeerDS",
+  "cssEntry": "dist/styles.css",
+  "readmeHeader": ".design-sync/conventions.md",
+  "overrides": {
+    "ClaimCard": { "cardMode": "column" },
+    "EntryBar": { "cardMode": "column" }
+  }
+}

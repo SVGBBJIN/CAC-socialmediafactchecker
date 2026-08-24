@@ -1,0 +1,11 @@
+/* Seer design system — root stylesheet. Import this once; every component's CSS is
+   reachable from here so a design built with the bundle picks it all up. */
+@import "./tokens.css";
+@import "./components/Sidebar.css";
+@import "./components/LibraryItem.css";
+@import "./components/EntryBar.css";
+@import "./components/VerdictBadge.css";
+@import "./components/TimestampChip.css";
+@import "./components/SourcePill.css";
+@import "./components/ClaimCard.css";
+@import "./components/Button.css";

@@ -1,0 +1,72 @@
+/* Ported from web/public/index.html — sidebar, collapsed rail, new-check button, search. */
+.sidebar {
+  width: 270px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px;
+  transition: width 0.18s ease, padding 0.18s ease;
+}
+
+.sidebar-header {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 16px; padding: 0 4px;
+}
+.sidebar-header .mark { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
+.sidebar-header .mark svg { width: 100%; height: 100%; }
+.sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); }
+
+.sidebar[data-collapsed="true"] {
+  width: 60px;
+  padding: 18px 9px;
+}
+.sidebar[data-collapsed="true"] .sidebar-header {
+  flex-direction: column;
+  gap: 10px;
+}
+.sidebar[data-collapsed="true"] .wordmark,
+.sidebar[data-collapsed="true"] .new-check-label,
+.sidebar[data-collapsed="true"] .search,
+.sidebar[data-collapsed="true"] .lib-list {
+  display: none;
+}
+.sidebar[data-collapsed="true"] .new-check { justify-content: center; padding: 10px; }
+
+.new-check {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
+.new-check:hover { border-color: var(--accent); color: var(--accent); }
+.new-check:hover svg { color: var(--accent); }
+.new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.new-check:disabled { opacity: 0.5; cursor: default; }
+
+.search {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--ink-dim);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  margin-bottom: 14px;
+}
+.search::placeholder { color: #616977; }
+.search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
+.lib-empty { font-size: 12px; color: var(--muted); padding: 10px; }

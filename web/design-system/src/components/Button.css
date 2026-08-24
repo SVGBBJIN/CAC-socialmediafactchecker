@@ -1,0 +1,15 @@
+/* Ported from web/public/index.html — the retry-button treatment reused wherever a plain
+   secondary action button appears outside the sidebar's own .new-check. */
+.retry-button {
+  padding: 8px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.retry-button:hover { border-color: var(--accent); color: var(--accent); }
+.retry-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.retry-button:disabled { opacity: 0.5; cursor: default; }

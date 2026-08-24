@@ -1,0 +1,12 @@
+/* Ported from web/public/index.html — the closed four-verdict vocabulary badge. */
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.badge {
+  display: inline-flex; align-items: center;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-family: var(--font-body); font-size: 12px; font-weight: 600;
+}
+.badge.verdict.bad   { background: rgba(193,89,79,0.15);  color: var(--bad);   border: 1px solid rgba(193,89,79,0.35); }
+.badge.verdict.warn  { background: rgba(214,168,74,0.15); color: var(--warn);  border: 1px solid rgba(214,168,74,0.35); }
+.badge.verdict.good  { background: rgba(111,169,138,0.15);color: var(--good);  border: 1px solid rgba(111,169,138,0.35); }
+.badge.verdict.muted { background: rgba(138,147,163,0.15);color: var(--muted); border: 1px solid rgba(138,147,163,0.3); }
