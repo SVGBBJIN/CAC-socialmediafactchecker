@@ -101,6 +101,7 @@ const el = {
   settingReducedMotion: document.getElementById("setting-reduced-motion"),
   settingHighContrast: document.getElementById("setting-high-contrast"),
   settingFontSize: document.getElementById("setting-font-size"),
+  settingTheme: document.getElementById("setting-theme"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
   searchStatus: document.getElementById("searchStatus"),
   imageBtn: document.getElementById("imageBtn"),
@@ -147,6 +148,7 @@ let pendingChat = null; // { question, error? }
 
 const SETTINGS_KEY = "seer.settings.v1";
 const DEFAULT_SETTINGS = {
+  theme: "dark", // "dark" | "light"
   reducedMotion: false,
   highContrast: false,
   fontSize: "normal", // "normal" | "large"
@@ -179,6 +181,7 @@ let serverConfig = null; // last /api/config response, so the settings dialog ca
  * key off them. Called once at startup and again on every settings change. */
 function applySettings() {
   const root = document.documentElement;
+  setAttrIf(root, "data-theme", settings.theme === "light", "light");
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
@@ -2968,11 +2971,18 @@ function updateFontSizeButtons() {
   });
 }
 
+function updateThemeButtons() {
+  el.settingTheme.querySelectorAll("button[data-value]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === settings.theme);
+  });
+}
+
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
+  updateThemeButtons();
   renderSearchStatus();
   el.settingsDialog.showModal();
 }
@@ -3290,6 +3300,14 @@ el.settingFontSize.addEventListener("click", (event) => {
   persistSettings();
   applySettings();
   updateFontSizeButtons();
+});
+el.settingTheme.addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-value]");
+  if (!btn) return;
+  settings.theme = btn.dataset.value;
+  persistSettings();
+  applySettings();
+  updateThemeButtons();
 });
 el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);

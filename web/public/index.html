@@ -21,6 +21,9 @@
     --ink-dim: #A9AFBB;
     --muted: #8A93A3;
     --accent: #4FD1C5;
+    /* Secondary accent — violet, used sparingly (claim-card top edge, iris blades) so the
+       palette reads as considered, not a second brand color competing with teal. */
+    --accent-2: #9C8CF0;
     --good: #6FA98A;
     --warn: #D6A84A;
     --bad: #C1594F;
@@ -28,6 +31,26 @@
     --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
     --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
     --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  /* Light theme — set by applySettings via settings.theme; see the settings dialog's
+     Theme row. Not a flat inversion of the dark palette: surfaces are warm off-white and
+     accent/verdict hues are darkened from their dark-mode values to hold contrast. */
+  [data-theme="light"] {
+    --bg: #F6F4EF;
+    --surface: #FFFFFF;
+    --surface-raised: #EFEBE2;
+    --border: #DDD7C8;
+
+    --ink: #1C1B18;
+    --ink-dim: #55524A;
+    --muted: #857F71;
+
+    --accent: #1C8C81;
+    --accent-2: #6952C4;
+    --good: #3F7A57;
+    --warn: #966327;
+    --bad: #A6402F;
   }
 
   * { box-sizing: border-box; }
@@ -40,6 +63,13 @@
     background: #0A0C10;
     background-image: radial-gradient(circle at 50% 0%, #171B22 0%, #0A0C10 60%);
     font-family: var(--font-body);
+  }
+  /* Light theme's page background isn't a token in tokens.css (the gradient there is
+     dark-only) — kept in the same warm-off-white register as --bg rather than inverting
+     the dark radial gradient, which would just look muddy. */
+  [data-theme="light"] body {
+    background: var(--bg);
+    background-image: radial-gradient(circle at 50% 0%, #FFFFFF 0%, var(--bg) 60%);
   }
 
   .app { flex: 1; display: flex; min-height: 0; }
@@ -505,10 +535,21 @@
        stacked block inside a flex column, so nothing else about the card's layout changes. */
     flex: 1 1 auto;
     display: flex; flex-direction: column;
+    position: relative;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 14px;
     padding: 20px;
+    overflow: hidden;
+  }
+  /* Top-edge accent bar — teal into the secondary violet accent, the one place accent-2
+     appears outside the loading iris. */
+  .claim-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
   }
 
   /* ---------- Claim skeleton (loading grid) ---------- */
@@ -560,6 +601,7 @@
     opacity: 0.85;
     animation: blade-breathe 2.6s ease-in-out infinite;
   }
+  .blade:nth-child(even) { fill: var(--accent-2); }
   .blade:nth-child(1) { animation-delay: 0s; }
   .blade:nth-child(2) { animation-delay: -0.43s; }
   .blade:nth-child(3) { animation-delay: -0.86s; }
@@ -1551,6 +1593,17 @@
   <dialog class="passphrase settings-dialog" id="settings-dialog">
     <form method="dialog" id="settings-form">
       <h2>Settings</h2>
+
+      <div class="settings-section">
+        <h3>Appearance</h3>
+        <div class="settings-row">
+          <div class="settings-row-label">Theme</div>
+          <div class="seg-control" id="setting-theme" role="group" aria-label="Theme">
+            <button type="button" data-value="dark">Dark</button>
+            <button type="button" data-value="light">Light</button>
+          </div>
+        </div>
+      </div>
 
       <div class="settings-section">
         <h3>Accessibility</h3>
