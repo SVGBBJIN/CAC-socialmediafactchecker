@@ -2236,8 +2236,11 @@ function sourcePillHTML(s) {
   }</a>`;
 }
 
-function sourceExpandItemHTML(s) {
-  return `<a class="source-expand-item" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${sourceDetailHTML(s)}</a>`;
+function sourceExpandItemHTML(s, index) {
+  // A quick stagger down the list rather than the whole panel arriving as one flat block —
+  // capped so a long "+N more" list doesn't leave the last rows waiting a visible beat.
+  const delay = Math.min(index * 0.03, 0.18);
+  return `<a class="source-expand-item" style="--item-delay: ${delay}s" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${sourceDetailHTML(s)}</a>`;
 }
 
 /** Keyed store backing `collapseSourcePillsOverflow`: each `.source-pills` wrapper gets a
@@ -3111,6 +3114,19 @@ function setListening(on) {
   el.checkBtn.hidden = on;
   el.listeningWave.hidden = !on;
   el.listeningLabel.hidden = !on;
+  if (on) {
+    // Same double-rAF-then-`.in` shape as revealIn: unhiding alone would just pop the row
+    // in at full opacity, so the fade-up needs a frame where the element exists at its
+    // resting (opacity: 0) style before `.in` gives the transition something to animate to.
+    el.listeningWave.classList.remove("in");
+    el.listeningLabel.classList.remove("in");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        el.listeningWave.classList.add("in");
+        el.listeningLabel.classList.add("in");
+      });
+    });
+  }
 }
 
 /** Wires up the mic button if the browser has a speech-recognition API, otherwise hides
