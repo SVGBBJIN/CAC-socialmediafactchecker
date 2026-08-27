@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not found — TRASE</title>
+<!-- Ported from the TRASE Design System's cards/Screens-404.html — same tokens and iris
+     mark as the app itself (see public/index.html), just inlined rather than shared,
+     since this page has to stand on its own: it's what a broken/typoed link or a request
+     for a page that's moved lands on, from server.js's 404 branch in serveStatic. -->
+<style>
+  :root {
+    --bg: #12151A;
+    --surface: #1B1F26;
+    --border: #2A2F39;
+    --ink: #F0EDE6;
+    --ink-dim: #A9AFBB;
+    --muted: #8A93A3;
+    --accent: #4FD1C5;
+    --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #0A0C10;
+    background-image: radial-gradient(circle at 50% 0%, #171B22 0%, #0A0C10 60%);
+    font-family: var(--font-body);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .wrap {
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    gap: 14px; max-width: 360px; padding: 24px;
+  }
+  .iris-wrap { width: 72px; height: 72px; opacity: 0.7; color: var(--muted); }
+  .iris-wrap svg { width: 100%; height: 100%; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  h1 { font-family: var(--font-display); font-size: 26px; font-weight: 600; color: var(--ink); margin: 0; line-height: 1.3; }
+  p { font-size: 13.5px; color: var(--ink-dim); line-height: 1.6; margin: 0; }
+  a.back {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 8px; padding: 9px 16px;
+    border-radius: 9px; border: 1px solid var(--accent);
+    background: rgba(79,209,197,0.12); color: var(--accent);
+    font-size: 13px; font-weight: 600; text-decoration: none;
+    transition: background 0.15s ease;
+  }
+  a.back:hover { background: rgba(79,209,197,0.2); }
+  a.back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  a.back svg { width: 14px; height: 14px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="iris-wrap">
+      <svg viewBox="0 0 100 100">
+        <g>
+          <rect fill="currentColor" x="46" y="10" width="8" height="34" rx="4" transform-origin="50px 50px" transform="rotate(0)"/>
+          <rect fill="currentColor" x="46" y="10" width="8" height="34" rx="4" transform-origin="50px 50px" transform="rotate(60)"/>
+          <rect fill="currentColor" x="46" y="10" width="8" height="34" rx="4" transform-origin="50px 50px" transform="rotate(120)"/>
+          <rect fill="currentColor" x="46" y="10" width="8" height="34" rx="4" transform-origin="50px 50px" transform="rotate(180)"/>
+          <rect fill="currentColor" x="46" y="10" width="8" height="34" rx="4" transform-origin="50px 50px" transform="rotate(240)"/>
+          <rect fill="currentColor" x="46" y="10" width="8" height="34" rx="4" transform-origin="50px 50px" transform="rotate(300)"/>
+        </g>
+      </svg>
+    </div>
+    <span class="eyebrow">Error 404</span>
+    <h1>Nothing here checks out.</h1>
+    <p>The page you're looking for doesn't exist, or the link has moved. Try starting a new check instead.</p>
+    <a class="back" href="/">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M11 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Back to TRASE
+    </a>
+  </div>
+</body>
+</html>

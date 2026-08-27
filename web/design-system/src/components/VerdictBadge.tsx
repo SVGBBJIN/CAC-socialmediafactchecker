@@ -11,6 +11,16 @@ const VERDICTS: Record<VerdictKey, { label: string; css: "bad" | "warn" | "good"
   insufficient: { label: "Insufficient evidence", css: "muted" },
 };
 
+/** One glyph per verdict color, not per verdict key — `v.css` is already the axis
+ * everything else (background, border, text color) keys off. Decorative; the badge's own
+ * text is what a screen reader announces. */
+const BADGE_ICONS: Record<"bad" | "warn" | "good" | "muted", JSX.Element> = {
+  bad: <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" fill="none" />,
+  warn: <path d="M12 4l9 16H3z M12 10v4 M12 17.2v.1" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />,
+  good: <path d="M4 12.5l5 5L20 6" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" fill="none" />,
+  muted: <path d="M9 9a3 3 0 116 0c0 2-3 2.5-3 5 M12 17.5v.1" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" fill="none" />,
+};
+
 export interface VerdictBadgeProps {
   /** Which of the four closed verdicts to render. */
   verdict: VerdictKey;
@@ -25,7 +35,10 @@ export function VerdictBadge({ verdict }: VerdictBadgeProps) {
   const v = VERDICTS[verdict];
   return (
     <div className="badges">
-      <span className={`badge verdict ${v.css}`}>{v.label}</span>
+      <span className={`badge verdict ${v.css}`}>
+        <svg className="badge-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">{BADGE_ICONS[v.css]}</svg>
+        {v.label}
+      </span>
     </div>
   );
 }
