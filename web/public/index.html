@@ -92,7 +92,17 @@
   }
   .sidebar-header .mark { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
   .sidebar-header .mark svg { width: 100%; height: 100%; }
-  .sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); }
+  /* `margin-left: auto` used to live on `.settings-btn` itself so it would push whichever
+     button came right after the wordmark to the far edge. With three candidate buttons in
+     this row (account, settings, collapse) — account hidden unless signed in — every
+     *visible* one of them still carried that same auto margin, and flexbox splits a row's
+     free space evenly across every auto margin present, not just the first: the icons
+     ended up spaced apart from each other instead of packed together at the right, with a
+     gap that grew or shrank depending on which of the three happened to be visible. Parking
+     the single auto margin on the wordmark instead reserves all the free space right after
+     it, so every button downstream of it — however many are actually visible — sits packed
+     together at the row's trailing edge, `gap` apart, with nothing to fight over. */
+  .sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); margin-right: auto; }
 
   /* ---------- Collapsed rail (desktop/tablet only) ---------- */
   /* `data-sidebar="collapsed"` on <html>, set by applySettings from
@@ -122,7 +132,6 @@
     [data-sidebar="collapsed"] .lib-list {
       display: none;
     }
-    [data-sidebar="collapsed"] .settings-btn { margin-left: 0; }
     [data-sidebar="collapsed"] .new-check { justify-content: center; padding: 10px; }
     [data-sidebar="collapsed"] .sidebar-collapse-btn svg { transform: rotate(180deg); }
   }
@@ -299,6 +308,33 @@
     width: 34px; height: 34px; color: rgba(240,237,230,0.55);
   }
 
+  /* `#fullscreenBtn` (below) puts `.video-thumb` itself into the fullscreen top layer via
+     `requestFullscreen()`. The base rule's height comes from `flex: 1 1 0` against
+     `.video-pane`'s stretched flex height — a relationship that only exists inside
+     `.content-grid`'s layout, which the element is lifted out of the moment it enters the
+     top layer. Nothing then gives it a height: `aspect-ratio: 9/16` derives *width* from a
+     height that is itself `auto`, i.e. from content, so the box collapsed to whatever its
+     children's intrinsic size was — a small letterboxed strip floating in the middle of an
+     otherwise black screen, not an actual fullscreen player. `width`/`height: 100vw`/`100vh`
+     replaces both the derived aspect ratio and the flex sizing with the one thing that
+     still applies in the top layer: fill the viewport, same as the UA stylesheet already
+     does for the element's own `position`. `.video-media`'s `object-fit: contain` (unchanged)
+     still letterboxes a 9:16 clip inside that 16:9-or-whatever viewport correctly. */
+  .video-thumb:fullscreen {
+    width: 100vw; height: 100vh;
+    max-width: 100vw;
+    aspect-ratio: auto;
+    margin: 0;
+    border-radius: 0;
+  }
+  .video-thumb:-webkit-full-screen {
+    width: 100vw; height: 100vh;
+    max-width: 100vw;
+    aspect-ratio: auto;
+    margin: 0;
+    border-radius: 0;
+  }
+
   /* ---------- Custom player chrome ---------- */
   /* Replaces the `<video>` element's native `controls` (removed from the markup): just
      unmute and fullscreen, floated over the top-right corner. Play/pause stays a tap on
@@ -458,7 +494,39 @@
      video pane's own height and therefore its width, since the video derives width from
      height — see `.video-thumb`) taller every time the answer grew, instead of scrolling
      in place. That was the video player visibly resizing itself as an answer streamed in. */
+  /* Flex child of `.content-grid` in `.claims-pane`'s place now — see `#claimsScrollHint`'s
+     comment for why the pane needed a wrapper at all. Otherwise a pass-through box: same
+     `flex`/`min-width`/`min-height` `.claims-pane` itself used to carry directly. */
+  .claims-pane-wrap { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; display: flex; }
   .claims-pane { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+
+  /* The down-arrow cue that a multi-claim grid has more than the ~four rows currently in
+     view — `updateClaimsScrollHint` (app.js) toggles `[hidden]` from the pane's own scroll
+     position, on every render and on scroll/resize. `position: absolute` against
+     `.claims-pane-wrap`'s `position: relative` (not the pane itself, which scrolls) is what
+     keeps it pinned to the visible bottom edge instead of drifting off with the content as
+     the reader scrolls down to meet it. */
+  .claims-scroll-hint {
+    position: absolute; left: 50%; bottom: 14px;
+    transform: translateX(-50%);
+    display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.28);
+    animation: claims-scroll-hint-bob 1.6s ease-in-out infinite;
+  }
+  .claims-scroll-hint svg { width: 18px; height: 18px; }
+  .claims-scroll-hint:hover { border-color: var(--accent); }
+  .claims-scroll-hint:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @keyframes claims-scroll-hint-bob {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50%      { transform: translateX(-50%) translateY(4px); }
+  }
+  [data-motion="reduced"] .claims-scroll-hint { animation: none; }
 
   /* One box per claim, filling the pane instead of stacking past it — a grid variant of
      the pane above, stamped on by `setClaimsGridMode` (app.js) whenever there's a set of
@@ -474,16 +542,21 @@
     .claims-pane.claim-grid {
       display: grid;
       grid-template-columns: repeat(var(--claim-cols, 2), 1fr);
-      grid-auto-rows: 1fr;
+      /* `minmax(220px, 1fr)` rather than a bare `1fr`: with up to two rows (four claims,
+         `claimGridColumns`'s cap) the `1fr` half still evenly divides the pane's full
+         stretched height between them, same as before. A third row past that no longer has
+         room to divide into — a bare `1fr` would have shrunk every row instead, cramming
+         claim five and six into a sliver alongside the first four. The `220px` floor holds
+         each row to a readable minimum instead, so the grid grows *past* the pane's height
+         and this rule's own `overflow-y: auto` scrolls to it — "about four visible, the
+         rest a scroll away" instead of every row shrinking to fit. */
+      grid-auto-rows: minmax(220px, 1fr);
       gap: 12px;
-      /* Every box gets its own scroll instead (see `.claim-pane` below) — the one that's
-         taller than its row (usually the last, carrying the sources/thread footer) scrolls
-         in place rather than growing the row and pushing the rest of the grid off screen. */
-      overflow-y: hidden;
+      overflow-y: auto;
     }
     /* The loading variant reserves an `auto`-height first row for `claimGridStatusHTML`'s
-       status strip; `grid-auto-rows: 1fr` above still governs every claim-box row after it.
-       The finished result has no such row — every cell there is a claim. */
+       status strip; `grid-auto-rows` above still governs every claim-box row after it. The
+       finished result has no such row — every cell there is a claim. */
     .claims-pane.claim-grid.claim-grid-loading { grid-template-rows: auto; }
     .claims-pane.claim-grid .claim-pane {
       /* A grid item's default `min-height` is `auto` — the same trap a flex item's is (see
@@ -1026,7 +1099,7 @@
   /* ---------- Settings ---------- */
   .settings-btn {
     display: flex; align-items: center; justify-content: center;
-    width: 26px; height: 26px; margin-left: auto;
+    width: 26px; height: 26px;
     border-radius: 7px; border: 1px solid transparent;
     background: transparent; color: var(--ink-dim); cursor: pointer;
   }
@@ -1036,6 +1109,34 @@
 
   .settings-dialog { width: min(440px, 92vw); max-height: 82vh; overflow-y: auto; padding: 22px; }
   .settings-dialog .actions { margin-top: 18px; }
+
+  /* Settings is the one dialog long enough — theme, accessibility, search status, a
+     multi-line custom-instructions field — to want the whole viewport rather than a
+     centered card, so it gets its own full-bleed treatment instead of `.settings-dialog`'s
+     440px box. `inset: 0; margin: 0` on the `<dialog>` itself (already `position: fixed`
+     from the UA stylesheet while open) is what makes it fill the screen; the content is
+     then re-centered to a readable column width inside that via `#settings-form`, same as
+     any other full-width page. */
+  .settings-dialog.settings-dialog-full {
+    width: 100vw; height: 100vh;
+    max-width: 100vw; max-height: 100vh;
+    inset: 0; margin: 0;
+    border-radius: 0;
+    padding: 0;
+    display: flex;
+  }
+  .settings-dialog-full #settings-form {
+    width: min(560px, 100%);
+    margin: 0 auto;
+    padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
+  .settings-page-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 6px;
+  }
+  .settings-page-header h2 { margin: 0; }
+  .settings-page-header .settings-btn { width: 30px; height: 30px; flex-shrink: 0; }
 
   .settings-section { padding: 14px 0; border-top: 1px solid var(--border); }
   .settings-section:first-of-type { border-top: none; padding-top: 4px; }
@@ -1260,7 +1361,9 @@
     background: var(--surface);
     flex-shrink: 0;
   }
-  .topbar .wordmark { font-family: var(--font-display); font-size: 16px; color: var(--ink); }
+  /* Same fix as `.sidebar-header .wordmark` above, for the phone topbar's own
+     account/settings pair. */
+  .topbar .wordmark { font-family: var(--font-display); font-size: 16px; color: var(--ink); margin-right: auto; }
   .topbar .mark { width: 17px; height: 17px; color: var(--accent); display: flex; }
   .topbar .mark svg { width: 100%; height: 100%; }
   .drawer-toggle {
@@ -1450,6 +1553,11 @@
       gap: 0; padding: 0;
       background: transparent;
     }
+    /* Unlike the base rule, the wrap must NOT grow to fill `.content-grid`'s column here:
+       `.claims-pane` below caps itself at `max-height: 55vh` so the sheet stays anchored to
+       the bottom with video showing through above it (`justify-content: flex-end` on
+       `.content-grid` needs the leftover space that a growing wrap would otherwise eat). */
+    .claims-pane-wrap { flex: 0 1 auto; }
     .claims-pane {
       /* Capped a bit below the old 62vh: at 62vh, a long answer's sheet and this bar's
          own frosted floor together could leave almost nothing of the video actually
@@ -1771,7 +1879,14 @@
           <a class="video-link" id="videoLink" href="#" target="_blank" rel="noopener noreferrer"></a>
         </div>
 
-        <div class="claims-pane" id="claimsPane"></div>
+        <!-- `position: relative` anchor for `#claimsScrollHint` below — see its own
+             comment for why it needs one. -->
+        <div class="claims-pane-wrap">
+          <div class="claims-pane" id="claimsPane"></div>
+          <button type="button" class="claims-scroll-hint" id="claimsScrollHint" aria-label="Scroll down for more claims" title="More claims below" hidden>
+            <svg viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
       </div>
 
       <div class="entry-bar">
@@ -1850,9 +1965,14 @@
     </form>
   </dialog>
 
-  <dialog class="passphrase settings-dialog" id="settings-dialog">
+  <dialog class="passphrase settings-dialog settings-dialog-full" id="settings-dialog">
     <form method="dialog" id="settings-form">
-      <h2>Settings</h2>
+      <div class="settings-page-header">
+        <h2>Settings</h2>
+        <button type="submit" class="settings-btn" id="settingsCloseBtn" aria-label="Close settings" title="Close">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+      </div>
 
       <div class="settings-section">
         <h3>Appearance</h3>
