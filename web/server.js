@@ -63,9 +63,29 @@ async function serveStatic(req, res) {
     });
     res.end(body);
   } catch {
-    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    res.end("Not found");
+    await serveNotFound(req, res);
   }
+}
+
+/** A miss on serveStatic — a typo'd link, a page that's moved, a stale asset URL. Browser
+ * navigations (the request's own Accept header says so) get the design system's styled
+ * 404 screen; anything else — a script tag, a fetch, a missing image — gets the plain-text
+ * body it always has, so a broken asset request still reads as "empty response", not "a
+ * whole HTML document landed where JSON or a stylesheet was expected". Status stays 404
+ * either way. */
+async function serveNotFound(req, res) {
+  if (req.headers.accept?.includes("text/html")) {
+    try {
+      const body = await readFile(join(PUBLIC_DIR, "404.html"));
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(body);
+      return;
+    } catch {
+      // 404.html itself didn't load — fall through to the plain-text response below.
+    }
+  }
+  res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+  res.end("Not found");
 }
 
 const server = createServer(async (req, res) => {

@@ -19,9 +19,20 @@ export function Sidebar({ collapsed, searchValue, onSearchChange, onNewCheck, ne
     <div className="sidebar" data-collapsed={collapsed ? "true" : "false"}>
       <div className="sidebar-header">
         <span className="mark">
-          <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="10" stroke="currentColor" strokeWidth="2" /><circle cx="16" cy="16" r="3" fill="currentColor" /></svg>
+          <svg viewBox="0 0 64 64" fill="none">
+            <g stroke="currentColor" strokeWidth="2.25">
+              <circle cx="32" cy="32" r="21" strokeDasharray="27 6 27 6" strokeLinecap="round" />
+              <line x1="32" y1="4" x2="32" y2="10" />
+              <line x1="32" y1="54" x2="32" y2="60" />
+              <line x1="4" y1="32" x2="10" y2="32" />
+              <line x1="54" y1="32" x2="60" y2="32" />
+            </g>
+            <line x1="14" y1="32" x2="50" y2="32" stroke="currentColor" strokeWidth="1.25" opacity="0.55" />
+            <circle cx="32" cy="32" r="5.5" fill="currentColor" />
+            <rect x="40" y="29" width="4" height="6" rx="1" fill="var(--accent-2)" />
+          </svg>
         </span>
-        <span className="wordmark">Seer</span>
+        <span className="wordmark">TRASE</span>
       </div>
       <button type="button" className="new-check" onClick={onNewCheck} disabled={newCheckDisabled}>
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>

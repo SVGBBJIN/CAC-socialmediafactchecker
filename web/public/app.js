@@ -102,6 +102,7 @@ const el = {
   settingReducedMotion: document.getElementById("setting-reduced-motion"),
   settingHighContrast: document.getElementById("setting-high-contrast"),
   settingFontSize: document.getElementById("setting-font-size"),
+  settingTheme: document.getElementById("setting-theme"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
   searchStatus: document.getElementById("searchStatus"),
   imageBtn: document.getElementById("imageBtn"),
@@ -111,6 +112,8 @@ const el = {
   imageChipName: document.getElementById("imageChipName"),
   imageChipRemove: document.getElementById("imageChipRemove"),
   micBtn: document.getElementById("micBtn"),
+  listeningWave: document.getElementById("listeningWave"),
+  listeningLabel: document.getElementById("listeningLabel"),
   sidebar: document.getElementById("sidebar"),
   sidebarCollapseBtn: document.getElementById("sidebarCollapseBtn"),
   drawerToggle: document.getElementById("drawerToggle"),
@@ -162,6 +165,7 @@ let pendingChat = null; // { question, error? }
 
 const SETTINGS_KEY = "seer.settings.v1";
 const DEFAULT_SETTINGS = {
+  theme: "dark", // "dark" | "light"
   reducedMotion: false,
   highContrast: false,
   fontSize: "normal", // "normal" | "large"
@@ -194,6 +198,7 @@ let serverConfig = null; // last /api/config response, so the settings dialog ca
  * key off them. Called once at startup and again on every settings change. */
 function applySettings() {
   const root = document.documentElement;
+  setAttrIf(root, "data-theme", settings.theme === "light", "light");
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
@@ -1047,6 +1052,9 @@ function revealIn(root) {
       targets.forEach((node) => node.classList.add("in"));
     });
   });
+  // Every call site here is "this subtree just got new markup" — the same moment any
+  // freshly-rendered source-pills row needs its overflow measured for the first time.
+  collapseSourcePillsOverflow(root);
 }
 
 /**
@@ -1976,7 +1984,7 @@ function renderLiveSources(sources) {
   for (const s of shown.slice(node.childElementCount)) {
     node.insertAdjacentHTML(
       "beforeend",
-      `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(s.title ?? s.domain)}">${escapeHTML(s.domain)}</a>`,
+      `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(s.title ?? s.domain)}"><span class="source-pill-domain">${escapeHTML(s.domain)}</span></a>`,
     );
   }
 
@@ -2043,8 +2051,12 @@ function claimEyebrowText(index, total) {
  * marker that streamed in), body either settled or shimmering. */
 function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
   const done = Boolean(claim.verdictKey);
+  // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
+  // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
+  // status strip is another <div> ahead of these, so nth-of-type would be off by one.
+  const style = `--split-delay: ${Math.min(index * 0.05, 0.3)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
   return `
-    <div class="claim-card claim-pane${done ? "" : " skeleton"}"${spanFull ? ' style="grid-column:1/-1"' : ""} data-claim="${index}">
+    <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       <div class="claim-eyebrow${done ? "" : " pending"}">${
         done
           ? escapeHTML(claimEyebrowText(index, total))
@@ -2154,15 +2166,28 @@ function incompleteHTML(incomplete, animate) {
     </div>`;
 }
 
+/** One glyph per verdict color, not per verdict key — `verdict.css` is already the axis
+ * everything else (background, border, text color) keys off, so the icon follows it too
+ * rather than adding a second lookup that could drift out of sync with it. Decorative:
+ * the badge's own text is what a screen reader announces, so the svg carries
+ * `aria-hidden`. */
+const BADGE_ICONS = {
+  bad: '<path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/>',
+  warn: '<path d="M12 4l9 16H3z M12 10v4 M12 17.2v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+  good: '<path d="M4 12.5l5 5L20 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+  muted: '<path d="M9 9a3 3 0 116 0c0 2-3 2.5-3 5 M12 17.5v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+};
+
 /** The badge markup for one verdict key, or nothing for a key with no matching verdict —
  * shared by the whole-answer badge below and each claim's own badge in the split-panes
  * layout (see `claimPanesHTML`). */
 function badgeHTML(verdictKey, animate) {
   const verdict = VERDICTS[verdictKey];
   if (!verdict) return "";
+  const icon = BADGE_ICONS[verdict.css] ?? "";
   return `
     <div class="badges">
-      <span ${revealAttrs(`badge verdict ${verdict.css}`, animate)}>${escapeHTML(verdict.label)}</span>
+      <span ${revealAttrs(`badge verdict ${verdict.css}`, animate)}><svg class="badge-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">${icon}</svg>${escapeHTML(verdict.label)}</span>
     </div>`;
 }
 
@@ -2214,25 +2239,116 @@ function durationHTML(ms, animate, label = "Checked in") {
   return `<div ${revealAttrs("check-duration", animate)}>${escapeHTML(label)} ${escapeHTML(duration)}</div>`;
 }
 
+/** A source's extra detail, shown in both the pill's hover popover and the "+N more"
+ * expand panel — the same fields either way, since it's the same source, just found at a
+ * different width. `excerpt` isn't fetched by anything today, so this is always just the
+ * domain and title in practice; the field is still handled here so a future ledger entry
+ * that does carry one needs no template changes. */
+function sourceDetailHTML(s) {
+  return `
+    <span class="source-expand-domain">${escapeHTML(s.domain)}</span>
+    ${s.title ? `<span class="source-expand-title">${escapeHTML(s.title)}</span>` : ""}
+    ${s.excerpt ? `<span class="source-expand-excerpt">“${escapeHTML(s.excerpt)}”</span>` : ""}`;
+}
+
+function sourcePillHTML(s) {
+  const hasDetail = Boolean(s.title || s.excerpt);
+  return `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer"><span class="source-pill-domain">${escapeHTML(s.domain)}</span>${
+    hasDetail ? `<span class="source-pill-popover">${sourceDetailHTML(s)}</span>` : ""
+  }</a>`;
+}
+
+function sourceExpandItemHTML(s, index) {
+  // A quick stagger down the list rather than the whole panel arriving as one flat block —
+  // capped so a long "+N more" list doesn't leave the last rows waiting a visible beat.
+  const delay = Math.min(index * 0.03, 0.18);
+  return `<a class="source-expand-item" style="--item-delay: ${delay}s" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer">${sourceDetailHTML(s)}</a>`;
+}
+
+/** Keyed store backing `collapseSourcePillsOverflow`: each `.source-pills` wrapper gets a
+ * unique key at render time, mapped here to the full source list that produced it. A plain
+ * (non-Weak) Map because collapse has to rebuild the row from scratch on a resize, long
+ * after the original render call returned — see that function's own comment. Grows for the
+ * life of the tab, same tradeoff `feedback`/`library` already make; a session's total
+ * number of checks keeps it small in practice. */
+let sourcePillsSeq = 0;
+const sourcePillsStore = new Map();
+
 /**
  * The sources a check was run against, as a row of link pills — one per source, each just
- * its domain, linking straight out. Replaces the old collapsed "Sources (N)" list with its
+ * its domain, linking straight out, with the title in a hover popover for anyone who wants
+ * it without leaving the page. Replaces the old collapsed "Sources (N)" list with its
  * per-source quote toggles: a citation marker in the text (`[3]`) already links to the same
- * page, so that list was a second copy of information the reader could already reach, and
- * folding it behind a toggle just meant most readers never saw it at all. A pill needs
- * neither — it's small enough to sit in the open, and there's nothing under it to expand.
+ * page, so a second copy of that list was never the point. What collapses here is a
+ * narrower thing — pills that don't fit the row's width — via `collapseSourcePillsOverflow`,
+ * not a return of that old per-source detail list.
  */
 function sourcePillsHTML(sources, animate) {
   if (!sources?.length) return "";
+  const key = `sp${++sourcePillsSeq}`;
+  sourcePillsStore.set(key, sources);
   return `
-    <div ${revealAttrs("source-pills", animate)} aria-label="Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}">
-      ${sources
-        .map(
-          (s) =>
-            `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHTML(s.title)}">${escapeHTML(s.domain)}</a>`,
-        )
-        .join("")}
+    <div ${revealAttrs("source-pills", animate)} data-source-pills="${key}">
+      <div class="source-pills-row" aria-label="Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}">
+        ${sources.map(sourcePillHTML).join("")}
+      </div>
     </div>`;
+}
+
+/**
+ * Folds whatever `.source-pill`s don't fit a source-pills-row's own first line behind a
+ * "+N more" toggle. Measured against the row's actual rendered width rather than a fixed
+ * inline count: a narrow phone card and a wide desktop claim card don't fit the same number
+ * of pills, and a fixed cutoff would either waste room on a wide card or overflow a narrow
+ * one. Rebuilds each row from its stored source list every time it runs (see
+ * `sourcePillsStore`) rather than trying to re-expand a row that may already have pills
+ * moved into the expand panel — simpler than tracking which state a row is in, and cheap
+ * enough to run on every render plus the occasional resize.
+ */
+function collapseSourcePillsOverflow(root) {
+  root.querySelectorAll("[data-source-pills]").forEach((wrap) => {
+    const sources = sourcePillsStore.get(wrap.dataset.sourcePills);
+    const row = wrap.querySelector(".source-pills-row");
+    if (!sources || !row) return;
+
+    row.innerHTML = sources.map(sourcePillHTML).join("");
+    wrap.querySelector(".source-expand")?.remove();
+
+    const pills = Array.from(row.children);
+    if (pills.length < 2) return;
+    const firstTop = pills[0].offsetTop;
+    let cutIndex = pills.length;
+    for (let i = 1; i < pills.length; i++) {
+      if (pills[i].offsetTop !== firstTop) {
+        cutIndex = i;
+        break;
+      }
+    }
+    if (cutIndex >= pills.length) return; // everything already fit on one line
+
+    const rest = sources.slice(cutIndex);
+    for (let i = pills.length - 1; i >= cutIndex; i--) pills[i].remove();
+
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "source-pill more";
+    moreBtn.setAttribute("aria-expanded", "false");
+    moreBtn.innerHTML = `+${rest.length} more<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>`;
+    row.appendChild(moreBtn);
+
+    const expandPanel = document.createElement("div");
+    expandPanel.className = "source-expand";
+    expandPanel.hidden = true;
+    expandPanel.innerHTML = rest.map(sourceExpandItemHTML).join("");
+    wrap.appendChild(expandPanel);
+
+    moreBtn.addEventListener("click", () => {
+      const opening = expandPanel.hidden;
+      expandPanel.hidden = !opening;
+      moreBtn.classList.toggle("open", opening);
+      moreBtn.setAttribute("aria-expanded", String(opening));
+    });
+  });
 }
 
 /**
@@ -3071,11 +3187,18 @@ function updateFontSizeButtons() {
   });
 }
 
+function updateThemeButtons() {
+  el.settingTheme.querySelectorAll("button[data-value]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === settings.theme);
+  });
+}
+
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
+  updateThemeButtons();
   renderSearchStatus();
   el.settingsDialog.showModal();
 }
@@ -3090,6 +3213,27 @@ function setListening(on) {
   recognizing = on;
   el.micBtn.classList.toggle("listening", on);
   el.micBtn.setAttribute("aria-pressed", String(on));
+  // While listening, the wave+label take the place of the input/image/check trio rather
+  // than sitting alongside a bar the reader can't type or tap into anyway — recognition
+  // owns the input until it stops.
+  el.imageBtn.hidden = on;
+  el.linkInput.hidden = on;
+  el.checkBtn.hidden = on;
+  el.listeningWave.hidden = !on;
+  el.listeningLabel.hidden = !on;
+  if (on) {
+    // Same double-rAF-then-`.in` shape as revealIn: unhiding alone would just pop the row
+    // in at full opacity, so the fade-up needs a frame where the element exists at its
+    // resting (opacity: 0) style before `.in` gives the transition something to animate to.
+    el.listeningWave.classList.remove("in");
+    el.listeningLabel.classList.remove("in");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        el.listeningWave.classList.add("in");
+        el.listeningLabel.classList.add("in");
+      });
+    });
+  }
 }
 
 /** Wires up the mic button if the browser has a speech-recognition API, otherwise hides
@@ -3170,6 +3314,20 @@ el.sidebarCollapseBtn?.addEventListener("click", () => {
   settings.sidebarCollapsed = !settings.sidebarCollapsed;
   persistSettings();
   applySettings();
+  // The rail's own width transition (see .sidebar's `transition: width` in index.html)
+  // changes how wide every claim card is, which is exactly what source-pill overflow is
+  // measured against — recheck once it's done rather than mid-transition, where every pill
+  // would still be at its pre-toggle width.
+  setTimeout(() => collapseSourcePillsOverflow(el.claimsPane), 200);
+});
+
+// A sidebar-collapse toggle isn't the only thing that changes a claim card's width — so
+// does the window itself. Debounced: a drag-resize fires this dozens of times a second,
+// and the row only needs to be right once the reader stops moving the handle.
+let sourcePillsResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(sourcePillsResizeTimer);
+  sourcePillsResizeTimer = setTimeout(() => collapseSourcePillsOverflow(el.claimsPane), 150);
 });
 
 el.linkInput.addEventListener("keydown", (event) => {
@@ -3393,6 +3551,14 @@ el.settingFontSize.addEventListener("click", (event) => {
   persistSettings();
   applySettings();
   updateFontSizeButtons();
+});
+el.settingTheme.addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-value]");
+  if (!btn) return;
+  settings.theme = btn.dataset.value;
+  persistSettings();
+  applySettings();
+  updateThemeButtons();
 });
 el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);

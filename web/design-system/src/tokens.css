@@ -9,6 +9,9 @@
   --ink-dim: #A9AFBB;
   --muted: #8A93A3;
   --accent: #4FD1C5;
+  /* Secondary accent — violet, used sparingly (claim-card top edge, iris blades) so the
+     palette reads as considered, not a second brand color competing with teal. */
+  --accent-2: #9C8CF0;
   --good: #6FA98A;
   --warn: #D6A84A;
   --bad: #C1594F;
@@ -16,4 +19,24 @@
   --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
   --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* Light theme — set data-theme="light" on <html> (or any ancestor) to opt in. Warm
+   off-white surfaces, not a flat inversion of the dark palette; accent/verdict hues are
+   darkened from their dark-mode values to hold contrast on light surfaces. */
+[data-theme="light"] {
+  --bg: #F6F4EF;
+  --surface: #FFFFFF;
+  --surface-raised: #EFEBE2;
+  --border: #DDD7C8;
+
+  --ink: #1C1B18;
+  --ink-dim: #55524A;
+  --muted: #857F71;
+
+  --accent: #1C8C81;
+  --accent-2: #6952C4;
+  --good: #3F7A57;
+  --warn: #966327;
+  --bad: #A6402F;
 }

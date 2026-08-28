@@ -3,10 +3,21 @@
 .claim-card {
   flex: 1 1 auto;
   display: flex; flex-direction: column;
+  position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 20px;
+  overflow: hidden;
+}
+/* Top-edge accent bar — teal into the secondary violet accent, the one place accent-2
+   appears outside the loading iris. */
+.claim-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
 .claim-eyebrow {
