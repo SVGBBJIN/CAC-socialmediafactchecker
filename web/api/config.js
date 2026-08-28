@@ -9,6 +9,7 @@ import { modelChainFromEnv } from "../lib/gemini.js";
 import { healthSnapshot } from "../lib/degradation.js";
 import { providerFromEnv } from "../lib/search.js";
 import { searchEnabled } from "../lib/verified-chat.js";
+import { supabaseConfigFromEnv } from "../lib/supabase-config.js";
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
@@ -41,6 +42,12 @@ export default async function handler(req, res) {
       // else in this response. Read-only in the settings panel: search behaviour is
       // operator config, not something a client request can change.
       search: describeSearchConfig(),
+      // The anon key, not a secret: it is meant to sit in browser JS and identifies the
+      // *project*, not a user — Supabase's row-level security (see the migration in
+      // supabase/) is what actually keeps one account's chats from another's. null when
+      // unset, which is how the client tells "accounts aren't configured on this
+      // deploy" from "accounts are configured but you're signed out".
+      supabase: supabaseConfigFromEnv(),
     }),
   );
 }
