@@ -26,6 +26,7 @@ import {
   activeAt,
 } from "./timestamps.js";
 import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
+import * as accounts from "./auth.js";
 
 const LIBRARY_KEY = "seer.library.v1";
 const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
@@ -115,6 +116,20 @@ const el = {
   drawerToggle: document.getElementById("drawerToggle"),
   drawerScrim: document.getElementById("drawerScrim"),
   topbarSettingsBtn: document.getElementById("topbarSettingsBtn"),
+  accountBtn: document.getElementById("accountBtn"),
+  topbarAccountBtn: document.getElementById("topbarAccountBtn"),
+  accountDialog: document.getElementById("account-dialog"),
+  accountForm: document.getElementById("account-form"),
+  accountSignedOut: document.getElementById("account-signed-out"),
+  accountSignedIn: document.getElementById("account-signed-in"),
+  accountTabs: document.getElementById("account-tabs"),
+  accountEmail: document.getElementById("account-email"),
+  accountPassword: document.getElementById("account-password"),
+  accountMessage: document.getElementById("account-message"),
+  accountSubmit: document.getElementById("account-submit"),
+  accountEmailDisplay: document.getElementById("account-email-display"),
+  accountSyncStatus: document.getElementById("account-sync-status"),
+  accountSignout: document.getElementById("account-signout"),
 };
 
 let library = loadLibrary();
@@ -399,6 +414,9 @@ function persistLibrary() {
   } catch {
     // Full or disabled storage just means history won't survive a reload — not fatal.
   }
+  // Best-effort, and only once signed in — see pushLibrary's doc comment for why this
+  // doesn't await or retry. A no-op on a deploy with no accounts configured at all.
+  accounts.pushLibrary(library);
 }
 
 function findEntry(id) {
@@ -2953,11 +2971,96 @@ async function loadServerConfig() {
     if (config.requiresPassword && !sessionStorage.getItem(PASSPHRASE_KEY)) {
       el.passDialog.showModal();
     }
+    await initAccounts(config.supabase);
   } catch {
     el.checkBtn.disabled = true;
     el.linkInput.placeholder = "Server unreachable";
     renderSearchStatus();
   }
+}
+
+/* ---------------------------------------------------------------- account dialog */
+
+/** Sets up Supabase (a no-op if this deploy has no SUPABASE_URL/SUPABASE_ANON_KEY),
+ * hides the account entry point entirely when it's not configured, and merges cloud
+ * history in on every sign-in from here on. */
+async function initAccounts(supabaseConfig) {
+  await accounts.configure(supabaseConfig);
+  const enabled = accounts.isConfigured();
+  el.accountBtn.hidden = !enabled;
+  el.topbarAccountBtn.hidden = !enabled;
+  if (!enabled) return;
+
+  let lastUserId = accounts.getUser()?.id ?? null;
+  accounts.onAuthChange((user) => {
+    renderAccountUI();
+    const userId = user?.id ?? null;
+    if (userId && userId !== lastUserId) mergeCloudLibrary();
+    lastUserId = userId;
+  });
+  renderAccountUI();
+  if (lastUserId) mergeCloudLibrary();
+}
+
+/** Pulls this account's cloud conversations in, adds whatever isn't already in the local
+ * library (by id — the same id a library entry and its cloud row share, see auth.js),
+ * and pushes back up whatever was local-only. Runs once per sign-in, not on every load:
+ * after that, `persistLibrary` keeps the two in sync going forward. */
+async function mergeCloudLibrary() {
+  let remote;
+  try {
+    remote = await accounts.pullLibrary();
+  } catch (error) {
+    console.warn("Couldn't load cloud history:", error.message);
+    return;
+  }
+  const localIds = new Set(library.map((entry) => entry.id));
+  const remoteIds = new Set(remote.map((entry) => entry.id));
+  const newFromRemote = remote.filter((entry) => !localIds.has(entry.id));
+  if (newFromRemote.length > 0) {
+    library = [...library, ...newFromRemote].sort(
+      (a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0),
+    );
+  }
+  const newFromLocal = library.filter((entry) => !remoteIds.has(entry.id));
+  try {
+    localStorage.setItem(LIBRARY_KEY, JSON.stringify(library));
+  } catch {
+    // Same tolerance as persistLibrary — a full store just means this merge doesn't
+    // survive a reload, not that it failed.
+  }
+  if (newFromLocal.length > 0) await accounts.pushLibrary(newFromLocal);
+  renderLibrary(el.searchInput.value);
+  const startupEntry = selectedId ? findEntry(selectedId) : null;
+  if (startupEntry) renderVideoPane(startupEntry);
+}
+
+function renderAccountUI() {
+  const user = accounts.getUser();
+  el.accountBtn.dataset.signedIn = String(Boolean(user));
+  el.topbarAccountBtn.dataset.signedIn = String(Boolean(user));
+  el.accountSignedOut.hidden = Boolean(user);
+  el.accountSignedIn.hidden = !user;
+  if (user) el.accountEmailDisplay.textContent = user.email ?? "Signed in";
+}
+
+let accountMode = "signin"; // "signin" | "signup", which tab is active
+
+function setAccountMode(mode) {
+  accountMode = mode;
+  el.accountTabs.querySelectorAll("button[data-mode]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === mode);
+  });
+  el.accountSubmit.textContent = mode === "signup" ? "Sign up" : "Sign in";
+  el.accountMessage.textContent = "";
+  el.accountMessage.classList.remove("error");
+}
+
+function openAccountDialog() {
+  el.accountMessage.textContent = "";
+  el.accountMessage.classList.remove("error");
+  renderAccountUI();
+  el.accountDialog.showModal();
 }
 
 /* ---------------------------------------------------------------- settings dialog */
@@ -3294,6 +3397,52 @@ el.settingFontSize.addEventListener("click", (event) => {
 el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);
   persistSettings();
+});
+
+el.accountBtn.addEventListener("click", openAccountDialog);
+el.topbarAccountBtn.addEventListener("click", () => {
+  closeDrawer({ restoreFocus: false });
+  openAccountDialog();
+});
+el.accountTabs.addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-mode]");
+  if (!btn) return;
+  setAccountMode(btn.dataset.mode);
+});
+el.accountSignout.addEventListener("click", () => {
+  accounts.signOut();
+});
+el.accountForm.addEventListener("submit", async (event) => {
+  // The signed-in half of this form just needs its "Done" button to close the dialog —
+  // <dialog method="dialog"> already does that natively. Only the signed-out submit
+  // (sign in / sign up) needs to stay open through an async call and report an error.
+  if (event.submitter !== el.accountSubmit) return;
+  event.preventDefault();
+  const email = el.accountEmail.value.trim();
+  const password = el.accountPassword.value;
+  el.accountMessage.textContent = "";
+  el.accountMessage.classList.remove("error");
+  el.accountSubmit.disabled = true;
+  try {
+    if (accountMode === "signup") {
+      const { confirmed } = await accounts.signUp(email, password);
+      if (confirmed) {
+        el.accountPassword.value = "";
+        el.accountDialog.close();
+      } else {
+        el.accountMessage.textContent = "Check your email to confirm your account, then sign in.";
+      }
+    } else {
+      await accounts.signIn(email, password);
+      el.accountPassword.value = "";
+      el.accountDialog.close();
+    }
+  } catch (error) {
+    el.accountMessage.textContent = error?.message || "Something went wrong.";
+    el.accountMessage.classList.add("error");
+  } finally {
+    el.accountSubmit.disabled = false;
+  }
 });
 
 el.imageBtn.addEventListener("click", () => el.imageInput.click());

@@ -106,6 +106,43 @@ someone deliberately hammering it. For a public deployment, swap the `windows` M
 need to change, only the storage behind them. Until then, `APP_PASSWORD` is what is
 actually holding the door, so treat it as required rather than optional.
 
+## Accounts and chat history
+
+Optional, and off by default. With `SUPABASE_URL`/`SUPABASE_ANON_KEY` unset, the library
+is exactly what it always was: `localStorage` in this one browser, nothing else. Set both
+(Project Settings → API in the Supabase dashboard) and the sidebar gains a sign-in
+control; once signed in, every check and follow-up is also synced to
+`public.conversations` in that Supabase project, so the library follows the account
+across devices instead of living in one browser's storage.
+
+The schema and its row-level security live in
+`supabase/migrations/20260827000000_accounts_and_chat_history.sql` — `profiles` (one row
+per account, populated by a trigger on `auth.users`) and `conversations` (one row per
+library entry, `id` shared with the client's own entry id so an upsert from the browser
+never needs id translation; `data` is that entry verbatim as jsonb, so the client's entry
+shape can keep growing fields without a migration on every one). RLS is what actually
+keeps one account's chats from another's — `SUPABASE_ANON_KEY` is not a secret and is
+sent to the browser deliberately (see `/api/config`'s `supabase` field and
+`public/auth.js`); it identifies the *project*, the same way it would for any Supabase
+browser client.
+
+`public/auth.js` is the only place that imports `@supabase/supabase-js`, and it does so
+from `esm.sh` at request time rather than as an npm dependency — `web/` ships with no
+bundler and no `node_modules` (see the top of this file), and an account system some
+deploys will never turn on didn't seem worth breaking that for. If that trade stops being
+worth it (e.g. you want the import pinned and audited rather than fetched live), vendor
+`@supabase/supabase-js` into `public/vendor/` and change the one `import()` in that file.
+
+Sync is push-based and last-write-wins: every `persistLibrary()` call in `app.js` also
+upserts the whole in-memory library to Supabase (fire-and-forget — a failed push just
+means the next save tries again with then-current state). The one exception is the
+moment right after sign-in, when `mergeCloudLibrary` reconciles what's already in each
+place once — remote entries the browser doesn't have yet are pulled in, local entries the
+account doesn't have yet are pushed up — rather than one side blindly overwriting the
+other. Two devices editing the same entry at nearly the same moment still resolves to
+"whichever pushed last wins," which is the same trade `localStorage` already made with
+itself across tabs; there is no per-field merge.
+
 ## Layout
 
 ```
