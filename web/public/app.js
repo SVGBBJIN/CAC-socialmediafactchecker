@@ -74,6 +74,7 @@ const el = {
   libList: document.getElementById("libList"),
   searchInput: document.getElementById("searchInput"),
   claimsPane: document.getElementById("claimsPane"),
+  claimsScrollHint: document.getElementById("claimsScrollHint"),
   videoTitle: document.getElementById("videoTitle"),
   videoLink: document.getElementById("videoLink"),
   videoThumb: document.getElementById("videoThumb"),
@@ -1229,13 +1230,16 @@ const chatElapsed = createElapsedTicker("chatElapsed");
  * rather than the grid growing a row to fit it or the pane growing a scrollbar of its own.
  */
 
-/** Column count for a given claim count — tuned around "about four" fitting as a 2×2
- * grid, one column above that for a single claim (nothing to arrange), and one column
- * wider again past six so a long list doesn't turn into a single sliver-thin row. */
+/** Column count for a given claim count — one column for a single claim (nothing to
+ * arrange), two above that. Capped at two even well past four: widening to three or more
+ * columns crammed every row into whatever height was left in the pane (see the old
+ * `grid-auto-rows: 1fr` comment this replaces), so five-plus claims read as a shrinking
+ * grid of unreadably short boxes instead of a normal 2×2 that just keeps growing downward.
+ * `.claims-pane.claim-grid`'s own `grid-auto-rows: minmax(...)` is what makes that growth
+ * scroll instead of squeeze — see its CSS comment — so capping the column count here is
+ * the other half of "about four visible, the rest a scroll away". */
 function claimGridColumns(count) {
-  if (count <= 1) return 1;
-  if (count <= 4) return 2;
-  return 3;
+  return count <= 1 ? 1 : 2;
 }
 
 /** Whether the last item should span the full row width — only the specific case of a
@@ -1257,6 +1261,40 @@ function setClaimsGridMode(mode, cols) {
   el.claimsPane.classList.toggle("claim-grid-loading", mode === "grid-loading");
   if (cols) el.claimsPane.style.setProperty("--claim-cols", cols);
 }
+
+/** Shows or hides the down-arrow chip over the claims pane, from the pane's own scroll
+ * state: there's more below only when the content is actually taller than the visible box
+ * (`scrollHeight > clientHeight`) *and* the reader hasn't already scrolled to meet it (a
+ * few px of slack for sub-pixel rounding, not an exact-equality check that would flicker
+ * the hint right at the bottom). */
+function updateClaimsScrollHint() {
+  const pane = el.claimsPane;
+  const hasMore = pane.scrollHeight - pane.clientHeight - pane.scrollTop > 24;
+  el.claimsScrollHint.hidden = !hasMore;
+}
+
+// The pane's content changes in more places than is practical to hook individually — a
+// whole-pane `innerHTML` swap on every render path above, but also `settleClaimPane`
+// patching a single box's text in place as a check streams in, which grows that box's
+// (and therefore possibly the pane's) scrollable height without going through any of the
+// render functions above at all. A `MutationObserver` on the subtree catches every one of
+// those uniformly instead of chasing each call site; `queueMicrotask` lets the DOM finish
+// updating (layout is up to date by the next microtask) before measuring it.
+let claimsScrollHintQueued = false;
+new MutationObserver(() => {
+  if (claimsScrollHintQueued) return;
+  claimsScrollHintQueued = true;
+  queueMicrotask(() => {
+    claimsScrollHintQueued = false;
+    updateClaimsScrollHint();
+  });
+}).observe(el.claimsPane, { childList: true, subtree: true, characterData: true });
+
+el.claimsPane.addEventListener("scroll", updateClaimsScrollHint);
+window.addEventListener("resize", updateClaimsScrollHint);
+el.claimsScrollHint.addEventListener("click", () => {
+  el.claimsPane.scrollBy({ top: el.claimsPane.clientHeight * 0.85, behavior: settings.reducedMotion ? "auto" : "smooth" });
+});
 
 /* ---------------------------------------------------------------- sidebar */
 
@@ -1509,6 +1547,10 @@ function setVideoAspect(ratio) {
 
 /** Back to the play-icon placeholder — no video element holding stale media or playing. */
 function clearVideoMedia() {
+  // A reader who starts a new check while fullscreen on the current clip would otherwise
+  // be left staring at the fullscreen surface after its `src` is torn down below — nothing
+  // to show, no way back to the page short of Esc, which they have no reason to guess.
+  if (document.fullscreenElement === el.videoThumb) document.exitFullscreen?.();
   el.videoPlayer.pause();
   el.videoPlayer.removeAttribute("src");
   el.videoPlayer.load();
