@@ -2033,8 +2033,12 @@ function claimEyebrowText(index, total) {
  * marker that streamed in), body either settled or shimmering. */
 function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
   const done = Boolean(claim.verdictKey);
+  // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
+  // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
+  // status strip is another <div> ahead of these, so nth-of-type would be off by one.
+  const style = `--split-delay: ${Math.min(index * 0.05, 0.3)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
   return `
-    <div class="claim-card claim-pane${done ? "" : " skeleton"}"${spanFull ? ' style="grid-column:1/-1"' : ""} data-claim="${index}">
+    <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       <div class="claim-eyebrow${done ? "" : " pending"}">${
         done
           ? escapeHTML(claimEyebrowText(index, total))

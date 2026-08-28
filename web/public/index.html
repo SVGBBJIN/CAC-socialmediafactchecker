@@ -583,6 +583,21 @@
     100% { border-color: var(--border); box-shadow: none; }
   }
 
+  /* The single loading card growing into per-claim boxes as the model names them — see
+     renderClaimSkeletons in app.js. Each box scales up from just under full size with a
+     stagger keyed to its claim index (`--split-delay`, set inline per box — sibling
+     position isn't reliable here since claimGridStatusHTML's status strip is another
+     `<div>` ahead of the boxes), so the grid reads as the original card dividing into
+     these pieces rather than boxes simply appearing. Plain `.claim-pane` (not `.claim-pane
+     .claim-body`/`.claim-text`, which already fade in on their own) — this is the box
+     itself arriving, before anything about the box is fading in. */
+  .claim-grid-loading .claim-pane[data-reveal] { opacity: 0; transform: scale(0.92) translateY(6px); }
+  .claim-grid-loading .claim-pane.in {
+    opacity: 1; transform: scale(1) translateY(0);
+    transition: opacity 0.32s cubic-bezier(.2,1,.3,1), transform 0.32s cubic-bezier(.2,1,.3,1);
+    transition-delay: var(--split-delay, 0s);
+  }
+
   /* The loading spinner — the only child of `.claim-card` while a check is running, so
      `flex: 1` lets it claim the card's whole height and `justify-content: center` puts it
      in the middle of that instead of pinned near the top with the rest of a tall card
@@ -1549,6 +1564,7 @@
   [data-motion="reduced"] .stage-text,
   [data-motion="reduced"] .skeleton-line,
   [data-motion="reduced"] .claim-pane.just-settled,
+  [data-motion="reduced"] .claim-grid-loading .claim-pane,
   [data-motion="reduced"] .live-sources .source-pill,
   [data-motion="reduced"] .ts-chip.playing,
   [data-motion="reduced"] .listening-wave span,
@@ -1565,7 +1581,7 @@
   [data-motion="reduced"] .badge.in .badge-icon { opacity: 1; transform: none; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item { animation: none !important; transition: none !important; }
     .badge.in { opacity: 1; transform: none; }
     .badge.in .badge-icon { opacity: 1; transform: none; }
   }
