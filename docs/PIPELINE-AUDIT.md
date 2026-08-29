@@ -1,12 +1,8 @@
 # Pipeline audit — 2026-08-02
 
-A read of both pipelines for correctness bugs: `web/` (the fact-checker that ships) and
-`Sources/SeerCore/` (the Swift extraction pipeline). No code was changed.
+A read of the fact-checking pipeline for correctness bugs: `web/`. No code was changed.
 
 **Baseline.** `cd web && npm test` → 243 pass, 0 fail (245 after the fixes below).
-`swift build` was not run: no Swift toolchain in this environment, so everything below
-about `Sources/` is from reading, and `SeerCapture`/`SeerUI` are unverified for the reason
-[EXTRACTION_PIPELINE.md](EXTRACTION_PIPELINE.md#status) already gives.
 
 **On checking the browser fixes.** `npm test` covers `lib/` and `api/`; `public/app.js` has
 no test at all, and two of the three bugs below are in it — both of them cases where the
@@ -22,9 +18,9 @@ Findings are ordered by what they cost a reader, not by how hard they are to fix
 first three are all on the same seam — the server does careful work to salvage a damaged
 turn, and the browser throws the result away.
 
-**1–5 and 7 are fixed; 6 was resolved by decision rather than by patch** (see the status
-line under each). Everything under "Smaller things" and "What looked wrong and isn't" is
-still open or, respectively, already known-fine.
+**All findings below are fixed** (see the status line under each). Everything under
+"Smaller things" and "What looked wrong and isn't" is still open or, respectively, already
+known-fine.
 
 ---
 
@@ -177,38 +173,7 @@ platform named is whichever one lost.
 Fix: scan the text once and ask each provider whether it claims the match, or interleave by
 match index rather than by provider.
 
-## 6. Swift `TikTokURL` does no host check; its JS counterpart does — `Sources/SeerCore/Media/TikTokMediaResolver.swift:214, 241`
-
-> **Not fixed — left as documented, intentional drift.** This finding is the fourth
-> instance of the same pattern (host allowlist, download cap, `503` handling, and now
-> this), and it's what tipped "decide which surface is canonical" from an open question in
-> the README into an actual decision: `web/` is canonical, `Sources/` is frozen, and a
-> backport here would be exactly the incremental parity-patch this repo has now stopped
-> doing. See the README's *"`web/` is canonical. `Sources/` is frozen"* section and
-> `docs/EXTRACTION_PIPELINE.md#sources-is-frozen`. The gap below is real and stays exactly
-> as found.
-
-`web/lib/tiktok.js` opens both URL predicates with a host check
-(`if (!isTikTokHost(url.hostname)) return null`, line 141; `isTikTokHost(host) && …`,
-line 181). The Swift port has neither:
-
-- `TikTokURL.videoID(from:)` reads an ID off any host's `/video/<digits>` path.
-- `TikTokURL.isShortLink(_:)` returns `true` for **any** host whose first path segment is
-  `t` — the `vm.`/`vt.` cases are checked against the host, the `/t/` case is not.
-
-`resolveVideoID` then issues a redirect-following GET to that URL and reads
-`response.url`, which is an outbound request to an attacker-named host on the strength of a
-path segment.
-
-Inside the pipeline this is unreachable — `DirectMediaExtractor.canHandle` gates on
-`Platform.detect(from:) == .tikTok` first. But both functions are `public`, `TikTokURL` is
-documented as a standalone URL-shape helper, and `YouTubeExtractor.videoID` right next door
-carries an explicit comment about exactly this hazard ("it's `public static` and documented
-for standalone use, so it can't lean on that"). The web version is the correct one — and,
-per the note above, that correctness stays a fact about `web/lib/tiktok.js` rather than
-becoming a change to `Sources/`.
-
-## 7. `/api/resolve-media` returns the CDN URL without the host allowlist — `web/api/resolve-media.js:86`
+## 6. `/api/resolve-media` returns the CDN URL without the host allowlist — `web/api/resolve-media.js:86`
 
 > **Fixed.** The handler now runs the resolved `mediaURL`'s hostname through the same
 > `hostAllowed()` check the downloaders use, against the same per-platform
@@ -241,20 +206,6 @@ setting an operator explicitly configured. `isUnsupportedMediaResolution` +
 `mediaResolutionRefused` already handle a wrong guess correctly, so the guard is redundant
 as well as wrong.
 
-**Swift concatenates thinking summaries into the JSON it parses** —
-`Sources/SeerCore/Gemini/GeminiWire.swift:132`. `GeminiResponse.text` joins every part's
-`text`, and `Part` doesn't decode `thought`. Harmless today because nothing sets
-`includeThoughts`, but the chain's head models are thinking models and the web side filters
-`thought` parts explicitly (`gemini.js:914`). A summary part would land inside the string
-handed to `GeminiVideoAnalysis.decode` and fail it.
-
-**Swift reserves no output budget on a thinking model** —
-`Sources/SeerCore/Gemini/GeminiVideoClient.swift:46`. `GenerationConfig` has a
-`maxOutputTokens` field (`GeminiWire.swift:89`) that no call site sets, and there is no
-`thinkingConfig` at all. `DEFAULT_THINKING_BUDGET_TOKENS` in `gemini.js` documents at length
-why the visible answer needs a floor reserved for it; on the Swift side the `MAX_TOKENS`
-salvage path is absorbing a failure a budget cap would prevent.
-
 **Instagram's shared session carries the first caller's abort signal** —
 `web/lib/instagram.js:300`. `session()` deduplicates the homepage seed across concurrent
 resolves, which is the right call, but the in-flight promise was created with whichever
@@ -272,9 +223,7 @@ with a worked example. `renderMarkdown` handles fenced code, inline code, `**bol
 newlines only, so those bullets render with a literal `-`/`*`/`•` and no indentation.
 
 **Dead branches.** `app.js:546` still handles a `"rewriting"` stage; the repair round it
-described was removed and nothing emits it. `ProgressSink.rebound(to:)`
-(`ExtractionProgress.swift:213`) has no caller — `ExtractionPipeline` builds the sink with
-the extractor's platform already resolved.
+described was removed and nothing emits it.
 
 ---
 

@@ -37,9 +37,8 @@ is the trade the clip budget bounds rather than the classifier.
 
 ## What this is not
 
-It is not screen recording. That path exists in `Sources/SeerCapture` and is dead: real-time
-by construction, needs a visible surface to record, and ReplayKit's audio tap comes back
-silent from a web view.
+It is not screen recording — that's slow by construction, needs a visible surface to
+record, and only ever bought back what a resolved media URL already gets for free.
 
 The insight that makes a browser worth running here is not that it can be *recorded* — it is
 that it holds a session. Cookies, a `Referer`, and a JS runtime that has already executed are
