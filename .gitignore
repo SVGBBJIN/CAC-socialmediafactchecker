@@ -1,15 +1,6 @@
 .DS_Store
-.build/
-.swiftpm/
-DerivedData/
-*.xcuserstate
-xcuserdata/
 
 # Secrets — never commit plaintext credentials.
-# `Secrets.xcconfig` holds the provisioning-time plaintext; `secrets.enc` is the
-# encrypted blob produced from it by Scripts/encrypt-secrets.sh. Neither belongs
-# in git. See docs/SECRETS.md.
-Secrets.xcconfig
 *.enc
 secrets.json
 

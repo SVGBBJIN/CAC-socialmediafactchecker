@@ -3,208 +3,104 @@
 Paste a link to a short-form video; get its claims checked against live sources, each one
 carrying a citation you can follow.
 
-There are **two surfaces in this repository, and they are not equals.**
+`web/` is the whole product: a static front end and a small set of Node server routes,
+with no build step and no external dependencies. `worker/` is an optional Playwright
+browser-automation service `web/` can fall back to when its plain-HTTP TikTok/Instagram
+resolvers get throttled or refused — it never touches the byte path itself, only reports
+a media URL for `web/` to download normally.
 
-| | What it is | State |
-|---|---|---|
-| **`web/`** | The fact-checker: link → transcript → research → cited verdict | **The product, and the canonical implementation.** Ships, and is where the work happens |
-| **`Sources/`** | A Swift extraction pipeline: link → `ClaimContext` | **Frozen — reference only.** No fact-check layer exists on this side, and it no longer receives ported fixes |
+## Getting media to Gemini
 
-Read that table before reading anything else, because the obvious assumption — that the
-Swift package is the app and `web/` is a viewer for it — is backwards.
+Four shapes, cheapest first, decided per platform:
 
-## `web/` is canonical. `Sources/` is frozen, not a second target.
+1. **YouTube** — handed to Gemini as a `file_data` URL part; Gemini fetches and watches it
+   itself. No bytes touch this app.
+2. **TikTok** — `web/lib/tiktok.js`: embed page → `__FRONTITY_CONNECT_STATE__` blob → CDN
+   URL (video or, for photo posts, `imagePostInfo.displayImages[]`) → bytes downloaded and
+   attached (inline or via the Files API for larger clips).
+3. **Instagram** — `web/lib/instagram.js`: same shape via `/graphql/query` (`doc_id` +
+   shortcode + CSRF) → `video_url` or each `XDTGraphImage.display_url` for carousels.
+4. **Any other link** — treated as a "page", not a video: `web/lib/article.js` fetches and
+   extracts text, quoted into the prompt as the subject under examination (never cited as
+   a source).
 
-This used to be an open question — "decide which surface is canonical before adding to
-either" — and every time it went unanswered, the same thing happened: a fix landed in
-`web/`, and `Sources/` either got the same fix rediscovered from scratch later, worse the
-first time, or never got it at all.
+### TikTok needs no screen capture or device
 
-- **The web side is where fixes land.** Over the repository's whole history to date
-  (2026-07-27 → 2026-08-23): 97 commits touching `web/`, 19 touching `Sources/`. The gap has
-  widened since the freeze was decided, which is the freeze working rather than failing —
-  `Sources/` was last touched on 2026-08-06, and by a layout change to
-  `LibraryConceptView.swift`, the one carve-out the policy allows.
-- **Fixes got made twice.** The Files API poll ramp was written for `web/` on 2026-07-30
-  and rediscovered from scratch for Swift on 2026-08-02 — initially in the worse shape of
-  the two, bounding the wait by a poll count where the web version had already worked out
-  that a varying interval needs a wall-clock bound.
-- **Swift lagged on things that mattered, repeatedly.** A missing CDN host allowlist, an
-  unbounded media download, and a model chain that gave up on `503` were all correct in
-  `web/` first and have since been backported. A fourth instance turned up in the very
-  next audit pass — `Sources/SeerCore/Media/TikTokMediaResolver.swift`'s `TikTokURL` has no
-  host check on its short-link/video-ID parsing where `web/lib/tiktok.js`'s
-  `isTikTokHost`-gated equivalents do — and this one has been **deliberately left
-  unfixed**, not overlooked. See the next paragraph for why, and
-  [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md#sources-is-frozen) for exactly
-  what that means for anyone reading `Sources/` and wondering whether a gap like this one
-  is a bug to report or a known, accepted property of frozen code.
+The iframe TikTok's embed script builds points at `tiktok.com/embed/v2/<id>`, that page is
+served to anonymous requests, and its `__FRONTITY_CONNECT_STATE__` blob carries **a direct
+CDN URL for the MP4** along with the duration, caption and author. So Seer fetches the
+file and hands the bytes to Gemini Flash directly — no player, no recording permission, no
+waiting on a physical device, and it runs at network speed instead of in real time.
 
-**The decision: `web/` is canonical, full stop, and `Sources/` is frozen rather than a
-second target for incremental parity patches.** Every line of evidence above points the
-same direction, and continuing to patch `Sources/` piecemeal every time an audit finds the
-next divergence is the pattern that produced this section in the first place. Concretely,
-frozen means:
+Verified live on 2026-07-28: anonymous request, no credential, 3.2 MB `video/mp4` with a
+valid `ftyp` box.
 
-- **No more parity ports into `Sources/`.** A fix that lands in `web/` stays in `web/`.
-  `Sources/` is not owed a backport, and a gap between the two — like the `TikTokURL` one
-  above — is not evidence of neglect; it is the expected shape of a frozen codebase next to
-  one that keeps moving.
-- **`Sources/` still compiles and its own tests still pass**, and a change that breaks
-  that is still a regression worth fixing — frozen is not the same as abandoned to bit rot.
-  What stops is *porting web's new work in*, not maintaining what is already there.
-- **Deleting `Sources/`** — named as the other branch of this decision before it was made,
-  and it removes the whole class of problem along with roughly 5,700 lines — **is not done
-  by this pass.** That is a repository-shape change with its own blast radius (the Swift
-  app, `SeerUIDemo`, the whole `docs/EXTRACTION_PIPELINE.md` narrative) and belongs to
-  whoever owns that decision, not to an audit fixing bugs. Freezing is the reversible half
-  of that choice; deleting is the irreversible half, and is worth doing deliberately once
-  the frozen state has been lived with for a while, not as a side effect of a bug-fix pass.
+### Instagram, same shape
 
-## Where things stand
+Instagram's embed iframe carries no media, and its oEmbed endpoint needs a Meta app that
+has passed App Review — but the query instagram.com's own web client runs to render a post
+does not: `POST /graphql/query` with a `doc_id` and the post's shortcode, carrying a CSRF
+token from a plain GET of the homepage, returns the post including `video_url`. That CDN
+link then serves the MP4 to an anonymous request.
 
-| Platform | Path | web | Swift |
-|---|---|---|---|
-| **YouTube** | Gemini native URL ingestion | Working | Working |
-| **TikTok** | embed page → CDN MP4 → Gemini Flash | Working | Working — Gemini leg needs a key to confirm |
-| **TikTok photo mode** | embed page → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
-| **Instagram** | post query → CDN MP4 → Gemini Flash | Working — verified live 2026-08-02 | **Not ported.** Still the capture extractor, still unregistered |
-| **Instagram images/carousels** | post query → CDN JPEGs → Gemini Flash | Working — verified live 2026-08-04 | **Not ported** |
-| **Any other link** | fetch the page → its text quoted to Gemini as the subject | Working — verified live 2026-08-05 | **Not ported** |
-
-Only platforms that can actually be served get registered, so an Instagram link shared
-*to the Swift app* gets an honest "not supported yet" rather than an empty result. The web
-app answers it.
-
-## The Swift extraction pipeline
-
-```swift
-let pipeline = SeerPipelineBuilder.makePipeline(.init(secrets: secrets))
-let context = try await pipeline.extract(from: sharedURL)
-
-context.transcript        // what was said
-context.frames            // sampled stills, when the path produced any
-context.candidateClaims   // claims the extractor noticed in passing — hints, not results
-context.provenance        // platform, source URL, which path produced it
-```
-
-Nothing downstream of `ClaimContext` knows which platform a claim came from. Note the
-shape of that promise: `ClaimContext` is documented as what "claim detection, retrieval and
-verdict rendering" consume, and **on the Swift side none of those exist.** Everything past
-extraction — search, citations, verdicts — lives only in `web/`.
-
-### TikTok no longer needs screen capture
-
-The capture path was blocked on ReplayKit returning silent audio from a `WKWebView`. That
-turned out to be avoidable rather than fixable: the iframe TikTok's embed script builds
-points at `tiktok.com/embed/v2/<id>`, that page is served to anonymous requests, and its
-`__FRONTITY_CONNECT_STATE__` blob carries **a direct CDN URL for the MP4** along with the
-duration, caption and author.
-
-So Seer fetches the file and hands the bytes to Gemini Flash. No web view, no player, no
-recording permission, no Whisper, and no waiting on a physical device. It also runs at
-network speed instead of in real time — a 60-second clip no longer takes 60 seconds — and
-because a video model watches rather than only listens, a clip whose claim is text over
-silent B-roll now yields on-screen text where the capture path yielded nothing.
-
-Verified live on 2026-07-28 through the compiled resolver: anonymous request, no
-credential, 3.2 MB `video/mp4` with a valid `ftyp` box.
-
-### Instagram doesn't either
-
-Same shape, different door. Instagram's embed iframe carries no media, and its oEmbed
-endpoint needs a Meta app that has passed App Review — but the query instagram.com's own
-web client runs to render a post does not: `POST /graphql/query` with a `doc_id` and the
-post's shortcode, carrying a CSRF token from a plain GET of the homepage, returns the post
-including `video_url`. That CDN link then serves the MP4 to an anonymous request.
-
-So a reel costs what a TikTok costs, and the App Review blocker is gone. `web/lib/instagram.js`
-ships this and the fact-checker attaches reels today; the Swift extractor is still the
-capture one, unregistered, and — now that `Sources/` is frozen (see above) — stays that
-way rather than being ported. Verified live on 2026-08-02 against three public reels:
-6.2 MB and 9.9 MB `video/mp4`, no credential.
-[docs/SPIKE-instagram.md](docs/SPIKE-instagram.md)
+Verified live on 2026-08-02 against three public reels: 6.2 MB and 9.9 MB `video/mp4`, no
+credential.
 
 ### Photo posts are posts too
 
-Both platforms' image formats used to be dropped on the floor. A TikTok `/photo/` URL
-wasn't recognised as a link the app could do anything with, and an Instagram carousel of
-stills was declined by name — *"that's a carousel of stills, there's no video to fetch."*
+A TikTok `/photo/` URL and an Instagram carousel of stills are exactly the thing somebody
+pastes in to be checked — a screenshot dump, a text-card slideshow or an infographic
+carousel carries its whole argument in the images, with none of the B-roll padding a video
+has. Both resolve to their stills, which reach the model as one image part per slide, in
+post order, labelled as an ordered set.
 
-That threw away the platforms' most claim-dense format. A screenshot dump, a text-card
-slideshow or an infographic carousel carries its whole argument in the images, with none of
-the B-roll padding a video has, and is exactly the thing somebody pastes in to be checked.
-Both now resolve to their stills, which reach the model as one image part per slide, in
-post order, labelled as an ordered set so it doesn't read them as unrelated pictures — or
-as frames of a video it watched.
-
-Verified live on 2026-08-04. TikTok's slides live at `videoData.imagePostInfo.displayImages[]`
-on the same embed route the video path already uses — note that is *not* the `imagePost` key
-TikTok's own Content Posting API documents, which is a different serialisation of the same
-post. Instagram's come from `display_url` on each `XDTGraphImage`, from the query that
-already fetches reels. Neither needs a new endpoint or a credential.
+Verified live on 2026-08-04. TikTok's slides live at
+`videoData.imagePostInfo.displayImages[]` on the same embed route the video path already
+uses. Instagram's come from `display_url` on each `XDTGraphImage`, from the query that
+already fetches reels.
 
 Two things fell out of doing it:
 
-- **A `/photo/` URL was never a type signal.** TikTok serves `/video/<id>` and `/photo/<id>`
-  interchangeably for the same post — `/@memezar/photo/7449708266168274208` is an ordinary
-  video — so reading the path as the content was costing real videos, not just slideshows.
-  Only the payload decides now.
-- **A carousel is capped, and says so.** Both platforms allow 35 slides; twelve are attached
-  and the remainder is named in the prompt, because every slide is an image the model is
-  billed to read. A slide that fails to download is skipped rather than failing the post —
-  eleven of twelve still says most of what a slideshow says, where half a video says nothing.
+- **A `/photo/` URL was never a type signal.** TikTok serves `/video/<id>` and
+  `/photo/<id>` interchangeably for the same post, so reading the path as the content was
+  costing real videos, not just slideshows. Only the payload decides now.
+- **A carousel is capped, and says so.** Both platforms allow 35 slides; twelve are
+  attached and the remainder is named in the prompt, because every slide is an image the
+  model is billed to read. A slide that fails to download is skipped rather than failing
+  the post — eleven of twelve still says most of what a slideshow says.
 
 ## What the media path refuses to do
 
-Three guarantees on the `directMediaFetch` arm, all of which the web app had first and the
-Swift side has now been brought up to:
-
 **It will not fetch a host the platform doesn't serve from.** The media URL is read out of
 TikTok's undocumented `__FRONTITY_CONNECT_STATE__` blob, which makes it the one URL in the
-pipeline chosen by somebody else — reachable by anyone who can share a link.
-`Platform.allowedMediaHosts` lists the CDN families per platform and
-`allowsMediaHost(_:)` suffix-matches against a dot boundary, so `tiktokcdn.com.evil.test`
-is not a match for `tiktokcdn.com`. An empty list means *fetch nothing*, never *fetch
-anything*: a platform that hasn't declared its CDNs — Instagram, on the Swift side, and
-permanently now that `Sources/` is frozen rather than pending a port — cannot download at
-all. A rejected host is named in the error, so a new CDN family is a one-line fix rather
-than an investigation.
+pipeline chosen by somebody else — reachable by anyone who can share a link. A CDN host
+allowlist per platform suffix-matches against a dot boundary, so `tiktokcdn.com.evil.test`
+is not a match for `tiktokcdn.com`. A rejected host is named in the error, so a new CDN
+family is a one-line fix rather than an investigation.
 
-**It will not buffer an oversized clip into memory.** The ceiling used to be checked on
-`data.count` after the transport had already built the whole body, which cannot stop the
-allocation it exists to prevent — a share extension is killed for the memory or it isn't,
-and by then it is. `HTTPTransport.send(_:maxBytes:)` streams to a temporary file, sizes it
-on disk, and only reads it in once it is known to fit. It does not abort mid-transfer;
-disk is not what jetsam counts.
+**It will not buffer an oversized clip into memory.** `web/lib/media-fetch.js` streams to a
+capped read (48 MB ceiling), refused or aborted rather than buffered past it.
 
 **It will not give up on a model that is merely full.** Capacity in Gemini is metered per
 model, and the newest model in the chain is the one most likely to be overloaded — so a
-`503` is the *common* upstream failure, not an exotic one. It now falls through to the next
-model instead of failing the request. A bare `500` with no overload wording still doesn't:
-that is an outage, and walking the chain through one adds four more failed requests to a
-service already in trouble.
+`503` is the *common* upstream failure, not an exotic one. `web/lib/gemini.js` falls
+through to the next model instead of failing the request. A bare `500` with no overload
+wording still doesn't: that is an outage, and walking the chain through one adds four more
+failed requests to a service already in trouble.
 
-## What the clip path now survives
+## What the clip path survives
 
-`TikTokError` and `InstagramError` have always sorted their failures into "this link will
-never work" and "try again". Only the first half was acted on: the `retryable` flag was
-read once, to decide how to word a note, and nothing ever tried again. Four things changed
-in `web/`, and `Sources/` is frozen rather than owed a backport.
+`TikTokError` and `InstagramError` sort their failures into "this link will never work"
+and "try again".
 
-**A transient refusal is no longer the answer.** `web/lib/retry.js` mirrors
-`RetryPolicy.swift` — exponential backoff with full jitter, a per-delay cap, and a budget
-on the whole step — and both platforms' network steps run through it. A `429` from
-Instagram's GraphQL endpoint is its normal response to anonymous datacenter traffic rather
-than an incident, and it was costing the user their reel on first contact. `Retry-After` is
-believed when the server sends one. A *decision* is still never repeated: a private post, a
-photo carousel, a deleted video and a rotated `doc_id` are answers, and asking twice only
-doubles the bill.
+**A transient refusal is not the answer.** `web/lib/retry.js` — exponential backoff with
+full jitter, a per-delay cap, and a budget on the whole step — and both platforms' network
+steps run through it. A `429` from Instagram's GraphQL endpoint is its normal response to
+anonymous datacenter traffic rather than an incident, and `Retry-After` is believed when
+the server sends one. A *decision* is never repeated: a private post, a photo carousel, a
+deleted video and a rotated `doc_id` are answers, and asking twice only doubles the bill.
 
-**A transfer that stops has a deadline.** `fetchWithTimeout` disarmed at the response
-headers — it cleared its timer and unsubscribed from the caller's signal the moment a
-response object existed — so the part that actually takes time, pulling 40 MB off a CDN,
-ran with no deadline and nothing upstream able to interrupt it. `fetchStream` keeps both
+**A transfer that stops has a deadline.** `fetchStream` keeps the timeout and abort signal
 armed until the body has been read, and `readCapped` additionally gives up on a transfer
 that has gone quiet, which is faster than waiting out the full media timeout to learn the
 same thing.
@@ -217,76 +113,25 @@ again for a freshly signed URL and downloads from that. Once: a second expiry in
 breath is not a clock problem.
 
 **A clip that can't be downloaded is described, not dropped.** Resolving a post already
-returns its caption, creator and duration — that *is* what the query returns — so a failed
-download no longer costs the whole link. The model gets the caption and the reason the
-video is missing in one note, which matters most on short-form political content, where the
-caption is frequently the claim and the video is B-roll. Instagram had no fallback at all
-before this; its oEmbed needs a Meta App Review token, so a reel whose download failed was
-simply lost.
+returns its caption, creator and duration, so a failed download no longer costs the whole
+link. The model gets the caption and the reason the video is missing in one note, which
+matters most on short-form political content, where the caption is frequently the claim
+and the video is B-roll.
 
-## What the clip path no longer re-does
+## What the clip path doesn't re-do
 
 Gemini has no memory between requests, so every turn replays the whole conversation and
 re-attaches each clip at its first mention. That much is unavoidable — the bytes have to be
-in the request body or the model can't see the video it is being asked about. What was
-avoidable is where the bytes came from: a ten-turn thread about one TikTok resolved that
-post and pulled the same MP4 off the CDN ten times, so every follow-up question paid the
-full resolve-and-download wait again before a token could be produced.
+in the request body or the model can't see the video it is being asked about. What is
+avoidable is where the bytes came from: a ten-turn thread about one TikTok would otherwise
+resolve that post and pull the same MP4 off the CDN ten times.
 
-`web/lib/gemini.js` now keeps a downloaded clip for ten minutes, bounded by
+`web/lib/gemini.js` keeps a downloaded clip for ten minutes, bounded by
 `CLIP_CACHE_MAX_BYTES` (one maximum-sized clip's worth by default, which is around ten
-typical ones) and evicted oldest-first. It is process-global and shared across requests on a
-warm instance, so it is off in the library and switched on by `api/chat.js`, where
-deployment decisions are made. A smaller cut came with it: the whole clip stage now runs
-under a budget, so one hung platform can't hold a request open.
-
-**The anti-cadence jitter shipped in the compliance pass has been removed.** TikTok's fetch
-path briefly paused a random amount before every request, on the theory that a fixed cadence
-is a bot signature. It added latency to every real request for a benefit that was never
-measured against how TikTok actually rate-limits, so it's gone — retries still use full
-jitter in their backoff (`web/lib/retry.js`), which is a different, better-justified thing:
-that jitter exists to keep clustered retries from reconverging on the same instant, not to
-disguise request timing.
-
-## Two things to action
-
-1. **Rotate the Gemini API key.** It was shared in a chat message during handoff — assume
-   it's compromised. [docs/SECRETS.md](docs/SECRETS.md)
-2. **Run one TikTok link end to end with a real key.** Everything up to the Gemini call is
-   verified against live TikTok; the analysis leg reuses the same `generateContent` client
-   the working YouTube path uses, but has not been run with a key.
-   [docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md)
-
-## Layout
-
-```
-Sources/SeerCore/          Pure Foundation — builds and tests anywhere
-  Model/                   ClaimContext, Platform + the ingestion fork
-  Pipeline/                ClaimExtractor protocol, routing, assembly, progress
-  Gemini/                  Video client, model fallback chain, Files API upload
-  Extractors/              YouTubeExtractor, DirectMediaExtractor, CaptureBasedExtractor
-  Media/                   TikTok embed → CDN URL resolver, downloader
-  Capture/                 MediaCaptureSource seam, oEmbed resolvers
-  Transcription/           Groq/Whisper
-  Secrets/                 Keychain, AES-GCM bundle, store chaining
-Sources/SeerCapture/       iOS-only: WKWebView + RPScreenRecorder + diagnostic
-Sources/SeerUI/            SwiftUI progress animation + its observable model
-Sources/SeerUIDemo/        Runnable harness for the above — no key, no network
-Sources/SeerSecretsTool/   Dev tool: plaintext credentials → secrets.enc
-web/                       The fact-checker. Static front end, Gemini key server-side
-  lib/tiktok.js            ⟷ Sources/SeerCore/Media/TikTokMediaResolver.swift
-  lib/gemini-files.js      ⟷ Sources/SeerCore/Gemini/GeminiFilesClient.swift
-  lib/gemini.js            ⟷ Sources/SeerCore/Gemini/GeminiVideoClient.swift
-  lib/media-fetch.js       ⟷ Sources/SeerCore/Media/MediaDownloader.swift
-  lib/retry.js             ⟷ Sources/SeerCore/Networking/RetryPolicy.swift
-  lib/instagram.js         no Swift counterpart — the unported resolver
-  lib/article.js           no Swift counterpart — a pasted page, read and quoted
-  lib/search.js            no Swift counterpart — research, citations, verdicts
-  lib/verified-chat.js     ⌟
-```
-
-The `⟷` pairs are the duplicated pipeline. They are ports, not shared code, and keeping
-them honest is manual — which is the problem described at the top of this file.
+typical ones) and evicted oldest-first. It is process-global and shared across requests on
+a warm instance, so it is off in the library and switched on by `api/chat.js`, where
+deployment decisions are made. The whole clip stage also runs under a budget, so one hung
+platform can't hold a request open.
 
 ## The fact-checker
 
@@ -294,14 +139,14 @@ them honest is manual — which is the problem described at the top of this file
 route that holds the key. No build step, no dependencies.
 
 ```bash
-cp web/.env.example web/.env.local     # paste the rotated key into GEMINI_API_KEY
+cp web/.env.example web/.env.local     # paste GEMINI_API_KEY in
 cd web && npm run dev                  # → http://127.0.0.1:3000
 npm test                               # 515 tests, no network
 ```
 
-Unlike the iOS path, the key here never reaches the client at all — there is a server to
-put it behind. See [web/README.md](web/README.md) for how that works, the controls that
-keep strangers off your quota, and the Vercel deploy.
+The key never reaches the client at all — there is a server to put it behind. See
+[web/README.md](web/README.md) for how that works, the controls that keep strangers off
+your quota, and the Vercel deploy.
 
 ### What the reader waits through
 
@@ -388,110 +233,32 @@ It works with no configuration (DuckDuckGo, best-effort) and properly with any o
 Brave, Tavily, Serper or Google Programmable Search. [web/README.md](web/README.md#every-claim-carries-a-citation)
 has the rules, the query schema, and how the ledger is built.
 
-It ingests video the same two ways the Swift pipeline does, for the same reasons. A
-**YouTube** link is handed to Gemini as a URL and Gemini watches it itself. A **TikTok**
-link can't be — Gemini won't fetch one — so `web/lib/tiktok.js` does what the model won't:
-resolves the embed page to a CDN URL, downloads the MP4 and puts the bytes in the request,
-inline or via the Files API depending on size. That is the same `directMediaFetch` shape as
-`TikTokMediaResolver.swift`, and the two parsers are held to the same captured payload.
+## Layout
 
-## Progress
-
-Extraction is slow in a way users read as broken — the YouTube path is a single HTTPS call
-that can sit for half a minute while Gemini watches a video, returning nothing until it is
-done. So the pipeline reports stages:
-
-```swift
-let context = try await pipeline.extract(from: url) { progress in
-    print(progress.label)   // "Analyzing your YouTube video"
-}
 ```
-
-| Platform | Stages |
-|---|---|
-| YouTube | `resolving` → `analysing` → `done` |
-| TikTok | `resolving` → `fetchingMedia` → `analysing` → `done` |
-| TikTok (large clip) | …with `uploading` before `analysing` |
-
-`SeerUI` renders these as an indeterminate scanning animation plus a stage checklist with
-per-stage timings. Indeterminate deliberately: none of the underlying work reports a
-percentage, and a bar filling at an invented rate is a lie — a worse one once it stalls at
-90%. `AnalysisModel.timingReport` prints the same breakdown as text, which is what makes a
-slow run diagnosable rather than just annoying.
-
-To actually watch it, on macOS:
-
-```bash
-swift run SeerUIDemo      # or open Package.swift in Xcode → SeerUIDemo scheme
+web/                       The fact-checker. Static front end, Gemini key server-side
+  lib/tiktok.js            TikTok embed → CDN URL resolver, downloader
+  lib/instagram.js         Instagram post query → CDN URL resolver, downloader
+  lib/gemini.js            Model client, fallback chain, tool loop
+  lib/gemini-files.js       Files API resumable upload for larger clips
+  lib/media-fetch.js       Shared deadline / host allowlist / capped streamed read
+  lib/retry.js             Exponential backoff with full jitter
+  lib/article.js           A pasted page, read and quoted
+  lib/search.js            Research, citations, verdicts
+  lib/verified-chat.js     The fact-check turn: system prompt, tools, frames
+worker/                    Optional Playwright browser-resolve fallback
 ```
-
-`SeerUIDemo` drives the animation with `ScriptedExtractor`, which walks the real stage
-sequence on a timer and returns a canned `ClaimContext` — no Gemini key, no network, no
-share extension. Pick TikTok for the longest script, which is the only one that reaches
-`uploading` (the stage inserted mid-run rather than laid out up front) and the only one
-whose `analysing` beat runs long enough to trip the patience threshold and show the
-reassurance text. The same file carries the SwiftUI previews.
-
-**Ordering matters and the obvious bridge gets it wrong.** The handler is called
-synchronously off the main actor; forwarding each event with its own
-`Task { @MainActor in … }` spawns unordered tasks and the stage list jumps backwards.
-Yield into an `AsyncStream` and consume it with `for await`, or compare
-`ExtractionProgress.sequence`. `AnalysisModel` does both.
-
-## The architectural line
-
-Any future platform lands on one of three paths, decided once in
-`Platform.ingestionStrategy`. Ask the questions in order and stop at the first yes — each
-arm is strictly cheaper and less fragile than the one below it:
-
-1. **Will the model fetch the URL itself?** (YouTube/Gemini) → `nativeVideoIngestion`.
-   One HTTPS call, no media on the device.
-2. **Can we get at the media file?** (TikTok, via its embed page) → `directMediaFetch`.
-   Resolve, download, hand the bytes over.
-3. **Neither** → `screenCapture`. Render the embed, record the screen, transcribe. Slow,
-   needs a recording permission, and blocked on ReplayKit audio.
-
-All three conform to `ClaimExtractor` and produce the same `ClaimContext`. Adding X or
-Facebook means answering those questions, not rediscovering the fork.
-
-**Arm 3 is dead in principle and permanent in practice.** TikTok moved off it, which is
-what unblocked TikTok; Instagram — its last remaining occupant — turned out to belong on
-arm 2, and `web/lib/instagram.js` proves it by shipping that route today. What survives is
-`SeerCapture/` plus `CaptureBasedExtractor`: an unregistered extractor for a platform that
-no longer needs it, carrying the unresolved ReplayKit audio bug, in the one module CI
-cannot even compile (everything there is behind `#if os(iOS)`, so Linux builds it to
-nothing). Porting the Instagram resolver would retire the arm and the bug together — and
-used to be the recommendation here. It no longer is: `Sources/` is frozen (see above), and
-that port is exactly the kind of web → Swift work the freeze stops. So this arm is not
-scheduled to go anywhere; it stays as dead weight in a frozen module rather than being
-retired. **Do not spend anything on capture** either way — including tuning it; nothing
-there is getting less dead, only less maintained.
 
 ## Tests
 
 ```bash
-swift test
+cd web && npm test
 ```
 
-Parsers are tested against **live** captured responses from Gemini and TikTok, not against
-what the docs claim. That caught a field the documented shape doesn't mention, and it is
-the only way to test the TikTok embed blob at all — that payload has no documentation to
-write a fixture from.
-
-`SeerCapture` and `SeerUI` need an Apple SDK — see the note at the end of
-[docs/EXTRACTION_PIPELINE.md](docs/EXTRACTION_PIPELINE.md). Both are wrapped in
-`#if canImport(…)`, so they build to nothing on Linux and the package still tests there;
-that also means a syntax error in them does not surface there. Everything they depend on —
-the stage sequence, the labels, the ordering guarantee — is in `SeerCore` and is tested,
-as is `ScriptedExtractor`, which is what the demo and the previews animate.
-
-`SeerUI` now has a consumer: `swift build` on macOS compiles it because `SeerUIDemo`
-imports it, and running that demo is how the animation gets looked at rather than merely
-described. `SeerCapture` still has none, and still needs a device.
+515 unit tests, no network, no dependencies. `worker/`'s suite is 5 tests and exercises
+`urls.js` only (pure), no Playwright install needed.
 
 ## Docs
 
-- [Extraction pipeline](docs/EXTRACTION_PIPELINE.md) — architecture, per-platform status,
-  the capture blocker in detail
-- [Instagram spike](docs/SPIKE-instagram.md) — what was tested, what it found, and the credential-free route that unblocked it
-- [Secrets](docs/SECRETS.md) — how keys are handled, and what that does and doesn't protect
+- [Pipeline audit](docs/PIPELINE-AUDIT.md) — a correctness-bug pass over the fact-checking
+  pipeline

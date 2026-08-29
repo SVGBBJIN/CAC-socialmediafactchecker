@@ -67,9 +67,9 @@ Node functions — so the deploy is configuration, not a rewrite:
    was deployed the day the project was imported.
 3. Deploy.
 
-The repo root is a Swift package, so a root-directory build would otherwise find nothing
-web-shaped and produce an empty deployment — every path 404s. The `vercel.json` at the
-repo root is what prevents that: it builds `web/api/*.js` as Node functions and
+The fact-checker lives in `web/`, not the repo root, so a root-directory build would
+otherwise find nothing web-shaped and produce an empty deployment — every path 404s. The
+`vercel.json` at the repo root is what prevents that: it builds `web/api/*.js` as Node functions and
 `web/public/**` as static files, and routes `/api/*` and `/` at them. Setting **Root
 Directory → `web`** in project settings instead also works — then Vercel sees `web/` as
 the project root, zero-config detection applies, and the root `vercel.json` is ignored.
@@ -346,10 +346,7 @@ is not attempted at all. If the worker can't help, the platform's own error is w
 sees — never "the browser worker returned 502", which would report our infrastructure
 instead of their link.
 
-This is **not** the screen-capture path in `Sources/SeerCapture`, which is dead and stays
-dead: that one is real-time by construction, needs a visible surface to record, and hits
-ReplayKit's silent-audio bug. This resolves; it does not record. See
-[worker/README.md](../worker/README.md).
+This resolves; it does not record. See [worker/README.md](../worker/README.md).
 
 **Clips are kept between turns.** Every turn replays the whole conversation, and each clip
 is re-attached at its first mention, so before this a thread about one reel re-resolved and
@@ -401,11 +398,9 @@ npm test                              # unit tests, no network, no dependencies
 ```
 
 `lib/gemini.js`'s chain — Flash 3.7, then 3.6, 3.5, 3-preview, 2.5, 2.0, then the Lite tier
-(3.5-flash-lite, 3.1-flash-lite, 2.5-flash-lite) once every full model above has failed —
-used to mirror `Sources/SeerCore/Gemini/GeminiModel.swift` exactly; the Lite tier and Flash
-3.7 are `web/`-only, per CLAUDE.md's freeze policy. Model IDs get retired and key tiers
-differ; pinning one ID breaks in the field. See the comments on `DEFAULT_MODEL_CHAIN` for
-the full reasoning, and the Swift file's own (smaller, unmirrored) chain for its part.
+(3.5-flash-lite, 3.1-flash-lite, 2.5-flash-lite) once every full model above has failed.
+Model IDs get retired and key tiers differ; pinning one ID breaks in the field. See the
+comments on `DEFAULT_MODEL_CHAIN` for the full reasoning.
 
 ## Graceful degradation
 

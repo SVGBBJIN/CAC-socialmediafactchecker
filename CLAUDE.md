@@ -4,33 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## The one thing to know before anything else
 
-This repo has two surfaces, and they are **not equals**:
+`web/` is the product and the whole implementation: the fact-checker, link → transcript →
+research → cited verdict. All work goes here.
 
-| | What it is | State |
-|---|---|---|
-| **`web/`** | The fact-checker: link → transcript → research → cited verdict | **The product, and the canonical implementation.** All new work goes here. |
-| **`Sources/`** | A Swift extraction pipeline: link → `ClaimContext` | **Frozen — reference only.** No fact-check layer exists on this side, and it no longer receives ported fixes. |
-
-Concretely: **a fix that lands in `web/` stays in `web/`.** Do not port it into `Sources/`. A
-gap between the two (e.g. `Sources/` missing a host-allowlist check `web/` has) is expected,
-not a bug to fix.
-
-The one standing exception is **presentation**, not pipeline: `SeerUI/LibraryConceptView.swift`
-is a mirror of the `web/` library screen by design, so a *layout* decision made in `web/` may
-be ported to it (`DeviceProfile.swift` ⟷ `public/device.js` is the current example). That is
-still a narrow carve-out — it covers how the same screen is arranged, never how a claim is
-extracted, fetched, searched or cited. `Sources/` still must compile and its own tests must still pass — "frozen"
-means no new parity work goes in, not that it's abandoned to bit rot. Don't delete
-`Sources/` either unless explicitly asked; that's a separate, deliberate decision.
-
-`worker/` is a third, optional piece: a Playwright browser-automation service `web/` can
+`worker/` is a second, optional piece: a Playwright browser-automation service `web/` can
 call as a fallback when its plain-HTTP TikTok/Instagram resolvers get throttled or refused.
 It's off by default (`BROWSER_WORKER_URL` unset) and never touches the byte path itself —
 it only reports a media URL for `web/` to download normally.
 
 ## Commands
 
-### `web/` (the product — most work happens here)
+### `web/`
 
 ```bash
 cd web
@@ -49,19 +33,6 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-caption-search.js`). As of this writing the whole
 suite is 515 tests; `worker/`'s is 5.
 
-### `Sources/` (Swift, frozen)
-
-```bash
-swift test               # SeerCoreTests + SeerUITests
-swift run SeerUIDemo     # macOS only: watch the progress animation with a scripted extractor, no key/network
-```
-
-`SeerCapture` and the SwiftUI half of `SeerUI` need an Apple SDK and are wrapped in
-`#if canImport(…)`, so they build to nothing on Linux (CI runs `swift test` on
-`ubuntu-latest`). `SeerUI/DeviceProfile.swift` is deliberately outside that guard — it is
-pure Foundation precisely so the layout rule stays testable in CI, which is what
-`SeerUITests` covers.
-
 ### `worker/` (optional browser-resolve fallback)
 
 ```bash
@@ -72,8 +43,8 @@ node --test test.js      # exercises urls.js only (pure), no playwright install 
 
 ### CI
 
-`.github/workflows/tests.yml` runs all three test suites (swift, web, worker) daily via
-cron and on manual dispatch — not on push/PR.
+`.github/workflows/tests.yml` runs both test suites (web, worker) daily via cron and on
+manual dispatch — not on push/PR.
 
 ## Architecture
 
@@ -200,11 +171,6 @@ to work, collecting the identical 400 at every step and failing the turn. Instea
 is dropped, the same model is retried, and the refusal is remembered per model
 (`thinkingConfigRefused`) so it is learned once instead of on every request. The retry can't
 be refused for the same reason twice, since it no longer carries the field.
-This chain used to be mirrored in `Sources/SeerCore/Gemini/GeminiModel.swift`, but the
-Lite tier and Flash 3.7 are `web/`-only additions — per the freeze policy above, that gap
-is expected, not a bug to fix. If you ever do touch that Swift file for a non-web reason,
-its own chain (still 3.6 → 3.5 → 3-preview → 2.5 → 2.0) is what to keep the comments'
-reasoning in sync with, not this one.
 
 **Bounding a request**: `lib/guard.js` (passphrase, rate limits, input size, per-day/turn
 caps — all in-memory, resets on cold start / new process, so treat `APP_PASSWORD` as the
@@ -221,42 +187,10 @@ a smaller budget again (`TOOL_ROUND_THINKING_BUDGET_TOKENS`, 1024): deciding wha
 is a shallower task than weighing what came back, and the reader waits through that
 deliberation before the first search is even dispatched.
 
-### `Sources/` (Swift, frozen — read `docs/EXTRACTION_PIPELINE.md` before touching)
-
-Ingestion strategy is decided once per platform in `Platform.ingestionStrategy`, in a
-fixed cost order — ask each question and stop at the first yes:
-1. Will the model fetch the URL itself? (YouTube) → `nativeVideoIngestion`
-2. Can we get the media file? (TikTok, via embed page) → `directMediaFetch`
-3. Neither → `screenCapture` (dead in practice: blocked on a ReplayKit silent-audio bug; `SeerCapture` has no working use and nothing should be spent on it)
-
-All three conform to `ClaimExtractor` and produce a platform-agnostic `ClaimContext`
-(transcript, frames, candidate claims, provenance). Nothing downstream knows which
-platform a claim came from — but on the Swift side there *is* no downstream: search,
-citations and verdict rendering only exist in `web/`.
-
-Layout: `Model/` (`ClaimContext`, `Platform`), `Pipeline/` (extractor protocol, routing,
-`SeerPipelineBuilder`, `ScriptedExtractor` for the demo), `Gemini/` (video client, model
-chain, Files API upload), `Extractors/`, `Media/` (TikTok resolver, downloader),
-`Capture/` + `SeerCapture/` (dead arm 3), `Transcription/` (Groq/Whisper), `Secrets/`
-(Keychain, AES-GCM bundle).
-
-### Where `web/` and `Sources/` still correspond
-
-A handful of `web/` files are ports of `Sources/SeerCore` originals and are commented as
-such (`lib/tiktok.js` ⟷ `TikTokMediaResolver.swift`, `lib/gemini-files.js` ⟷
-`GeminiFilesClient.swift`, `lib/gemini.js` ⟷ `GeminiVideoClient.swift`,
-`lib/media-fetch.js` ⟷ `MediaDownloader.swift`, `lib/retry.js` ⟷ `RetryPolicy.swift`).
-These are duplicated logic, not shared code — per the freeze policy above, keeping them in
-sync is no longer expected or wanted going forward; the pairing is documentation of
-history, not a maintenance obligation.
-
 ## Testing conventions
 
-- **Swift parsers are tested against live-captured payloads**, not documented shapes —
-  TikTok's embed blob has no official docs, so fixtures come from real captured responses.
 - **`web/` tests are pure unit tests with no network and no dependencies** — if a change
-  needs network access to test, it likely needs a captured-fixture test instead, matching
-  the Swift convention above.
+  needs network access to test, it likely needs a captured-fixture test instead.
 - Deploy-affecting behavior (Vercel function timeout, rate-limit storage being in-memory,
   root `vercel.json` vs. Root Directory setting) is documented in `web/README.md` — read it
   before changing deploy config.
