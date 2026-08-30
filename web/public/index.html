@@ -1780,19 +1780,23 @@
     .passphrase input { font-size: 16px; }
 
     /* The settings nav rail has nowhere to sit beside the content pane at this width —
-       stacked instead, nav first as a horizontal tab strip (scrollable if Done doesn't
-       fit), content below taking whatever height is left. */
+       stacked instead, nav first as a horizontal bar, content below taking whatever height
+       is left. Only the tab list itself scrolls if it doesn't fit (Profile/General/Search/
+       Instructions can run wider than a narrow phone) — the wordmark and Done stay put at
+       either end rather than requiring a scroll to reach either one. */
     .settings-shell { flex-direction: column; }
     .settings-nav {
       width: 100%; flex-direction: row; align-items: center; gap: 10px;
       padding: max(14px, env(safe-area-inset-top)) 14px 14px;
       border-right: 0; border-bottom: 1px solid var(--border);
+    }
+    .settings-nav-head { margin-bottom: 0; flex: 0 0 auto; }
+    .settings-nav-list {
+      flex-direction: row; flex: 1 1 auto; min-width: 0;
       overflow-x: auto;
     }
-    .settings-nav-head { margin-bottom: 0; }
-    .settings-nav-list { flex-direction: row; flex: 0 0 auto; }
     .settings-nav-item { white-space: nowrap; }
-    .settings-close { margin-top: 0; width: auto; margin-left: auto; }
+    .settings-close { margin-top: 0; width: auto; flex: 0 0 auto; }
     .settings-content { padding: 24px 20px max(24px, env(safe-area-inset-bottom)); }
   }
 
