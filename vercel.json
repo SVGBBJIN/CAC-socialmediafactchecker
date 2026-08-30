@@ -8,6 +8,7 @@
   "routes": [
     { "src": "/api/(chat|config|resolve-media|probe-link)", "dest": "/web/api/$1.js" },
     { "src": "/", "dest": "/web/public/index.html" },
-    { "src": "/(.*)", "dest": "/web/public/$1" }
+    { "src": "/(.*)", "dest": "/web/public/$1", "check": true },
+    { "src": "/(.*)", "dest": "/web/public/index.html" }
   ]
 }
