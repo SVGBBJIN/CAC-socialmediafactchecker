@@ -624,8 +624,16 @@ function usableWarmResult(warm, result) {
  * twice — here, so a disabled-by-preference reader never gets the class added at all, and
  * again in CSS under `[data-motion="reduced"]` as a second net, same belt-and-suspenders
  * pattern the CSS comment on that rule explains.
+ *
+ * Two flags, deliberately not one: `composerWasVideo` is a rising-edge latch for the
+ * animation itself — it clears the moment the text stops being a video link, so pasting a
+ * second one right after still replays the entrance. `paneRevealed` backs `updatePaneMode`
+ * instead, and is sticky for the rest of this composer session (see that function) — the
+ * video pane, once shown, does not hide itself again just because the field was edited back
+ * into something else.
  */
 let composerWasVideo = false;
+let paneRevealed = false;
 function maybeTriggerGlassEntrance(url) {
   const isVideo = Boolean(url) && SUPPORTED_PLATFORMS.has(platformFor(url));
   if (isVideo && !composerWasVideo && !inFlight && settings.glassEntrance && !prefersReducedMotion()) {
@@ -636,6 +644,10 @@ function maybeTriggerGlassEntrance(url) {
     grid.classList.remove("glass-enter");
     void grid.offsetWidth;
     grid.classList.add("glass-enter");
+  }
+  if (isVideo && !paneRevealed) {
+    paneRevealed = true;
+    updatePaneMode(); // drops `.single-pane` in the same tick the animation class goes on
   }
   composerWasVideo = isVideo;
 }
@@ -1426,6 +1438,24 @@ function renderEmptyState() {
   clearVideoMedia();
   renderChatPane();
   refreshTimeline();
+  updatePaneMode();
+}
+
+/**
+ * Under `settings.glassEntrance`, the composer starts on one pane, not the usual two — the
+ * video pane has nothing to show yet, so showing an empty placeholder box beside the claims
+ * pane would undercut the animation's own premise of the second pane *arriving*.
+ * `maybeTriggerGlassEntrance` reveals it (with the entrance animation) the moment a video
+ * link appears, and stays revealed for the rest of this composer session — see its own
+ * comment for why that's a one-way switch rather than something this also reverts.
+ *
+ * Once anything is actually selected or running, both panes always show, video or not
+ * (`renderVideoPane` calls this too): a checked article still has a page-preview placeholder
+ * to put there, so there is no "arriving" left to stage.
+ */
+function updatePaneMode() {
+  const single = settings.glassEntrance && selectedId == null && !paneRevealed;
+  el.contentGrid.classList.toggle("single-pane", single);
 }
 
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
@@ -1554,6 +1584,8 @@ function startNewCheck() {
   pendingFollowup = null;
   chatThread = [];
   pendingChat = null;
+  composerWasVideo = false;
+  paneRevealed = false; // fresh composer session — back to one pane under glassEntrance
   el.linkInput.value = "";
   renderLibrary(el.searchInput.value);
   renderEmptyState();
@@ -1808,6 +1840,10 @@ function renderVideoPane(entry) {
   el.videoPlaceholder
     .querySelector("path")
     ?.setAttribute("d", SUPPORTED_PLATFORMS.has(entry.platform) ? PLAY_GLYPH : PAGE_GLYPH);
+  // A selected/running entry always has something for the video pane to show (even a page
+  // gets the sheet-of-paper placeholder above) — see updatePaneMode's own doc comment for
+  // why that means two panes here regardless of whether this entry is a video.
+  updatePaneMode();
 
   const token = ++videoPaneToken;
   clearVideoMedia();
@@ -3623,6 +3659,7 @@ el.settingHighContrast.addEventListener("change", () => {
 el.settingGlassEntrance.addEventListener("change", () => {
   settings.glassEntrance = el.settingGlassEntrance.checked;
   persistSettings();
+  updatePaneMode();
 });
 // Drops the class once the animation finishes so `maybeTriggerGlassEntrance` can cleanly
 // replay it later rather than fighting a still-applied one. Filtered to the grid's own

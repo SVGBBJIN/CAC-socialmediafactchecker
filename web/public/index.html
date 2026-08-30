@@ -328,6 +328,15 @@
     animation: none;
   }
 
+  /* Set by `updatePaneMode` (app.js) while `settings.glassEntrance` is on and the composer
+     hasn't seen a video link yet — the empty state starts on one pane instead of the usual
+     two, so the video pane has something to visibly *arrive into* rather than sitting there
+     as an empty placeholder box beside the claims pane. `.claims-pane-wrap` centers in a
+     readable column instead of stretching edge-to-edge once it's the only thing in the row —
+     the same width a single-column chat-style layout would use. */
+  .content-grid.single-pane .video-pane { display: none; }
+  .content-grid.single-pane .claims-pane-wrap { max-width: 640px; margin: 0 auto; }
+
   /* ---------- Video preview pane ---------- */
   .video-pane {
     /* Wide enough that a vertical clip reads at a real size once `.video-thumb` below
@@ -2025,7 +2034,7 @@
         <div class="settings-row">
           <div>
             <div class="settings-row-label">Glass entrance animation</div>
-            <div class="settings-row-sub">When a pasted link is a video, the two-panel view materializes with a glassmorphic effect.</div>
+            <div class="settings-row-sub">Start on a single pane; when a pasted link is a video, the second pane materializes with a glassmorphic effect.</div>
           </div>
           <label class="switch">
             <input type="checkbox" id="setting-glass-entrance" />
