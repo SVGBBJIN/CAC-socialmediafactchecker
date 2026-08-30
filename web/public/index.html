@@ -1108,34 +1108,11 @@
   .settings-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   .settings-dialog { width: min(440px, 92vw); max-height: 82vh; overflow-y: auto; padding: 22px; }
-  .settings-dialog .actions { margin-top: 18px; }
 
-  /* Settings is the one dialog long enough — theme, accessibility, search status, a
-     multi-line custom-instructions field — to want the whole viewport rather than a
-     centered card, so it gets its own full-bleed treatment instead of `.settings-dialog`'s
-     440px box. `inset: 0; margin: 0` on the `<dialog>` itself (already `position: fixed`
-     from the UA stylesheet while open) is what makes it fill the screen; the content is
-     then re-centered to a readable column width inside that via `#settings-form`, same as
-     any other full-width page.
-     The `[open]` qualifier on `display: flex` is load-bearing, not decoration: the UA
-     stylesheet hides a closed `<dialog>` via `dialog:not([open]) { display: none }`
-     (specificity 0,1,1), and two plain classes (0,2,0) outrank that regardless of `[open]`
-     — so without it this rule forced the dialog to render as a fullscreen overlay over the
-     whole app even while closed, permanently wiring the UI to the settings page. */
-  .settings-dialog.settings-dialog-full[open] {
-    width: 100vw; height: 100vh;
-    max-width: 100vw; max-height: 100vh;
-    inset: 0; margin: 0;
-    border-radius: 0;
-    padding: 0;
-    display: flex;
-  }
-  .settings-dialog-full #settings-form {
-    width: min(560px, 100%);
-    margin: 0 auto;
-    padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
-    overflow-y: auto;
-  }
+  /* Settings keeps the small centered `.settings-dialog` box every other dialog uses
+     (fullscreen was tried and reverted — see git history). It gets its own header row —
+     title plus an X close button in the corner, replacing the old bottom "Done" button —
+     rather than the plain `<h2>` other dialogs use. */
   .settings-page-header {
     display: flex; align-items: center; justify-content: space-between;
     gap: 12px; margin-bottom: 6px;
@@ -1970,7 +1947,7 @@
     </form>
   </dialog>
 
-  <dialog class="passphrase settings-dialog settings-dialog-full" id="settings-dialog">
+  <dialog class="passphrase settings-dialog" id="settings-dialog">
     <form method="dialog" id="settings-form">
       <div class="settings-page-header">
         <h2>Settings</h2>
@@ -2032,10 +2009,6 @@
         <h3>Custom instructions</h3>
         <p class="settings-row-sub" style="margin: 0 0 8px;">Added to every check and follow-up you send — e.g. "keep answers under 100 words" or "always note the source's publish date."</p>
         <textarea id="setting-system-prompt" placeholder="Optional instructions for the model…" maxlength="1000"></textarea>
-      </div>
-
-      <div class="actions">
-        <button type="submit">Done</button>
       </div>
     </form>
   </dialog>
