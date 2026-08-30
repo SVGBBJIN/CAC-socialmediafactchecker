@@ -185,7 +185,27 @@
     padding: 9px 10px;
     border-radius: 9px;
     cursor: pointer;
+    /* Stagger fade-in from the TRASE Design System's Sidebar — renderLibrary (app.js)
+       rebuilds the whole list on every change, so each row re-plays this on every render
+       rather than just once on first load; that matches the DS's own Sidebar-card demo,
+       which mounts the same list fresh with no "already settled" state to preserve. */
+    opacity: 0;
+    animation: lib-item-in 0.3s ease forwards;
   }
+  .lib-item:nth-of-type(n+9) { animation-delay: 0s; }
+  .lib-item:nth-of-type(1) { animation-delay: 0.02s; }
+  .lib-item:nth-of-type(2) { animation-delay: 0.05s; }
+  .lib-item:nth-of-type(3) { animation-delay: 0.08s; }
+  .lib-item:nth-of-type(4) { animation-delay: 0.11s; }
+  .lib-item:nth-of-type(5) { animation-delay: 0.14s; }
+  .lib-item:nth-of-type(6) { animation-delay: 0.17s; }
+  .lib-item:nth-of-type(7) { animation-delay: 0.2s; }
+  .lib-item:nth-of-type(8) { animation-delay: 0.23s; }
+  @keyframes lib-item-in {
+    from { opacity: 0; transform: translateX(-4px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  [data-motion="reduced"] .lib-item { animation: none; opacity: 1; }
   .lib-item:hover { background: var(--surface-raised); }
   .lib-item.active { background: var(--surface-raised); }
   .lib-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -335,28 +355,62 @@
     border-radius: 0;
   }
 
-  /* ---------- Custom player chrome ---------- */
-  /* Replaces the `<video>` element's native `controls` (removed from the markup): just
-     unmute and fullscreen, floated over the top-right corner. Play/pause stays a tap on
-     the video itself, which is what the native controls' big center button amounted to
-     anyway. Shown only once a direct MP4 is actually playing — see `showVideoElement` and
-     `clearVideoMedia` in app.js — never over the YouTube embed, which draws its own. */
-  .video-controls {
-    position: absolute; top: 8px; right: 8px; z-index: 2;
-    display: flex; gap: 6px;
-  }
-  .video-control-btn {
+  /* ---------- Custom player chrome (ported from the TRASE Design System's VideoPlayer) ----------
+     One overlay instead of the old split "top-right button row" + "below-video timeline
+     strip": a tap-anywhere play/pause surface (`.vp-overlay`) with a center icon, and a
+     bottom bar (`.vp-bar`) carrying play/pause, elapsed/duration, the scrub track (with
+     claim-window markers — what used to be `.video-timeline-mark`), unmute, and fullscreen.
+     Native `controls` stays off the `<video>` element. Shown only once a direct MP4 is
+     actually playing — see `showVideoElement`/`clearVideoMedia` in app.js — never over the
+     YouTube embed, which draws its own chrome, or a photo carousel, which has nothing to
+     play. Fades in on interaction (or while paused) and auto-hides while playing — see
+     `wakePlayerChrome` in app.js — the DS's own `useState`-driven `wake()`/`hideTimer`. */
+  .vp-overlay {
+    position: absolute; inset: 0; z-index: 1;
     display: flex; align-items: center; justify-content: center;
-    width: 30px; height: 30px;
-    border-radius: 8px;
-    border: 1px solid rgba(255,255,255,0.16);
-    background: rgba(10,12,16,0.55);
-    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
-    color: #fff; cursor: pointer;
+    cursor: pointer;
   }
-  .video-control-btn svg { width: 16px; height: 16px; }
-  .video-control-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .video-control-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .vp-mark {
+    position: absolute; top: 12px; left: 12px;
+    width: 18px; height: 18px; opacity: 0.6;
+    pointer-events: none;
+  }
+  .vp-play-icon {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(10,12,16,0.5);
+    backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .vp-play-icon svg { width: 20px; height: 20px; margin-left: 2px; }
+  .vp-overlay:hover .vp-play-icon { background: rgba(10,12,16,0.68); transform: scale(1.05); }
+
+  .vp-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 2;
+    display: flex; align-items: center; gap: 8px;
+    padding: 22px 10px 10px;
+    background: linear-gradient(to top, rgba(0,0,0,0.65), rgba(0,0,0,0));
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+  }
+  .video-thumb.is-active .vp-bar { opacity: 1; transform: translateY(0); pointer-events: auto; }
+  [data-motion="reduced"] .vp-bar { transition: none; }
+  /* Hover-to-reveal means nothing on a touchscreen (see the `[data-pointer="coarse"]`
+     section further down) — resting visible there instead of fighting for a `mousemove`
+     that a tap never fires. */
+  [data-pointer="coarse"] .vp-bar { opacity: 1; transform: none; pointer-events: auto; }
+
+  .vp-btn {
+    flex: none; width: 22px; height: 22px;
+    border: none; background: none; color: var(--ink);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+  }
+  .vp-btn svg { width: 16px; height: 16px; }
+  .vp-btn:hover { color: var(--accent); }
+  .vp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* Two icons per button, one shown at a time, toggled by a state class app.js sets
      (`playing`/`unmuted`/`fs-active`) rather than by rewriting a path's `d` at runtime —
      cheaper and it keeps both glyphs inspectable in the markup. Paused, muted and
@@ -373,40 +427,45 @@
   #fullscreenBtn.fs-active .icon-fs-enter { display: none; }
   #fullscreenBtn.fs-active .icon-fs-exit { display: block; }
 
-  /* ---------- Claim timeline ---------- */
-  /* A yellow band per claim the answer timestamped, laid over a scrubber on the same
-     0–duration scale — built in `renderTimelineTrack`/`refreshTimeline` (app.js) from the
-     same `timeline()` windows the in-text `[t=…]` chips already use, so a claim lights up
-     in both places from one source of truth. Direct MP4 only, same restriction as
-     `syncPlayhead`: a YouTube embed's duration/currentTime aren't readable from this page. */
-  .video-timeline { margin: 0 0 10px; }
-  .video-timeline-track {
-    position: relative;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-raised);
-    cursor: pointer;
+  .vp-time {
+    flex: none; font-family: var(--font-mono); font-size: 10.5px;
+    color: rgba(240,237,230,0.85); font-variant-numeric: tabular-nums; min-width: 28px;
   }
-  .video-timeline-track:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-  .video-timeline-progress {
-    position: absolute; top: 0; bottom: 0; left: 0;
-    width: 0%;
-    border-radius: 999px 0 0 999px;
-    background: var(--accent);
+  .vp-duration { text-align: right; }
+
+  /* The claim-window scrub track — what used to be the separate `.video-timeline` strip
+     below the video, now the `.vp-bar`'s own middle section. `#timelineTrack`/
+     `#timelineProgress` are the same ids `renderTimelineTrack`/`syncPlayhead` (app.js)
+     already wrote to; only the classes and their container moved. */
+  .vp-scrub { flex: 1; padding: 8px 0; cursor: pointer; }
+  .vp-scrub:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .vp-scrub-track { position: relative; height: 3px; border-radius: 999px; background: rgba(255,255,255,0.25); }
+  .vp-scrub-fill {
+    position: absolute; top: 0; left: 0; height: 100%; width: 0%;
+    border-radius: 999px; background: var(--accent); pointer-events: none;
+  }
+  .vp-scrub-thumb {
+    position: absolute; top: 50%; left: 0%; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent); transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 3px rgba(79,209,197,0.22);
     pointer-events: none;
   }
-  .video-timeline-mark {
-    position: absolute; top: -3px; bottom: -3px;
-    min-width: 3px;
-    border-radius: 3px;
-    background: rgba(230,196,60,0.55);
+  /* One claim window per mark, sized to the fraction of `duration` it covers rather than
+     the DS's plain point ticks — a real check's claims have real durations worth showing,
+     not just a single timestamp. */
+  .vp-marker {
+    position: absolute; top: 50%; height: 9px; min-width: 2px;
+    transform: translateY(-50%);
+    border-radius: 1px;
+    background: var(--accent-2);
+    opacity: 0.9;
     pointer-events: none;
-    transition: background 0.15s ease;
+    transition: background 0.15s ease, opacity 0.15s ease;
   }
   /* The mark the playhead is inside right now — same "playing" idea `.ts-chip.playing`
      marks in the answer text, same trigger (`syncPlayhead`), opaque gold instead of the
-     resting translucent yellow so the eye finds it without having to read numbers. */
-  .video-timeline-mark.playing { background: #E6C43C; }
+     resting violet so the eye finds it without having to read numbers. */
+  .vp-marker.playing { background: #E6C43C; opacity: 1; }
   .video-media {
     position: absolute; inset: 0;
     width: 100%; height: 100%;
@@ -1263,14 +1322,52 @@
     width: 6px; height: 6px; border-radius: 50%;
     background: var(--good); border: 1px solid var(--surface);
   }
-  .account-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
-  .account-tabs button {
-    flex: 1; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--surface-raised); color: var(--ink-dim);
-    font-family: var(--font-body); font-size: 12.5px; cursor: pointer;
+  /* Ported from the TRASE Design System's Screens-Auth.html card — `.auth-wrap` there,
+     renamed `.auth-card` here since `#account-dialog` already carries `.passphrase` for
+     the shared dialog reset (border/background/color/font — see that rule) and only needs
+     to add what's different: a taller radius, more padding, a centered column, and (the
+     one place this app breaks its own "no drop shadows" rule, because the DS's own Auth
+     screen does too) a shadow to lift the card off the backdrop. */
+  .auth-card {
+    width: min(360px, 92vw);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 32px 28px;
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.5);
   }
-  .account-tabs button.active { border-color: var(--accent); color: var(--accent); }
-  .account-message { font-size: 12px; color: var(--ink-dim); margin: -4px 0 12px; }
+  /* `backdrop-filter` layered onto the shared `.passphrase::backdrop` background rule
+     (different property, so both apply) — the DS screen's own `.backdrop` blurs what's
+     behind the card; every other dialog in this app just dims it. */
+  #account-dialog::backdrop { backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+  .auth-mark { width: 34px; height: 34px; margin-bottom: 14px; }
+  .auth-mark svg { width: 100%; height: 100%; }
+  .auth-wordmark {
+    font-family: var(--font-display); font-size: 15px; letter-spacing: 0.14em;
+    color: var(--ink-dim); text-transform: uppercase; margin-bottom: 26px;
+  }
+  .auth-card h2 { font-size: 24px; text-align: center; }
+  .auth-sub { margin: 0 0 28px; font-size: 13.5px; color: var(--ink-dim); text-align: center; line-height: 1.5; }
+  .auth-form { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+  .auth-form .field { display: flex; flex-direction: column; }
+  .auth-form label { font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .auth-form .field input { margin-bottom: 0; }
+  .auth-submit {
+    width: 100%; margin-top: 6px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .auth-submit-icon { width: 16px; height: 16px; }
+  .auth-switch {
+    margin-top: 22px; display: flex; gap: 5px;
+    font-size: 13px; color: var(--ink-dim);
+  }
+  .auth-switch-link {
+    padding: 0; border: 0; background: none;
+    color: var(--accent); font: inherit; cursor: pointer;
+  }
+  .auth-switch-link:hover { text-decoration: underline; }
+  .auth-switch-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .account-message { font-size: 12px; color: var(--ink-dim); margin: -4px 0 12px; text-align: center; }
   .account-message.error { color: var(--bad); }
   .account-message:empty { display: none; }
 
@@ -1553,44 +1650,37 @@
       pointer-events: none;
     }
 
-    /* The custom mute/fullscreen buttons live inside `.video-thumb`, which is full-bleed
-       here — their base-rule `top: 8px; right: 8px` would otherwise sit directly under
-       the topbar's own settings gear (z-index 3, same corner). Dropped below it by the
-       same flat topbar-height estimate the timeline below uses. */
-    .video-controls {
-      top: calc(env(safe-area-inset-top, 0px) + 54px); right: 14px;
+    /* `.vp-bar` lives inside `.video-thumb`, which is full-bleed here (see above) — its
+       base rule's `bottom: 0` would land it directly under the claims sheet anchored to
+       `.video-thumb`'s own bottom edge (`.content-grid` below), never actually visible.
+       Floats near the top instead, in the same "reveal gap" between the topbar and the
+       sheet the old `.video-timeline` strip used to occupy — pushed down by a flat
+       topbar-height estimate (safe-area inset + its own ~38px content) rather than
+       reading it from the DOM, same as `.video-title` below shares this constant with.
+       Always visible rather than fade/auto-hide (its base rule): a tap toggling play on
+       `.vp-overlay` doesn't "wake" it the way a `mousemove` does on a pointing device, and
+       an auto-hiding control bar over an ambient full-bleed backdrop is a worse trade here
+       than it is over a boxed player elsewhere. */
+    .vp-bar {
+      position: absolute; z-index: 1;
+      top: calc(env(safe-area-inset-top, 0px) + 54px); left: 14px; right: 14px; bottom: auto;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(10,12,16,0.55);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      opacity: 1; transform: none; pointer-events: auto;
     }
 
     /* What used to be the card's chip/title/link, now floating over the top of the video
-       instead of stacked in a box below it, pushed down by a flat estimate of the
-       topbar's height (safe-area inset + its own ~38px content) rather than reading it
-       from the DOM — this is the one place that number isn't shared with app.js, so if
-       the topbar's height ever changes, this constant has to move with it.
-       Whichever of `.video-timeline`/`.video-title` is actually first onscreen carries
-       that offset — the timeline only exists for a direct MP4 (see `setPlayerChromeVisible`
-       in app.js), so on a YouTube post, a carousel, or before anything has resolved, it's
-       `hidden` and `.video-title` is the true first element. The `[hidden] + …` selector
-       still matches in that case: sibling combinators see markup adjacency, not whether
-       the sibling actually rendered a box. */
-    /* The extra `margin-right` on both is the same reservation: the mute/fullscreen
-       buttons float over this same top band at `right: 14px` (see `.video-controls`
-       above), and without it a long caption's first line runs directly under their
-       icons instead of wrapping clear of them. */
-    .video-timeline {
-      position: relative; z-index: 1;
-      margin: calc(env(safe-area-inset-top, 0px) + 58px) 78px 8px 14px;
-    }
-    .video-timeline-track {
-      background: rgba(10,12,16,0.55);
-      backdrop-filter: blur(8px);
-    }
+       instead of stacked in a box below it. `.vp-bar` above no longer occupies flow space
+       to push these down the way the old in-flow `.video-timeline` did — it's an overlay
+       inside `.video-thumb`, not a sibling — so the offset here is a flat estimate of
+       topbar height *plus* the bar's own height, not shared with app.js: if either one's
+       height changes, this constant has to move with it. */
     .video-title {
       position: relative; z-index: 1;
-      margin: 0 78px 4px 14px;
+      margin: calc(env(safe-area-inset-top, 0px) + 100px) 14px 4px 14px;
       text-shadow: 0 1px 6px rgba(0,0,0,0.75);
-    }
-    #videoTimeline[hidden] + .video-title {
-      margin-top: calc(env(safe-area-inset-top, 0px) + 58px);
     }
     .video-link {
       position: relative; z-index: 1;
@@ -1759,7 +1849,7 @@
     [data-contrast="high"] .video-pane::after {
       background: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0.15));
     }
-    [data-contrast="high"] .video-timeline-track,
+    [data-contrast="high"] .vp-bar,
     [data-contrast="high"] .video-link { background: rgba(5,6,10,0.85); }
     [data-contrast="high"] .claims-pane { background: rgba(10,12,16,0.98); }
     [data-contrast="high"] .entry-bar { background: rgba(10,12,16,0.98); }
@@ -1907,21 +1997,44 @@
                  slide order, swipeable on touch and scrollable with a trackpad. -->
             <div class="video-media image-strip" id="videoImages" hidden></div>
 
-            <!-- Native `controls` is gone from the <video> above — this is the whole
-                 control surface now: play/pause, unmute (autoplay only works muted, so
+            <!-- Ported from the TRASE Design System's VideoPlayer: a tap-anywhere overlay
+                 (center play icon, hidden while playing — see the `play`/`pause` listeners
+                 in app.js) instead of relying on the button below alone, plus a small
+                 decorative brand mark. Native `controls` stays off the <video> above. -->
+            <div class="vp-overlay" id="vpOverlay" hidden>
+              <svg class="vp-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="7.5" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="9 2 9 2" stroke-linecap="round"/>
+                <circle cx="12" cy="12" r="2" fill="var(--accent)"/>
+                <rect x="15.3" y="10.6" width="1.8" height="2.8" rx="0.5" fill="var(--accent-2)"/>
+              </svg>
+              <span class="vp-play-icon" id="vpPlayIcon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </span>
+            </div>
+
+            <!-- The whole control surface, one bar instead of the old always-on top-right
+                 button row plus a separate below-video timeline strip: play/pause,
+                 elapsed/duration, a scrub track carrying the claim-window markers (what
+                 used to be `.video-timeline-mark`), unmute (autoplay only works muted, so
                  the default state is always "muted" and this is how a reader leaves it),
-                 and fullscreen. Play/pause is also a tap anywhere else on the video
-                 itself — see the `videoThumb` click handler in app.js. -->
-            <div class="video-controls" id="videoControls" hidden>
-              <button type="button" class="video-control-btn" id="playBtn" aria-pressed="false" aria-label="Play" title="Play">
-                <svg class="icon-play" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M7 5.5v13l11-6.5-11-6.5z" fill="currentColor"/>
-                </svg>
-                <svg class="icon-pause" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M7.5 5h3v14h-3zM13.5 5h3v14h-3z" fill="currentColor"/>
-                </svg>
+                 and fullscreen — mute/fullscreen are this app's own addition, the DS
+                 component's own scope stops at play/scrub. Fades in on interaction (or
+                 while paused) and auto-hides while playing — see wakePlayerChrome in
+                 app.js. Direct MP4 only, same as the tap-anywhere overlay above. -->
+            <div class="vp-bar" id="vpBar" hidden>
+              <button type="button" class="vp-btn" id="playBtn" aria-pressed="false" aria-label="Play" title="Play">
+                <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                <svg class="icon-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
               </button>
-              <button type="button" class="video-control-btn" id="muteBtn" aria-pressed="false" aria-label="Unmute" title="Unmute">
+              <span class="vp-time" id="vpTime">0:00</span>
+              <div class="vp-scrub" id="timelineTrack" role="slider" tabindex="0" aria-label="Seek, and jump to a claim" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="vp-scrub-track">
+                  <div class="vp-scrub-fill" id="timelineProgress"></div>
+                  <div class="vp-scrub-thumb" id="vpScrubThumb"></div>
+                </div>
+              </div>
+              <span class="vp-time vp-duration" id="vpDuration">0:00</span>
+              <button type="button" class="vp-btn" id="muteBtn" aria-pressed="false" aria-label="Unmute" title="Unmute">
                 <svg class="icon-vol-on" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <path d="M4 9.3v5.4h3.3l4.7 3.9V5.4l-4.7 3.9H4z" fill="currentColor"/>
                   <path d="M15.3 9a3.6 3.6 0 010 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -1932,7 +2045,7 @@
                   <path d="M15.3 9.3l5.4 5.4M20.7 9.3l-5.4 5.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
                 </svg>
               </button>
-              <button type="button" class="video-control-btn" id="fullscreenBtn" aria-label="Fullscreen" title="Fullscreen">
+              <button type="button" class="vp-btn" id="fullscreenBtn" aria-label="Fullscreen" title="Fullscreen">
                 <svg class="icon-fs-enter" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <path d="M4 9V5.5A1.5 1.5 0 015.5 4H9M20 9V5.5A1.5 1.5 0 0018.5 4H15M4 15v3.5A1.5 1.5 0 005.5 20H9M20 15v3.5a1.5 1.5 0 01-1.5 1.5H15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
@@ -1940,17 +2053,6 @@
                   <path d="M9 4v3.5A1.5 1.5 0 017.5 9H4M15 4v3.5A1.5 1.5 0 0016.5 9H20M9 20v-3.5A1.5 1.5 0 007.5 15H4M15 20v-3.5a1.5 1.5 0 011.5-1.5H20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
-            </div>
-          </div>
-
-          <!-- The claim timeline: each claim the answer timestamped becomes a yellow band
-               over the moment it covers, on the same 0–duration scale as the scrubber
-               itself. Direct MP4 only — see the doc comment on `refreshTimeline` in app.js
-               for why a YouTube embed's clock isn't readable here. Clicking anywhere on the
-               track seeks, same as a `[t=…]` chip in the answer text does. -->
-          <div class="video-timeline" id="videoTimeline" hidden>
-            <div class="video-timeline-track" id="timelineTrack" role="slider" tabindex="0" aria-label="Seek, and jump to a claim" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-              <div class="video-timeline-progress" id="timelineProgress"></div>
             </div>
           </div>
 
@@ -2005,31 +2107,47 @@
     </form>
   </dialog>
 
-  <!-- Sign in / sign up only now — the signed-in identity view moved to the Profile tab
-       of #settings-dialog below, matching the TRASE Design System's SettingsMenu (one
-       settings surface, account state as its first tab, not a second dialog). This one
-       still exists on its own because the DS's SettingsMenu never had to define a sign-in
-       *form* — its Profile tab assumes an already-signed-in user — so opening this small
-       dialog from the Profile tab's "Sign in" button is this app's own addition to cover
-       that gap. -->
-  <dialog class="passphrase settings-dialog" id="account-dialog">
-    <form method="dialog" id="account-form">
-      <h2>Sign in</h2>
-      <p style="margin: 0 0 14px; font-size: 12.5px; color: var(--ink-dim);">
-        Sign in to keep your checks across devices and browsers.
-      </p>
-      <div class="account-tabs" id="account-tabs" role="tablist">
-        <button type="button" data-mode="signin" class="active">Sign in</button>
-        <button type="button" data-mode="signup">Sign up</button>
+  <!-- Ported from the TRASE Design System's Screens-Auth.html — the sign-in/up card, not
+       the fixed-position backdrop it sits on there (this app already has that in the
+       native `<dialog>::backdrop`, see #account-dialog::backdrop below). The signed-in
+       identity view moved to the Profile tab of #settings-dialog below instead, matching
+       the DS's SettingsMenu (one settings surface, account state as its first tab, not a
+       second dialog) — this dialog is sign-in/up only now, opened from the Profile tab's
+       "Sign in" button. The DS screen's own mode switch is a signin/signup React state
+       flag driving its headline, submit label and the link row at the bottom; setAccountMode
+       (app.js) is the same idea against this markup, with `accountMode` as that flag. -->
+  <dialog class="passphrase auth-card" id="account-dialog">
+    <span class="auth-mark">
+      <svg viewBox="0 0 64 64" fill="none">
+        <circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
+        <line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/>
+        <circle cx="32" cy="32" r="6" fill="var(--accent)"/>
+        <rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/>
+      </svg>
+    </span>
+    <span class="auth-wordmark">Seer</span>
+    <h2 id="accountHeading">Welcome back</h2>
+    <p class="auth-sub" id="accountSub">Sign in to pick up where you left off.</p>
+    <form method="dialog" id="account-form" class="auth-form">
+      <div class="field">
+        <label for="account-email">Email</label>
+        <input type="email" id="account-email" placeholder="you@example.com" autocomplete="email" />
       </div>
-      <input type="email" id="account-email" placeholder="Email" autocomplete="email" />
-      <input type="password" id="account-password" placeholder="Password" autocomplete="current-password" />
+      <div class="field">
+        <label for="account-password">Password</label>
+        <input type="password" id="account-password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
       <p class="account-message" id="account-message"></p>
-      <div class="actions">
-        <button type="submit" class="secondary" id="account-cancel">Cancel</button>
-        <button type="submit" id="account-submit">Sign in</button>
-      </div>
+      <button type="submit" class="auth-submit" id="account-submit">
+        <svg class="auth-submit-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="7.5" stroke="currentColor" stroke-width="1.8" stroke-dasharray="9 2 9 2" stroke-linecap="round"/>
+          <circle cx="12" cy="12" r="2" fill="currentColor"/>
+          <rect x="15.3" y="10.6" width="1.8" height="2.8" rx="0.5" fill="var(--accent-2)"/>
+        </svg>
+        <span id="accountSubmitLabel">Sign in</span>
+      </button>
     </form>
+    <div class="auth-switch" id="accountSwitch"></div>
   </dialog>
 
   <!-- Ported from the TRASE Design System's SettingsMenu: a nav rail (Profile/General/

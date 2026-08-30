@@ -82,11 +82,15 @@ const el = {
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
   videoImages: document.getElementById("videoImages"),
-  videoControls: document.getElementById("videoControls"),
+  vpOverlay: document.getElementById("vpOverlay"),
+  vpPlayIcon: document.getElementById("vpPlayIcon"),
+  vpBar: document.getElementById("vpBar"),
   playBtn: document.getElementById("playBtn"),
+  vpTime: document.getElementById("vpTime"),
+  vpDuration: document.getElementById("vpDuration"),
+  vpScrubThumb: document.getElementById("vpScrubThumb"),
   muteBtn: document.getElementById("muteBtn"),
   fullscreenBtn: document.getElementById("fullscreenBtn"),
-  videoTimeline: document.getElementById("videoTimeline"),
   timelineTrack: document.getElementById("timelineTrack"),
   timelineProgress: document.getElementById("timelineProgress"),
   passDialog: document.getElementById("passphrase-dialog"),
@@ -124,11 +128,14 @@ const el = {
   // view lives in the settings dialog's Profile tab (profile* below) instead.
   accountDialog: document.getElementById("account-dialog"),
   accountForm: document.getElementById("account-form"),
-  accountTabs: document.getElementById("account-tabs"),
+  accountHeading: document.getElementById("accountHeading"),
+  accountSub: document.getElementById("accountSub"),
+  accountSwitch: document.getElementById("accountSwitch"),
   accountEmail: document.getElementById("account-email"),
   accountPassword: document.getElementById("account-password"),
   accountMessage: document.getElementById("account-message"),
   accountSubmit: document.getElementById("account-submit"),
+  accountSubmitLabel: document.getElementById("accountSubmitLabel"),
   settingsNavList: document.getElementById("settingsNavList"),
   profileSignedOut: document.getElementById("profile-signed-out"),
   profileSignedIn: document.getElementById("profile-signed-in"),
@@ -1577,19 +1584,45 @@ function clearVideoMedia() {
 }
 
 /**
- * The custom mute/fullscreen buttons and the claim timeline both answer to the same
- * `<video>` element, so both come and go together — visible only for a direct MP4
+ * The tap-to-play overlay and the control bar (play/scrub/mute/fullscreen — ported from the
+ * TRASE Design System's VideoPlayer, see the CSS comment on `.vp-bar`) both answer to the
+ * same `<video>` element, so both come and go together — visible only for a direct MP4
  * (TikTok/Instagram), hidden for the YouTube embed (draws its own chrome; its clock isn't
  * readable from this page either, see `syncPlayhead`), an image carousel (nothing to
  * play), and the empty/placeholder state.
  */
 function setPlayerChromeVisible(visible) {
-  el.videoControls.hidden = !visible;
-  el.videoTimeline.hidden = !visible;
-  if (!visible) {
-    el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+  el.vpOverlay.hidden = !visible;
+  el.vpBar.hidden = !visible;
+  if (visible) wakePlayerChrome();
+  else {
+    el.timelineTrack.querySelectorAll(".vp-marker").forEach((node) => node.remove());
     el.timelineProgress.style.width = "0%";
+    el.vpScrubThumb.style.left = "0%";
+    el.vpTime.textContent = "0:00";
+    el.vpDuration.textContent = "0:00";
+    el.videoThumb.classList.remove("is-active");
+    clearTimeout(playerChromeHideTimer);
   }
+}
+
+/**
+ * Fades `.vp-bar` in and resets the auto-hide clock — the DS VideoPlayer's own `wake()`.
+ * Called on interaction (mousemove over the player, a click on the scrub track) and
+ * whenever the player pauses, so the bar is never hidden while there's nothing playing to
+ * watch instead of it. Hides itself again after a couple seconds of inactivity while
+ * playing; skipped entirely on a coarse pointer (touch), which gets a resting-visible bar
+ * instead — see the `[data-pointer="coarse"] .vp-bar` CSS rule.
+ */
+let playerChromeHideTimer = null;
+function wakePlayerChrome() {
+  if (el.vpBar.hidden) return;
+  el.videoThumb.classList.add("is-active");
+  clearTimeout(playerChromeHideTimer);
+  if (document.documentElement.dataset.pointer === "coarse") return;
+  playerChromeHideTimer = setTimeout(() => {
+    if (!el.videoPlayer.paused) el.videoThumb.classList.remove("is-active");
+  }, 2200);
 }
 
 /**
@@ -1646,6 +1679,10 @@ function showVideoElement(media) {
   // away, and the pane silently plays at 1×.
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
   el.videoPlayer.hidden = false;
+  // Assumed paused until the `play` event says otherwise (see that listener) — a previous
+  // entry's video may have left this `true` if it was mid-playback, and autoplay here can
+  // be silently refused, in which case `play` never fires to correct it.
+  el.vpPlayIcon.hidden = false;
   el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
   setPlayerChromeVisible(true);
   // Muted is the element's own starting attribute and this button's assumed starting
@@ -1849,13 +1886,14 @@ function refreshTimeline() {
  * isn't known yet — `loadedmetadata` calls this again once it is.
  */
 function renderTimelineTrack() {
-  el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+  el.timelineTrack.querySelectorAll(".vp-marker").forEach((node) => node.remove());
   const duration = el.videoPlayer.duration;
-  if (el.videoTimeline.hidden || !Number.isFinite(duration) || duration <= 0) return;
+  if (el.vpBar.hidden || !Number.isFinite(duration) || duration <= 0) return;
+  const track = el.timelineTrack.querySelector(".vp-scrub-track");
 
   for (const window of claimWindows) {
     const mark = document.createElement("div");
-    mark.className = "video-timeline-mark";
+    mark.className = "vp-marker";
     const left = Math.min(100, (window.from / duration) * 100);
     const width = Math.max(0.6, ((Math.min(window.to, duration) - window.from) / duration) * 100);
     mark.style.left = `${left}%`;
@@ -1864,7 +1902,7 @@ function renderTimelineTrack() {
     // lighting up moves both the chip in the answer and its band on the scrubber from one
     // `activeWindow` assignment in `syncPlayhead` — never two sources of "which claim".
     window.trackNode = mark;
-    el.timelineTrack.appendChild(mark);
+    track.appendChild(mark);
   }
 }
 
@@ -1885,7 +1923,10 @@ function syncPlayhead() {
   if (playing && Number.isFinite(duration) && duration > 0) {
     const percent = Math.min(100, (el.videoPlayer.currentTime / duration) * 100);
     el.timelineProgress.style.width = `${percent}%`;
+    el.vpScrubThumb.style.left = `${percent}%`;
     el.timelineTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+    el.vpTime.textContent = formatClock(el.videoPlayer.currentTime);
+    el.vpDuration.textContent = formatClock(duration);
   }
 
   const next = playing ? activeAt(claimWindows, el.videoPlayer.currentTime) : null;
@@ -3337,14 +3378,22 @@ function renderAccountUI() {
   }
 }
 
-let accountMode = "signin"; // "signin" | "signup", which tab is active
+let accountMode = "signin"; // "signin" | "signup", which the dialog currently shows
 
+/** Headline, submit label and the switch-row link at the bottom of the sign-in/up card —
+ * ported from the TRASE Design System's Screens-Auth.html, whose own `isSignup` React flag
+ * drives the exact same three things off one piece of state. `accountMode` is that flag. */
 function setAccountMode(mode) {
   accountMode = mode;
-  el.accountTabs.querySelectorAll("button[data-mode]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.mode === mode);
-  });
-  el.accountSubmit.textContent = mode === "signup" ? "Sign up" : "Sign in";
+  const isSignup = mode === "signup";
+  el.accountHeading.textContent = isSignup ? "Create your account" : "Welcome back";
+  el.accountSub.textContent = isSignup
+    ? "Start checking claims against real sources."
+    : "Sign in to pick up where you left off.";
+  el.accountSubmitLabel.textContent = isSignup ? "Create account" : "Sign in";
+  el.accountSwitch.innerHTML = isSignup
+    ? `<span>Already have an account?</span> <button type="button" class="auth-switch-link" data-mode="signin">Sign in</button>`
+    : `<span>New to Seer?</span> <button type="button" class="auth-switch-link" data-mode="signup">Create an account</button>`;
   el.accountMessage.textContent = "";
   el.accountMessage.classList.remove("error");
 }
@@ -3608,39 +3657,50 @@ el.videoPlayer.addEventListener("timeupdate", syncPlayhead);
 el.videoPlayer.addEventListener("seeked", syncPlayhead);
 el.videoPlayer.addEventListener("ended", syncPlayhead);
 
-// The play/pause button. Toggles the element directly rather than tracking state of its
-// own — the `play`/`pause` listeners below are what actually keep the icon and label
-// right, from this click or any other way playback starts or stops.
+// The play/pause button, in the bar. Toggles the element directly rather than tracking
+// state of its own — the `play`/`pause` listeners below are what actually keep the icon
+// and label right, from this click or any other way playback starts or stops.
 el.playBtn.addEventListener("click", () => {
   if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
   else el.videoPlayer.pause();
+  wakePlayerChrome();
 });
 
-// A tap anywhere else on the video does the same thing — the button is there for
-// discoverability and for a screen reader, not because the video itself shouldn't work
-// the way every short-form player's does. Excludes the control buttons themselves (they're
-// inside `.video-thumb` too, so this handler would otherwise fire a second time on top of
-// theirs) and anywhere there's no direct MP4 loaded to toggle in the first place.
-el.videoThumb.addEventListener("click", (event) => {
-  if (el.videoControls.hidden || event.target.closest(".video-controls")) return;
+// A tap anywhere on `.vp-overlay` does the same thing — the button in the bar is there for
+// discoverability and for a screen reader, not because the video itself shouldn't work the
+// way every short-form player's does (ported from the DS VideoPlayer's own `togglePlay`,
+// bound to its `.vp-overlay` the same way). No need to exclude the bar's own buttons the
+// way this used to: `.vp-bar` sits at a higher z-index than `.vp-overlay` (see the CSS), so
+// a click that lands on the bar never reaches the overlay underneath it.
+el.vpOverlay.addEventListener("click", () => {
   if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
   else el.videoPlayer.pause();
+  wakePlayerChrome();
 });
+// Wakes the bar on any interaction, matching the DS component's `onMouseMove={wake}` on
+// the player root — see `wakePlayerChrome`'s own doc comment for the touch exception.
+el.videoThumb.addEventListener("mousemove", wakePlayerChrome);
 
 // The single source of truth for the play/pause icon and label — set from the element's
 // own state, not assumed at whichever click asked for it, so it's still right when
 // autoplay is silently refused or playback stops some way neither handler above covers.
+// A pause also wakes the bar and keeps it up rather than letting the auto-hide timer run
+// it down on nothing to watch (the DS component's own `!playing → always visible` rule;
+// `wakePlayerChrome`'s hide timeout already checks `paused` before ever hiding it).
 el.videoPlayer.addEventListener("play", () => {
   el.playBtn.classList.add("playing");
   el.playBtn.setAttribute("aria-pressed", "true");
   el.playBtn.setAttribute("aria-label", "Pause");
   el.playBtn.title = "Pause";
+  el.vpPlayIcon.hidden = true;
 });
 el.videoPlayer.addEventListener("pause", () => {
   el.playBtn.classList.remove("playing");
   el.playBtn.setAttribute("aria-pressed", "false");
   el.playBtn.setAttribute("aria-label", "Play");
   el.playBtn.title = "Play";
+  el.vpPlayIcon.hidden = false;
+  wakePlayerChrome();
 });
 
 // The unmute button. Muted is where every clip starts (autoplay only works muted, and a
@@ -3654,14 +3714,16 @@ el.muteBtn.addEventListener("click", () => {
   const label = unmuted ? "Mute" : "Unmute";
   el.muteBtn.setAttribute("aria-label", label);
   el.muteBtn.title = label;
+  wakePlayerChrome();
 });
 
-// Fullscreens `.video-thumb` rather than the bare `<video>`, so the custom controls and
-// the timeline stay on screen and usable — the browser's native video fullscreen would
-// take just the element itself, chrome and all, out of the page.
+// Fullscreens `.video-thumb` rather than the bare `<video>`, so the overlay and bar stay
+// on screen and usable — the browser's native video fullscreen would take just the element
+// itself, chrome and all, out of the page.
 el.fullscreenBtn.addEventListener("click", () => {
   if (document.fullscreenElement) document.exitFullscreen?.();
   else el.videoThumb.requestFullscreen?.().catch(() => {}); // Refused (no gesture, disabled) — the button just does nothing.
+  wakePlayerChrome();
 });
 
 // The class/label answer to `fullscreenElement` rather than being set at the click above,
@@ -3688,7 +3750,9 @@ function timelineSeekTarget(clientX) {
 el.timelineTrack.addEventListener("click", (event) => {
   const target = timelineSeekTarget(event.clientX);
   if (target != null) seekVideoTo(target);
+  wakePlayerChrome();
 });
+el.timelineTrack.addEventListener("mousedown", wakePlayerChrome);
 
 // A slider in everything but name — see the `role="slider"` set alongside `tabindex` on
 // the element itself — so the usual left/right (and up/down, for a vertical-video reader
@@ -3774,7 +3838,11 @@ el.settingsNavList.addEventListener("click", (event) => {
 });
 
 el.profileSignInBtn.addEventListener("click", openAccountDialog);
-el.accountTabs.addEventListener("click", (event) => {
+// The switch-row link at the bottom of the card ("New to Seer? Create an account" /
+// "Already have an account? Sign in") — setAccountMode rewrites this row's own markup on
+// every mode change, so the listener is delegated on its stable container rather than a
+// button that gets replaced out from under a direct one.
+el.accountSwitch.addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-mode]");
   if (!btn) return;
   setAccountMode(btn.dataset.mode);
@@ -3783,10 +3851,6 @@ el.profileSignOutBtn.addEventListener("click", () => {
   accounts.signOut();
 });
 el.accountForm.addEventListener("submit", async (event) => {
-  // The signed-in half of this form just needs its "Done" button to close the dialog —
-  // <dialog method="dialog"> already does that natively. Only the signed-out submit
-  // (sign in / sign up) needs to stay open through an async call and report an error.
-  if (event.submitter !== el.accountSubmit) return;
   event.preventDefault();
   const email = el.accountEmail.value.trim();
   const password = el.accountPassword.value;
