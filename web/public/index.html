@@ -1330,11 +1330,20 @@
      screen does too) a shadow to lift the card off the backdrop. */
   .auth-card {
     width: min(360px, 92vw);
-    display: flex; flex-direction: column; align-items: center;
     padding: 32px 28px;
     border-radius: 16px;
     box-shadow: 0 24px 60px rgba(0,0,0,0.5);
   }
+  /* `display` gated on `[open]` rather than set unconditionally above: an author-origin
+     rule beats the UA stylesheet's `dialog:not([open]) { display: none }` regardless of
+     specificity (origin, not specificity, decides that fight), so an unconditional
+     `display: flex` here was rendering this card centered on every page load — no
+     `showModal()` needed, no `::backdrop`, nothing gating it but the CSS itself, and
+     everything after it in the DOM stacking under it. Every other dialog in this file
+     avoids the trap by never setting `display` on the `<dialog>` element at all; this one
+     needs to, for the centered column its content wants, so it needs the `[open]` guard
+     the others get for free. */
+  .auth-card[open] { display: flex; flex-direction: column; align-items: center; }
   /* `backdrop-filter` layered onto the shared `.passphrase::backdrop` background rule
      (different property, so both apply) — the DS screen's own `.backdrop` blurs what's
      behind the card; every other dialog in this app just dims it. */
