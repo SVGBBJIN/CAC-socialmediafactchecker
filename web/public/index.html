@@ -1116,8 +1116,13 @@
      440px box. `inset: 0; margin: 0` on the `<dialog>` itself (already `position: fixed`
      from the UA stylesheet while open) is what makes it fill the screen; the content is
      then re-centered to a readable column width inside that via `#settings-form`, same as
-     any other full-width page. */
-  .settings-dialog.settings-dialog-full {
+     any other full-width page.
+     The `[open]` qualifier on `display: flex` is load-bearing, not decoration: the UA
+     stylesheet hides a closed `<dialog>` via `dialog:not([open]) { display: none }`
+     (specificity 0,1,1), and two plain classes (0,2,0) outrank that regardless of `[open]`
+     — so without it this rule forced the dialog to render as a fullscreen overlay over the
+     whole app even while closed, permanently wiring the UI to the settings page. */
+  .settings-dialog.settings-dialog-full[open] {
     width: 100vw; height: 100vh;
     max-width: 100vw; max-height: 100vh;
     inset: 0; margin: 0;
