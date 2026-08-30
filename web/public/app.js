@@ -170,7 +170,7 @@ let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check
 // link has ever been checked, not only after: a pasted link is intercepted by the regex in
 // confirmAndRunCheck/normalizeLink and starts a real check instead of landing here. Not
 // persisted, same as pendingFollowup above — a reload starts the conversation over.
-let chatThread = []; // { question, answer, sources, incomplete, durationMs }
+let chatThread = []; // { question, rawAnswer, answer, claims, verdictKey, sources, incomplete, durationMs }
 let pendingChat = null; // { question, error? }
 
 /* ---------------------------------------------------------------- settings */
@@ -1430,6 +1430,49 @@ function renderEmptyState() {
   refreshTimeline();
 }
 
+/**
+ * Strips the model's own template syntax off a raw answer — the trailing `VERDICT: …`
+ * line and any `[[claim: …]]` markers (see claims.js for the syntax, and the CLAIM
+ * STRUCTURE section of the system prompt in lib/verified-chat.js for why the model writes
+ * it at all) — leaving the display text, the claim blocks split out if there was more than
+ * one, and whichever verdict actually parsed. Never invents one: a plain conversational
+ * reply with neither a marker nor a `VERDICT:` line gets `verdictKey: null` back, same as
+ * it arrived — it's `runCheck`'s own job to default a *real check's* missing verdict to
+ * "insufficient" (a link is always check-shaped), not this function's, since a follow-up
+ * or a link-less chat turn is not guaranteed to be a check at all: "thanks" needs no badge.
+ *
+ * Shared by `runCheck`, `runFollowup` and `runChat` so a follow-up on an existing check and
+ * a "just ask a question" turn stop leaking this syntax verbatim into `renderMarkdown` the
+ * way they used to — the same parsing `runCheck` already did for the main answer, just
+ * never applied to either of the other two turn types.
+ */
+function stripAnswerMarkers(answer) {
+  const { text, verdictKey } = splitVerdict(answer);
+  const claims = splitClaims(answer);
+  return { rawAnswer: answer, answer: text, claims, verdictKey };
+}
+
+/** The body of one answered turn — a follow-up or a link-less chat reply — as markdown
+ * plus a verdict badge, or one title+markdown+badge group per claim if the model opened
+ * more than one `[[claim: …]]` (see `stripAnswerMarkers`) — the same per-claim shape
+ * `claimPanesHTML` renders for a fresh check, just inline in a thread item instead of a
+ * grid of cards, since a thread is a stack of turns rather than a stack of claims. */
+function turnBodyHTML(turn, sources, animate, seekable) {
+  if (!turn.claims) {
+    return `
+      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(turn.answer, sources, seekable)}</div>
+      ${badgeHTML(turn.verdictKey, animate)}`;
+  }
+  return turn.claims
+    .map(
+      (claim) => `
+      <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
+      ${badgeHTML(claim.verdictKey, animate)}`,
+    )
+    .join("");
+}
+
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
  * `threadHTML` — but with no `entry` behind it. */
 function chatThreadHTML(newestIndex) {
@@ -1439,7 +1482,7 @@ function chatThreadHTML(newestIndex) {
       return `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(c.question)}</div>
-          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
+          ${turnBodyHTML(c, c.sources, animate)}
           ${incompleteHTML(c.incomplete, animate)}
           ${durationHTML(c.durationMs, animate, "Answered in")}
           ${sourcePillsHTML(c.sources, animate)}
@@ -1509,7 +1552,9 @@ async function runChat(question) {
     const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
     const history = chatThread.flatMap((c) => [
       { role: "user", content: c.question },
-      { role: "assistant", content: c.answer },
+      // rawAnswer, not the stripped display text — same reasoning as historyFor's own
+      // fallback for an entry's main answer and its followups.
+      { role: "assistant", content: c.rawAnswer ?? c.answer ?? "" },
     ]);
     const { answer, sources, incomplete } = await streamChat([...history, message], {
       signal: controller.signal,
@@ -1519,7 +1564,18 @@ async function runChat(question) {
       },
     });
     chatProgress.finish();
-    chatThread.push({ question, answer, sources, incomplete, durationMs: chatElapsed.elapsedMs() });
+    const parsed = stripAnswerMarkers(answer);
+    chatThread.push({
+      question,
+      ...parsed,
+      // Same reasoning as runFollowup's own verdictKey: a link-less chat turn isn't
+      // guaranteed to be check-shaped, so only default a missing verdict to "insufficient"
+      // when the model actually opened claim markers.
+      verdictKey: parsed.claims ? aggregateVerdictKey(parsed.claims) ?? (incomplete ? null : "insufficient") : parsed.verdictKey,
+      sources,
+      incomplete,
+      durationMs: chatElapsed.elapsedMs(),
+    });
     settled = true;
   } catch (error) {
     if (error.name === "AbortError") {
@@ -2682,7 +2738,7 @@ function threadHTML(entry, newestIndex) {
       return `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(f.question)}</div>
-          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
+          ${turnBodyHTML(f, f.sources, animate, seekable)}
           ${incompleteHTML(f.incomplete, animate)}
           ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
@@ -3006,7 +3062,9 @@ function historyFor(entry) {
     { role: "assistant", content: entry.rawAnswer ?? entry.answer ?? "" },
   ];
   for (const f of entry.followups) {
-    history.push({ role: "user", content: f.question }, { role: "assistant", content: f.answer });
+    // Same fallback as the main answer above, and for the same reason: a followup written
+    // before `rawAnswer` existed only has the already-stripped `answer`.
+    history.push({ role: "user", content: f.question }, { role: "assistant", content: f.rawAnswer ?? f.answer ?? "" });
   }
   return history;
 }
@@ -3117,12 +3175,11 @@ async function runCheck(url, existingId, hint) {
       },
     });
 
-    const { text, verdictKey } = splitVerdict(answer);
-    const claims = splitClaims(answer);
+    const parsed = stripAnswerMarkers(answer); // rawAnswer kept whole — history needs it verbatim
     entry.status = "done";
-    entry.rawAnswer = answer; // kept whole, VERDICT line(s) included — history needs it verbatim
-    entry.answer = text;
-    entry.claims = claims; // null (render as one card, see renderResultCard), or one block per claim
+    entry.rawAnswer = parsed.rawAnswer;
+    entry.answer = parsed.answer;
+    entry.claims = parsed.claims; // null (render as one card, see renderResultCard), or one block per claim
     entry.sources = sources;
     entry.incomplete = incomplete;
     // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
@@ -3130,10 +3187,12 @@ async function runCheck(url, existingId, hint) {
     // the model never made and the reader has no way to tell from one it did. Left null when
     // the turn is known to be incomplete; the notice above the card says what happened
     // instead, which is the true answer to "why is there no verdict". Same reasoning for the
-    // aggregate: see `aggregateVerdictKey`.
-    entry.verdictKey = claims
-      ? aggregateVerdictKey(claims) ?? (incomplete ? null : "insufficient")
-      : verdictKey ?? (incomplete ? null : "insufficient");
+    // aggregate: see `aggregateVerdictKey`. (A real check is always check-shaped, so this
+    // fallback belongs here rather than in `stripAnswerMarkers` itself — see that function's
+    // own doc comment for why a follow-up or a link-less chat turn can't assume the same.)
+    entry.verdictKey = parsed.claims
+      ? aggregateVerdictKey(parsed.claims) ?? (incomplete ? null : "insufficient")
+      : parsed.verdictKey ?? (incomplete ? null : "insufficient");
     entry.durationMs = runElapsed.elapsedMs();
     persistLibrary();
     renderLibrary(el.searchInput.value);
@@ -3210,7 +3269,18 @@ async function runFollowup(entry, question) {
     // Kept in the thread even when it came back damaged. A partial answer is text the model
     // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
     // so the next turn is not built on prose the reader was never told was cut off.
-    entry.followups.push({ question, answer, sources, incomplete, durationMs: followupElapsed.elapsedMs() });
+    const parsed = stripAnswerMarkers(answer);
+    entry.followups.push({
+      question,
+      ...parsed,
+      // A follow-up isn't guaranteed to be check-shaped the way the original link was
+      // (see stripAnswerMarkers) — only default a missing verdict to "insufficient" when
+      // the model actually opened claim markers, i.e. clearly meant this as a check.
+      verdictKey: parsed.claims ? aggregateVerdictKey(parsed.claims) ?? (incomplete ? null : "insufficient") : parsed.verdictKey,
+      sources,
+      incomplete,
+      durationMs: followupElapsed.elapsedMs(),
+    });
     persistLibrary();
     renderLibrary(el.searchInput.value);
     settled = true;
