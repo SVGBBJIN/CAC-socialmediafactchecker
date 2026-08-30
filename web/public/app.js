@@ -440,10 +440,14 @@ function findEntry(id) {
   return library.find((entry) => entry.id === id) ?? null;
 }
 
-/** The selected entry, but only once it has something a follow-up can build on. */
+/** The selected entry, but only once it has something a follow-up can build on. A saved
+ * link-less conversation (no `url` — see `runChat`) doesn't count: it already has its own
+ * turn-taking through `runChat` itself, keyed on `chatThread` rather than `followups`, so
+ * routing its continuation through `runFollowup` would push onto a `followups` array that
+ * doesn't exist on this entry. */
 function selectedDoneEntry() {
   const entry = selectedId ? findEntry(selectedId) : null;
-  return entry?.status === "done" ? entry : null;
+  return entry?.status === "done" && entry.url ? entry : null;
 }
 
 /* ---------------------------------------------------------- link + text helpers */
@@ -1372,12 +1376,16 @@ function renderLibrary(filter = "") {
 function dotClassFor(entry) {
   if (entry.status === "running") return "warn";
   if (entry.status === "error") return "muted";
+  // A saved link-less conversation (see `runChat`) has no single verdict — it's a stack of
+  // independently-answered questions, not one claim under examination.
+  if (!entry.url) return "muted";
   return VERDICTS[entry.verdictKey]?.css ?? "muted";
 }
 
 function statusLabel(entry) {
   if (entry.status === "running") return "Checking…";
   if (entry.status === "error") return "Failed";
+  if (!entry.url) return entry.turns.length === 1 ? "1 message" : `${entry.turns.length} messages`;
   // Same reasoning as `verdictHTML`: an incomplete turn that never reached a verdict must
   // not be filed in the library under one. "Unclassified" would be a truthful label and a
   // useless one — it reads as a property of the claim rather than of the check.
@@ -1393,10 +1401,39 @@ function statusLabel(entry) {
  * beside it via the CSS transition on `.content-grid.single-pane .video-pane`; toggling the
  * class is all this does; the width/opacity animation itself lives entirely in that CSS.
  * Idempotent, so it's cheap to call from every place `selectedId` can change rather than
- * threading a "did this just change" flag through each of them.
+ * threading a "did this just change" flag through each of them. A saved link-less
+ * conversation (no `url` — see `runChat`) keeps the single-pane layout even once selected:
+ * there was never a video to grow the second column in for.
  */
 function updatePaneMode() {
-  el.contentGrid.classList.toggle("single-pane", !selectedId);
+  const entry = selectedId ? findEntry(selectedId) : null;
+  el.contentGrid.classList.toggle("single-pane", !entry || !entry.url);
+}
+
+/**
+ * Puts `entry` on screen in the main content pane. A real check (has a `url`) gets the
+ * video pane plus its evidence card, same as always; a saved link-less conversation (see
+ * `runChat`) has no video to show, so it points `chatThread` at the entry's own `turns` —
+ * the same array `runChat` will keep pushing onto if the reader continues it — and renders
+ * it the same way the free-standing (not-yet-saved) conversation always has. Shared by
+ * `selectEntry` and the startup restore, which walk the exact same branch a click does.
+ */
+function openEntryInPane(entry) {
+  if (!entry) return;
+  if (!entry.url) {
+    chatThread = entry.turns;
+    pendingChat = null;
+    el.videoTitle.textContent = entry.title;
+    el.videoLink.href = "#";
+    el.videoLink.textContent = "";
+    el.videoLink.classList.add("empty");
+    clearVideoMedia();
+    renderChatPane();
+    return;
+  }
+  renderVideoPane(entry);
+  if (entry.status === "done") renderResultCard(entry);
+  else if (entry.status === "error") renderErrorCard(entry);
 }
 
 function selectEntry(id) {
@@ -1408,10 +1445,7 @@ function selectEntry(id) {
   updatePaneMode();
   pendingFollowup = null;
   renderLibrary(el.searchInput.value);
-  const entry = findEntry(id);
-  if (entry) renderVideoPane(entry);
-  if (entry?.status === "done") renderResultCard(entry);
-  else if (entry?.status === "error") renderErrorCard(entry);
+  openEntryInPane(findEntry(id));
   updateComposerMode();
 }
 
@@ -1527,8 +1561,11 @@ function renderChatPane({ newest = -1 } = {}) {
 /**
  * A conversational turn with no link involved — no video, no verdict, just an answer.
  * Mirrors `runFollowup`'s shape (history replay, pending/settled bookkeeping) but against
- * `chatThread` rather than an entry's `followups`, since there is no entry: this is what
- * "just ask a question" does before any link has ever been checked.
+ * `chatThread` rather than an entry's `followups` — this is what "just ask a question" does.
+ * The first answered turn in a conversation files a library entry for it (no `url`, so
+ * `selectedDoneEntry`/`updatePaneMode`/`dotClassFor`/`statusLabel` all tell it apart from a
+ * real check), so it survives a reload and shows up in the sidebar the same as any check;
+ * every turn after that just keeps appending to the entry it already made.
  */
 async function runChat(question) {
   if (inFlight) return;
@@ -1577,6 +1614,28 @@ async function runChat(question) {
       durationMs: chatElapsed.elapsedMs(),
     });
     settled = true;
+    // File this conversation in the sidebar the same way a real check always has been —
+    // lazily, on its first answered turn, rather than the moment the question is typed: an
+    // aborted or failed first attempt leaves no trace, same as it always did before this
+    // existed. A later question in the same conversation just keeps appending — chatThread
+    // and chatEntry.turns are the same array from here on (see `openEntryInPane`), so there
+    // is nothing to re-sync, only to persist.
+    let chatEntry = selectedId ? findEntry(selectedId) : null;
+    if (!chatEntry) {
+      chatEntry = {
+        id: crypto.randomUUID(),
+        platform: "Question",
+        title: truncate(question, 80),
+        createdAt: Date.now(),
+        status: "done",
+        turns: chatThread,
+      };
+      library.unshift(chatEntry);
+      selectedId = chatEntry.id;
+      updatePaneMode();
+    }
+    persistLibrary();
+    renderLibrary(el.searchInput.value);
   } catch (error) {
     if (error.name === "AbortError") {
       pendingChat = null;
@@ -1592,7 +1651,12 @@ async function runChat(question) {
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
-    if (!selectedId) renderChatPane({ newest: settled ? chatThread.length - 1 : -1 });
+    // True both before any turn has ever been saved (selectedId still null) and once one
+    // has (selectedId now names the chat entry `runChat` just filed — see above), since
+    // neither carries a `url`; false only if the reader switched to a real check mid-flight,
+    // which `inFlight` already blocks `selectEntry` from doing.
+    const activeEntry = selectedId ? findEntry(selectedId) : null;
+    if (!activeEntry || !activeEntry.url) renderChatPane({ newest: settled ? chatThread.length - 1 : -1 });
     updateComposerMode();
   }
 }
@@ -4002,9 +4066,7 @@ renderLibrary();
 // blank app. Falling through to the empty state makes that case say something.
 const startupEntry = selectedId ? findEntry(selectedId) : null;
 if (startupEntry) {
-  renderVideoPane(startupEntry);
-  if (startupEntry.status === "done") renderResultCard(startupEntry);
-  else if (startupEntry.status === "error") renderErrorCard(startupEntry);
+  openEntryInPane(startupEntry);
 } else {
   selectedId = null;
   renderEmptyState();
