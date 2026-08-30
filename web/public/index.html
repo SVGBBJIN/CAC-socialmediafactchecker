@@ -271,6 +271,63 @@
     min-height: 0;
   }
 
+  /* ---------- Glass entrance animation ---------- */
+  /* Setting: settings.glassEntrance (Appearance). `maybeTriggerGlassEntrance` (app.js)
+     adds `.glass-enter` to `#contentGrid` the instant the composer's link resolves to a
+     supported video platform, and its own `animationend` listener removes it once the
+     sheen sweep below finishes — so this is always a one-shot replay, never a resting
+     state, and re-triggers cleanly on the next video link.
+     Each pane gets its own fade/scale/blur-out (a glass pane settling into focus);
+     `::after` layers a translucent sheen sweeping across both together on top of that,
+     the "light catching glass" cue that sells the material rather than just a generic
+     fade-in. `position: relative` on the grid is only there to anchor that pseudo-element. */
+  .content-grid.glass-enter { position: relative; }
+  .content-grid.glass-enter .video-pane,
+  .content-grid.glass-enter .claims-pane-wrap {
+    animation: glass-emerge 0.65s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .content-grid.glass-enter .claims-pane-wrap { animation-delay: 0.08s; }
+  @keyframes glass-emerge {
+    0% {
+      opacity: 0;
+      transform: scale(0.94) translateY(12px);
+      filter: blur(6px);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.15);
+    }
+    60% { opacity: 1; filter: blur(0); }
+    100% {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+      backdrop-filter: blur(0);
+      -webkit-backdrop-filter: blur(0);
+      box-shadow: none;
+    }
+  }
+  .content-grid.glass-enter::after {
+    content: "";
+    position: absolute; inset: 0;
+    pointer-events: none;
+    border-radius: 14px;
+    background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,0.22) 48%, transparent 66%);
+    background-size: 250% 100%;
+    /* Named so app.js's animationend listener can single this animation out — it's the
+       longer-running of the two (0.75s vs. 0.65s) and the last one left to finish, which
+       is what "the entrance is over" should mean. */
+    animation: glass-sheen 0.75s ease-out both;
+  }
+  @keyframes glass-sheen {
+    0% { background-position: 120% 0; opacity: 0; }
+    15% { opacity: 1; }
+    100% { background-position: -20% 0; opacity: 0; }
+  }
+  [data-motion="reduced"] .content-grid.glass-enter .video-pane,
+  [data-motion="reduced"] .content-grid.glass-enter .claims-pane-wrap,
+  [data-motion="reduced"] .content-grid.glass-enter::after {
+    animation: none;
+  }
+
   /* ---------- Video preview pane ---------- */
   .video-pane {
     /* Wide enough that a vertical clip reads at a real size once `.video-thumb` below
@@ -1800,7 +1857,7 @@
         </button>
       </div>
 
-      <div class="content-grid">
+      <div class="content-grid" id="contentGrid">
         <div class="video-pane">
           <div class="video-thumb" id="videoThumb">
             <svg class="play" id="videoPlaceholder" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
@@ -1964,6 +2021,16 @@
             <button type="button" data-value="dark">Dark</button>
             <button type="button" data-value="light">Light</button>
           </div>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-label">Glass entrance animation</div>
+            <div class="settings-row-sub">When a pasted link is a video, the two-panel view materializes with a glassmorphic effect.</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="setting-glass-entrance" />
+            <span class="track"></span><span class="thumb"></span>
+          </label>
         </div>
       </div>
 

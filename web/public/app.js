@@ -105,6 +105,8 @@ const el = {
   settingFontSize: document.getElementById("setting-font-size"),
   settingTheme: document.getElementById("setting-theme"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
+  settingGlassEntrance: document.getElementById("setting-glass-entrance"),
+  contentGrid: document.getElementById("contentGrid"),
   searchStatus: document.getElementById("searchStatus"),
   imageBtn: document.getElementById("imageBtn"),
   imageInput: document.getElementById("imageInput"),
@@ -172,6 +174,7 @@ const DEFAULT_SETTINGS = {
   fontSize: "normal", // "normal" | "large"
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
+  glassEntrance: true, // play the two-panel glass entrance animation, see maybeTriggerGlassEntrance
 };
 
 function loadSettings() {
@@ -607,6 +610,34 @@ function usableWarmResult(warm, result) {
   if (Date.now() - mintedAt <= HINT_MAX_AGE_MS) return result;
   const { hint, ...withoutHint } = result;
   return withoutHint;
+}
+
+/**
+ * Plays the glass entrance animation on the two-panel view (`#contentGrid`) the instant the
+ * composer's link *becomes* a supported video platform — not on every keystroke while it
+ * already is one, and not while a check is running, since the panes are showing a real
+ * result by then rather than the empty placeholder state. Purely a client-side read of the
+ * URL's host (`platformFor`), same as the rest of this detection: it doesn't wait on
+ * `warmLink`'s network round-trip, so the flourish reads as instantaneous.
+ *
+ * `settings.glassEntrance` and reduced motion both gate it, and reduced motion is checked
+ * twice — here, so a disabled-by-preference reader never gets the class added at all, and
+ * again in CSS under `[data-motion="reduced"]` as a second net, same belt-and-suspenders
+ * pattern the CSS comment on that rule explains.
+ */
+let composerWasVideo = false;
+function maybeTriggerGlassEntrance(url) {
+  const isVideo = Boolean(url) && SUPPORTED_PLATFORMS.has(platformFor(url));
+  if (isVideo && !composerWasVideo && !inFlight && settings.glassEntrance && !prefersReducedMotion()) {
+    const grid = el.contentGrid;
+    // Restart the animation from scratch even if it's already mid-run (e.g. the reader
+    // cleared the field and pasted a second video link right after) — removing the class,
+    // forcing a reflow, then re-adding it is the standard way to replay a CSS animation.
+    grid.classList.remove("glass-enter");
+    void grid.offsetWidth;
+    grid.classList.add("glass-enter");
+  }
+  composerWasVideo = isVideo;
 }
 
 /**
@@ -3238,6 +3269,7 @@ function updateThemeButtons() {
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
+  el.settingGlassEntrance.checked = settings.glassEntrance;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   updateThemeButtons();
@@ -3399,6 +3431,7 @@ el.linkInput.addEventListener("input", () => {
   // coming that this could get ahead of.
   if (inFlight) return;
   const url = normalizeLink(el.linkInput.value);
+  maybeTriggerGlassEntrance(url);
   if (!url) return;
   warmTimer = setTimeout(() => warmLink(url), 700);
 });
@@ -3412,6 +3445,7 @@ el.linkInput.addEventListener("paste", () => {
   setTimeout(() => {
     if (inFlight) return;
     const url = normalizeLink(el.linkInput.value);
+    maybeTriggerGlassEntrance(url);
     if (url) warmLink(url);
   }, 0);
 });
@@ -3585,6 +3619,18 @@ el.settingHighContrast.addEventListener("change", () => {
   settings.highContrast = el.settingHighContrast.checked;
   persistSettings();
   applySettings();
+});
+el.settingGlassEntrance.addEventListener("change", () => {
+  settings.glassEntrance = el.settingGlassEntrance.checked;
+  persistSettings();
+});
+// Drops the class once the animation finishes so `maybeTriggerGlassEntrance` can cleanly
+// replay it later rather than fighting a still-applied one. Filtered to the grid's own
+// animations (not a bubbled one from a descendant) via the animationName the CSS declares.
+el.contentGrid.addEventListener("animationend", (event) => {
+  if (event.target === el.contentGrid && event.animationName === "glass-sheen") {
+    el.contentGrid.classList.remove("glass-enter");
+  }
 });
 el.settingFontSize.addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-value]");
