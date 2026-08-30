@@ -120,20 +120,23 @@ const el = {
   drawerToggle: document.getElementById("drawerToggle"),
   drawerScrim: document.getElementById("drawerScrim"),
   topbarSettingsBtn: document.getElementById("topbarSettingsBtn"),
-  accountBtn: document.getElementById("accountBtn"),
-  topbarAccountBtn: document.getElementById("topbarAccountBtn"),
+  // Sign-in/up only — see the account-dialog comment in index.html. The signed-in identity
+  // view lives in the settings dialog's Profile tab (profile* below) instead.
   accountDialog: document.getElementById("account-dialog"),
   accountForm: document.getElementById("account-form"),
-  accountSignedOut: document.getElementById("account-signed-out"),
-  accountSignedIn: document.getElementById("account-signed-in"),
   accountTabs: document.getElementById("account-tabs"),
   accountEmail: document.getElementById("account-email"),
   accountPassword: document.getElementById("account-password"),
   accountMessage: document.getElementById("account-message"),
   accountSubmit: document.getElementById("account-submit"),
-  accountEmailDisplay: document.getElementById("account-email-display"),
-  accountSyncStatus: document.getElementById("account-sync-status"),
-  accountSignout: document.getElementById("account-signout"),
+  settingsNavList: document.getElementById("settingsNavList"),
+  profileSignedOut: document.getElementById("profile-signed-out"),
+  profileSignedIn: document.getElementById("profile-signed-in"),
+  profileAvatar: document.getElementById("profileAvatar"),
+  profileEmailDisplay: document.getElementById("profileEmailDisplay"),
+  profileSyncStatus: document.getElementById("profileSyncStatus"),
+  profileSignInBtn: document.getElementById("profileSignInBtn"),
+  profileSignOutBtn: document.getElementById("profileSignOutBtn"),
 };
 
 let library = loadLibrary();
@@ -3247,15 +3250,20 @@ async function loadServerConfig() {
 
 /* ---------------------------------------------------------------- account dialog */
 
-/** Sets up Supabase (a no-op if this deploy has no SUPABASE_URL/SUPABASE_ANON_KEY),
- * hides the account entry point entirely when it's not configured, and merges cloud
- * history in on every sign-in from here on. */
+/** Sets up Supabase (a no-op if this deploy has no SUPABASE_URL/SUPABASE_ANON_KEY) and
+ * merges cloud history in on every sign-in from here on. The Profile tab itself is hidden
+ * entirely when accounts aren't configured — see profileTabButton() — rather than showing
+ * a sign-in prompt with nothing behind it. */
 async function initAccounts(supabaseConfig) {
   await accounts.configure(supabaseConfig);
   const enabled = accounts.isConfigured();
-  el.accountBtn.hidden = !enabled;
-  el.topbarAccountBtn.hidden = !enabled;
-  if (!enabled) return;
+  profileTabButton().hidden = !enabled;
+  if (!enabled) {
+    // Nothing to show on the tab this deploy doesn't have — land on General instead of a
+    // hidden Profile tab whenever the dialog is (re)opened, see openSettingsDialog.
+    if (settingsTab === "profile") setSettingsTab("general");
+    return;
+  }
 
   let lastUserId = accounts.getUser()?.id ?? null;
   accounts.onAuthChange((user) => {
@@ -3301,13 +3309,32 @@ async function mergeCloudLibrary() {
   if (startupEntry) renderVideoPane(startupEntry);
 }
 
+/** Two-letter monogram for the profile avatar — first name's first letter, plus the last
+ * name's if there is one. Falls back to "?" for an empty/unusable name, same as the DS
+ * SettingsMenu source this is ported from (`initials`). This app has no display-name field
+ * of its own (Supabase here is email/password only, no profile metadata), so the "name" is
+ * always just the email — good enough for a monogram, which is all this is for. */
+function initials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
+}
+
+/** The signed-in/signed-out state of the settings dialog's Profile tab, and the dot on the
+ * settings gear itself (`.account-btn[data-signed-in]`, shared with `#topbarSettingsBtn` —
+ * see the comment on those buttons in index.html for why there's no separate account icon
+ * any more). Also drives the account-dialog's own state on open (openAccountDialog below),
+ * since the two are meant to read as one continuous flow: gear → Profile tab → "Sign in". */
 function renderAccountUI() {
   const user = accounts.getUser();
-  el.accountBtn.dataset.signedIn = String(Boolean(user));
-  el.topbarAccountBtn.dataset.signedIn = String(Boolean(user));
-  el.accountSignedOut.hidden = Boolean(user);
-  el.accountSignedIn.hidden = !user;
-  if (user) el.accountEmailDisplay.textContent = user.email ?? "Signed in";
+  el.settingsBtn.dataset.signedIn = String(Boolean(user));
+  el.topbarSettingsBtn.dataset.signedIn = String(Boolean(user));
+  el.profileSignedOut.hidden = Boolean(user);
+  el.profileSignedIn.hidden = !user;
+  if (user) {
+    el.profileAvatar.textContent = initials(user.email);
+    el.profileEmailDisplay.textContent = user.email ?? "Signed in";
+  }
 }
 
 let accountMode = "signin"; // "signin" | "signup", which tab is active
@@ -3322,10 +3349,11 @@ function setAccountMode(mode) {
   el.accountMessage.classList.remove("error");
 }
 
+/** Opened from the settings dialog's Profile tab ("Sign in" button) rather than its own
+ * icon — see the account-dialog comment in index.html for why sign-in/up still needs a
+ * dialog of its own even though the rest of account state moved into Settings. */
 function openAccountDialog() {
-  el.accountMessage.textContent = "";
-  el.accountMessage.classList.remove("error");
-  renderAccountUI();
+  setAccountMode("signin");
   el.accountDialog.showModal();
 }
 
@@ -3343,6 +3371,29 @@ function updateThemeButtons() {
   });
 }
 
+function profileTabButton() {
+  return el.settingsNavList.querySelector('[data-tab="profile"]');
+}
+
+/** Which of the settings dialog's four tabs (ported from the TRASE Design System's
+ * SettingsMenu — Profile/General/Search/Instructions) is showing. Module-level rather than
+ * reset on every open so returning to Settings mid-session lands back where the reader left
+ * it, the one exception being `initAccounts` steering away from a Profile tab this deploy
+ * doesn't have. */
+let settingsTab = "profile";
+
+function setSettingsTab(tab) {
+  settingsTab = tab;
+  el.settingsNavList.querySelectorAll(".settings-nav-item").forEach((btn) => {
+    const active = btn.dataset.tab === tab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  });
+  el.settingsDialog.querySelectorAll(".settings-section[data-tab-panel]").forEach((section) => {
+    section.hidden = section.dataset.tabPanel !== tab;
+  });
+}
+
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
@@ -3350,6 +3401,8 @@ function openSettingsDialog() {
   updateFontSizeButtons();
   updateThemeButtons();
   renderSearchStatus();
+  renderAccountUI();
+  setSettingsTab(settingsTab);
   el.settingsDialog.showModal();
 }
 
@@ -3714,18 +3767,19 @@ el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);
   persistSettings();
 });
-
-el.accountBtn.addEventListener("click", openAccountDialog);
-el.topbarAccountBtn.addEventListener("click", () => {
-  closeDrawer({ restoreFocus: false });
-  openAccountDialog();
+el.settingsNavList.addEventListener("click", (event) => {
+  const btn = event.target.closest(".settings-nav-item");
+  if (!btn) return;
+  setSettingsTab(btn.dataset.tab);
 });
+
+el.profileSignInBtn.addEventListener("click", openAccountDialog);
 el.accountTabs.addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-mode]");
   if (!btn) return;
   setAccountMode(btn.dataset.mode);
 });
-el.accountSignout.addEventListener("click", () => {
+el.profileSignOutBtn.addEventListener("click", () => {
   accounts.signOut();
 });
 el.accountForm.addEventListener("submit", async (event) => {
