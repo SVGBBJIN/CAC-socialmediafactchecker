@@ -289,10 +289,32 @@
     gap: 20px;
     padding: 20px 24px;
     min-height: 0;
+    transition: gap 0.5s cubic-bezier(.76,0,.24,1);
   }
-
-  /* ---------- Video preview pane ---------- */
+  /* Ported from the TRASE Design System's "Chat to shell" screen: the app starts as a bare
+     composer (no entry selected — including mid-conversation in a link-less chat, see
+     `updatePaneMode` in app.js) and only grows the video column in once a real check
+     begins, rather than always showing an empty video-pane box next to the claims pane.
+     `flex-basis: 0` (not `display: none`/`hidden`) is what makes it *animate* rather than
+     snap — the DS demo's own `.video-col` does the identical width-from-zero transition,
+     same easing and duration. `overflow: hidden` during the transition keeps the video
+     pane's own content from spilling out of a box still narrower than it.
+     Desktop/tablet only: below 701px `.video-pane` is already a full-bleed backdrop
+     (`position: absolute; inset: 0`, see that breakpoint), not a flex column with a width
+     to grow from zero — there's no "second pane" there for this to apply to. */
+  @media (min-width: 701px) {
+    .content-grid.single-pane { gap: 0; }
+    .content-grid.single-pane .video-pane {
+      flex-basis: 0; min-width: 0;
+      padding: 0; margin: 0; border-width: 0;
+      opacity: 0;
+      overflow: hidden;
+      pointer-events: none;
+    }
+  }
   .video-pane {
+    transition: flex-basis 0.5s cubic-bezier(.76,0,.24,1), opacity 0.4s ease,
+      padding 0.5s cubic-bezier(.76,0,.24,1);
     /* Wide enough that a vertical clip reads at a real size once `.video-thumb` below
        derives its width from the pane's full stretched height; capped so a 16:9 YouTube
        embed (letterboxed inside the same box by `.video-media`'s `object-fit: contain`)
@@ -1869,6 +1891,8 @@
   }
 
   [data-motion="reduced"] .blade,
+  [data-motion="reduced"] .content-grid,
+  [data-motion="reduced"] .video-pane,
   [data-motion="reduced"] .claim-text,
   [data-motion="reduced"] .badge,
   [data-motion="reduced"] .notice,
@@ -2000,7 +2024,7 @@
         </button>
       </div>
 
-      <div class="content-grid">
+      <div class="content-grid single-pane" id="contentGrid">
         <div class="video-pane">
           <div class="video-thumb" id="videoThumb">
             <svg class="play" id="videoPlaceholder" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>

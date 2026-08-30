@@ -68,6 +68,7 @@ function youTubeVideoID(urlString) {
 }
 
 const el = {
+  contentGrid: document.getElementById("contentGrid"),
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
   newCheckBtn: document.getElementById("newCheckBtn"),
@@ -1377,12 +1378,27 @@ function statusLabel(entry) {
   return VERDICTS[entry.verdictKey]?.label ?? "Unclassified";
 }
 
+/**
+ * Ported from the TRASE Design System's "Chat to shell" screen: `.content-grid` starts
+ * (and stays, through a link-less chat — see `runChat`, which never touches `selectedId`)
+ * as a single pane, just the composer. The moment a real check is selected or begins
+ * (`selectedId` becomes truthy — see `selectEntry`, `runCheck`), the video column grows in
+ * beside it via the CSS transition on `.content-grid.single-pane .video-pane`; toggling the
+ * class is all this does; the width/opacity animation itself lives entirely in that CSS.
+ * Idempotent, so it's cheap to call from every place `selectedId` can change rather than
+ * threading a "did this just change" flag through each of them.
+ */
+function updatePaneMode() {
+  el.contentGrid.classList.toggle("single-pane", !selectedId);
+}
+
 function selectEntry(id) {
   if (inFlight) return; // Don't let a click yank the pane out from under a running turn.
   // Picking a check is the whole reason the drawer was opened, so it has done its job.
   // No-op above phone width, where the sidebar is a permanent column.
   closeDrawer({ restoreFocus: false });
   selectedId = id;
+  updatePaneMode();
   pendingFollowup = null;
   renderLibrary(el.searchInput.value);
   const entry = findEntry(id);
@@ -1530,6 +1546,7 @@ function startNewCheck() {
   // behind it — so the drawer has to be out of the way before that focus call lands.
   closeDrawer({ restoreFocus: false });
   selectedId = null;
+  updatePaneMode();
   pendingFollowup = null;
   chatThread = [];
   pendingChat = null;
@@ -3012,6 +3029,7 @@ async function runCheck(url, existingId, hint) {
     entry.followups = [];
   }
   selectedId = id;
+  updatePaneMode();
   pendingFollowup = null;
   persistLibrary();
   renderLibrary(el.searchInput.value);
@@ -3914,6 +3932,10 @@ if (startupEntry) {
   selectedId = null;
   renderEmptyState();
 }
+// The markup's own `single-pane` class on #contentGrid is only right for a first-ever
+// visit — a returning reader's `selectedId` can restore to a real entry right here (see
+// the comment above), which should show the shell immediately, not grow into it.
+updatePaneMode();
 updateComposerMode();
 loadServerConfig();
 // Focusing the composer on load saves a click on desktop. On a touchscreen it costs one
