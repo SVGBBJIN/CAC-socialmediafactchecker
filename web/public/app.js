@@ -1995,6 +1995,114 @@ function renderRunningCard() {
   runElapsed.start();
 }
 
+/* ---------------------------------------------------------------- claim card tilt
+ *
+ * Pointer-driven 3D tilt + a violet glare that follows the cursor, ported from the TRASE
+ * Design System's ClaimCard (`useTilt`). Delegated on the claims pane rather than attached
+ * per-card: `.claim-card` markup gets torn down and rebuilt constantly while a check streams
+ * in (renderRunningCard, renderClaimSkeletons, settleClaimPane, renderResultCard all replace
+ * or touch it), so a listener attached to one card node would need re-attaching on every one
+ * of those instead of once, here, on the pane that outlives all of them.
+ *
+ * `mouseout`, not `mouseleave`, for the per-card reset: `mouseleave` doesn't bubble, so a
+ * delegated listener for it never fires for anything but the pane's own boundary. `mouseout`
+ * does bubble, and checking `relatedTarget` against `card.contains(...)` is what tells "the
+ * pointer left this card" apart from "the pointer moved between two elements inside it".
+ */
+function tiltGlare(card) {
+  let glare = card.querySelector(":scope > .tilt-glare");
+  if (!glare) {
+    glare = document.createElement("div");
+    glare.className = "tilt-glare";
+    card.prepend(glare);
+  }
+  return glare;
+}
+
+function resetCardTilt(card) {
+  card.style.transform = "";
+  const glare = card.querySelector(":scope > .tilt-glare");
+  if (glare) glare.style.opacity = "0";
+}
+
+el.claimsPane.addEventListener("mousemove", (e) => {
+  if (prefersReducedMotion()) return;
+  const card = e.target.closest(".claim-card");
+  if (!card) return;
+  const rect = card.getBoundingClientRect();
+  const px = (e.clientX - rect.left) / rect.width;
+  const py = (e.clientY - rect.top) / rect.height;
+  const rx = (0.5 - py) * 4.5;
+  const ry = (px - 0.5) * 4.5;
+  card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) scale3d(1.006,1.006,1.006)`;
+  const glare = tiltGlare(card);
+  glare.style.opacity = "1";
+  glare.style.background = `radial-gradient(circle at ${px * 100}% ${py * 100}%, rgba(156,140,240,0.12), transparent 60%)`;
+});
+el.claimsPane.addEventListener("mouseout", (e) => {
+  const card = e.target.closest(".claim-card");
+  if (!card || card.contains(e.relatedTarget)) return;
+  resetCardTilt(card);
+});
+
+/* ---------------------------------------------------------------- claim grid split (FLIP)
+ *
+ * The loading view grows from one big card into a grid of skeleton boxes as `[[claim: …]]`
+ * markers stream in (see renderClaimSkeletons below) — ported from the TRASE Design System's
+ * ClaimGridSplit, which animates that growth as the original panel visibly dividing into its
+ * new cells rather than boxes simply appearing in a bigger grid.
+ *
+ * The DS component drives this from React state with a hand-picked pixel layout per stage
+ * (1/2/4 claims, its demo's fixed ceiling); nothing here knows in advance how many claims a
+ * real check will find or what `claimGridColumns` will lay them out as. So instead of
+ * pre-computing target rects, this reads whatever the grid's own CSS actually put on screen
+ * before and after a rebuild and animates the difference — the standard "FLIP" technique
+ * (First, Last, Invert, Play): measure every `.claim-card`'s rect, let `render` replace the
+ * pane's markup as it already does, then for each box now on screen, animate *from* its old
+ * rect *to* its new one via the Web Animations API (independent of the CSS `transition`
+ * property, so it can't collide with `.claim-grid-loading .claim-pane.in`'s own opacity
+ * transition on the same element — see that rule's comment in index.html).
+ *
+ * Boxes are matched old-to-new by `data-claim` index; the single running card from
+ * renderRunningCard (no `data-claim`) uses the key `"__single__"`. A box with no direct
+ * predecessor — claim 3 appearing for the first time, or every box on the very first
+ * rebuild — falls back to the one old rect there was, if there was exactly one (the usual
+ * case: the lone running card splitting into the first grid), so it grows out of that rather
+ * than snapping in from nowhere.
+ */
+function flipClaimsPane(render) {
+  if (prefersReducedMotion()) {
+    render();
+    return;
+  }
+  const before = new Map();
+  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
+    before.set(node.dataset.claim ?? "__single__", node.getBoundingClientRect());
+  });
+  const fallback =
+    before.size === 1 ? [...before.values()][0] : el.claimsPane.getBoundingClientRect();
+
+  render();
+
+  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
+    const from = before.get(node.dataset.claim ?? "__single__") ?? fallback;
+    const to = node.getBoundingClientRect();
+    if (!from || !to.width || !to.height) return;
+    const dx = from.left - to.left;
+    const dy = from.top - to.top;
+    const sx = from.width / to.width;
+    const sy = from.height / to.height;
+    if (!dx && !dy && sx === 1 && sy === 1) return; // already where it lands — nothing to play
+    node.animate(
+      [
+        { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: "top left" },
+        { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left" },
+      ],
+      { duration: 550, easing: "cubic-bezier(0.76, 0, 0.24, 1)" },
+    );
+  });
+}
+
 /**
  * The sources retrieved so far, on screen while they are still being read.
  *
@@ -2927,7 +3035,7 @@ async function runCheck(url, existingId, hint) {
         if (!rebuild && settled.length === 0) return;
         drawn = claims;
         if (rebuild) {
-          renderClaimSkeletons(claims, stage, liveSources, seekable);
+          flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
