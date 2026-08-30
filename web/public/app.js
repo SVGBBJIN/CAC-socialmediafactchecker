@@ -1150,7 +1150,14 @@ function createProgressTicker(barId) {
         const elapsedSeconds = (performance.now() - start) / 1000;
         // Decays toward 92%, deliberately never arriving there unassisted — a check that
         // runs long still reads as "still going", not stalled at a false-complete bar.
-        const eased = 92 * (1 - Math.exp(-elapsedSeconds / 4.5));
+        // Time constant of 9s (not 4.5): a real multi-claim check is a 30s-2min wait (video
+        // resolve, upload, three rounds of search/read/write — see CLAUDE.md), and at 4.5s
+        // this was already reading ~90% by the 20s mark, well before the model had even
+        // finished its first search round — a bar that arrives early reads as stalled for
+        // whatever's left of the wait, which defeats the whole point of easing it forward
+        // instead of just showing the raw elapsed clock. Doubling the constant keeps that
+        // early climb honest a while longer without giving up the "still moving" feel.
+        const eased = 92 * (1 - Math.exp(-elapsedSeconds / 9));
         paint(Math.max(eased, floor));
       }, 200);
     },
