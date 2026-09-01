@@ -30,8 +30,8 @@ Node 20+ stdlib. To run a single test file directly: `node --test test-search.js
 see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
-test-timestamps.js test-claims.js test-caption-search.js`). As of this writing the whole
-suite is 515 tests; `worker/`'s is 5.
+test-timestamps.js test-claims.js test-corroboration.js test-caption-search.js`). As of this writing the whole
+suite is 558 tests; `worker/`'s is 5.
 
 ### `worker/` (optional browser-resolve fallback)
 
@@ -103,6 +103,27 @@ that deletion is the entire enforcement mechanism. There used to be a second lay
 LLM-based auditor that guessed which sentences were "claims" and forced rewrites); it was
 removed because the guess was unreliable, not replaced. Don't reintroduce sentence-level
 claim detection — it was deliberately torn out.
+
+**A Corroborated verdict is audited against what its sources actually say.** The failure
+this catches is a claim marked *Corroborated* whose cited pages are about the claim's
+subject without confirming it — the Wikipedia article for an office and a gov.uk list of
+ministers, cited for who currently holds that office. `lib/corroboration.js` runs over the
+finished answer, before `cleanCitations`, and asks one question per `[[claim: …]]` block the
+model marked Corroborated: do the pages it cited contain the claim's own specifics? Names
+and figures are required outright; the claim's other words are required on a scale that
+loosens as more names and figures match, because a source that has matched two of them is
+demonstrably about *this claim* and the rest is wording (see the note in `sourceConfirms`).
+A claim nothing confirms is rewritten to **Insufficient evidence** with one app-voiced line
+saying why. It only ever moves a verdict in that direction — it can withhold a finding,
+never manufacture one — and, like `cleanCitations`, it never un-draws anything: the rewrite
+travels as the same `{type: "answer"}` replacement frame.
+
+This is **not** the sentence-level claim detection torn out above, for the same reason the
+claim-marker section below gives: it acts on the model's own `[[claim: …]]` and `VERDICT:`
+lines and on text the app itself retrieved, never on a guess about which prose is a claim.
+Nor is it an entailment check — a page saying cases *rose* contains every name and figure of
+a claim that they *fell*, and catching that is the model's job, which the WHAT COUNTS AS
+CORROBORATION section of the prompt asks it to do. Don't grow this into one.
 
 **One search may run before the model has asked for anything.** `lib/caption-search.js`
 turns a post's caption into a single speculative `web_search`, issued while the clip is

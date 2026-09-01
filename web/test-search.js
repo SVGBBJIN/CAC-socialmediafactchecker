@@ -2133,3 +2133,92 @@ test("prefetching is spread out rather than launched all at once", async () => {
   // And every one of them still gets fetched — spreading them out must not drop any.
   assert.equal(fetched.length, 9);
 });
+
+/* ------------------------------------------------- the corroboration audit, in a turn */
+
+/** A search result whose pages say what the fixture says, rather than "snippet". */
+function pagesResult(claim, pages) {
+  return {
+    query: "q",
+    claim,
+    provider: "test",
+    retrievedAt: "2026-07-28T00:00:00.000Z",
+    results: pages.map(({ title, url, snippet }) => ({
+      title,
+      url,
+      domain: new URL(url).hostname,
+      snippet,
+      published: null,
+    })),
+  };
+}
+
+const OFFICE_PAGE = {
+  title: "Prime Minister of the United Kingdom - Wikipedia",
+  url: "https://en.wikipedia.example/wiki/Prime_Minister",
+  snippet: "The prime minister of the United Kingdom is the head of government.",
+};
+const OFFICEHOLDER_PAGE = {
+  title: "Prime Minister - GOV.UK",
+  url: "https://gov.example/government/ministers/prime-minister",
+  snippet: "Sir Keir Starmer has been Prime Minister of the United Kingdom since July 2024.",
+};
+
+test("a Corroborated verdict its sources only share a topic with is lowered before the reader sees it", async () => {
+  // The bug this exists for: two on-topic pages, neither of which names the officeholder,
+  // and a green Corroborated badge over a false claim. See lib/corroboration.js.
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "uk prime minister", claim: "Rishi Sunak is PM" } }] },
+    {
+      text: [
+        "[[claim: Rishi Sunak is the current Prime Minister of the United Kingdom]]",
+        "Both pages describe the office [1][2].",
+        "VERDICT: Corroborated",
+      ].join("\n"),
+    },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => pagesResult("Rishi Sunak is PM", [OFFICE_PAGE, OFFICEHOLDER_PAGE]),
+    }),
+  );
+
+  const shown = readerSees(frames);
+  assert.match(shown, /VERDICT: Insufficient evidence$/);
+  assert.doesNotMatch(shown, /VERDICT: Corroborated/);
+  // The claim, its prose and its citations survive: only the verdict moved, and the reader
+  // is told by whom and why.
+  assert.match(shown, /Both pages describe the office \[1\]\[2\]\./);
+  assert.match(shown, /Checked by the app/);
+});
+
+test("a Corroborated verdict whose source carries the specific fact is left exactly as written", async () => {
+  const answer = [
+    "[[claim: Keir Starmer is the Prime Minister of the United Kingdom]]",
+    "The government's own page names him [1].",
+    "VERDICT: Corroborated",
+  ].join("\n");
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "uk prime minister", claim: "Starmer is PM" } }] },
+    { text: answer },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async () => pagesResult("Starmer is PM", [OFFICEHOLDER_PAGE]),
+    }),
+  );
+
+  assert.equal(readerSees(frames), answer);
+});

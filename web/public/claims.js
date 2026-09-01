@@ -104,8 +104,34 @@ export function splitClaims(rawAnswer) {
   return markers.map((marker, index) => {
     const start = marker.index + marker[0].length;
     const end = index + 1 < markers.length ? markers[index + 1].index : text.length;
-    const { text: body, verdictKey } = splitVerdict(text.slice(start, end).trim());
-    return { title: marker[1].trim(), text: body, verdictKey };
+    const slice = text.slice(start, end);
+    // Where the trimmed body actually begins in the original answer. `splitVerdict` is
+    // handed the trimmed slice, so every offset it reports has to be shifted back by this
+    // much to mean anything to a caller holding the whole answer.
+    const bodyStart = start + (slice.length - slice.trimStart().length);
+    const trimmed = slice.trim();
+    const { text: body, verdictKey } = splitVerdict(trimmed);
+    const verdictMatch = trimmed.match(VERDICT_LINE);
+    return {
+      title: marker[1].trim(),
+      text: body,
+      verdictKey,
+      // Offsets into the answer this block was parsed out of, so a caller can rewrite one
+      // claim's verdict line without re-serialising — and therefore without reflowing —
+      // everything around it. `verdict` is null exactly when `verdictKey` is: a block cut
+      // off mid-turn has no line to point at. Nothing in the browser reads these; they are
+      // here because the server-side corroboration audit (lib/corroboration.js) needs to
+      // parse claims with the same code that renders them rather than a second copy of
+      // this syntax.
+      range: { start: marker.index, end },
+      verdict: verdictMatch
+        ? {
+            start: bodyStart + verdictMatch.index,
+            end: bodyStart + verdictMatch.index + verdictMatch[0].length,
+            text: verdictMatch[0],
+          }
+        : null,
+    };
   });
 }
 
