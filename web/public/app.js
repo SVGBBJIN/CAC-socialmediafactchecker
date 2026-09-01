@@ -68,6 +68,7 @@ function youTubeVideoID(urlString) {
 }
 
 const el = {
+  contentGrid: document.getElementById("contentGrid"),
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
   newCheckBtn: document.getElementById("newCheckBtn"),
@@ -82,11 +83,15 @@ const el = {
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
   videoImages: document.getElementById("videoImages"),
-  videoControls: document.getElementById("videoControls"),
+  vpOverlay: document.getElementById("vpOverlay"),
+  vpPlayIcon: document.getElementById("vpPlayIcon"),
+  vpBar: document.getElementById("vpBar"),
   playBtn: document.getElementById("playBtn"),
+  vpTime: document.getElementById("vpTime"),
+  vpDuration: document.getElementById("vpDuration"),
+  vpScrubThumb: document.getElementById("vpScrubThumb"),
   muteBtn: document.getElementById("muteBtn"),
   fullscreenBtn: document.getElementById("fullscreenBtn"),
-  videoTimeline: document.getElementById("videoTimeline"),
   timelineTrack: document.getElementById("timelineTrack"),
   timelineProgress: document.getElementById("timelineProgress"),
   passDialog: document.getElementById("passphrase-dialog"),
@@ -120,20 +125,26 @@ const el = {
   drawerToggle: document.getElementById("drawerToggle"),
   drawerScrim: document.getElementById("drawerScrim"),
   topbarSettingsBtn: document.getElementById("topbarSettingsBtn"),
-  accountBtn: document.getElementById("accountBtn"),
-  topbarAccountBtn: document.getElementById("topbarAccountBtn"),
+  // Sign-in/up only — see the account-dialog comment in index.html. The signed-in identity
+  // view lives in the settings dialog's Profile tab (profile* below) instead.
   accountDialog: document.getElementById("account-dialog"),
   accountForm: document.getElementById("account-form"),
-  accountSignedOut: document.getElementById("account-signed-out"),
-  accountSignedIn: document.getElementById("account-signed-in"),
-  accountTabs: document.getElementById("account-tabs"),
+  accountHeading: document.getElementById("accountHeading"),
+  accountSub: document.getElementById("accountSub"),
+  accountSwitch: document.getElementById("accountSwitch"),
   accountEmail: document.getElementById("account-email"),
   accountPassword: document.getElementById("account-password"),
   accountMessage: document.getElementById("account-message"),
   accountSubmit: document.getElementById("account-submit"),
-  accountEmailDisplay: document.getElementById("account-email-display"),
-  accountSyncStatus: document.getElementById("account-sync-status"),
-  accountSignout: document.getElementById("account-signout"),
+  accountSubmitLabel: document.getElementById("accountSubmitLabel"),
+  settingsNavList: document.getElementById("settingsNavList"),
+  profileSignedOut: document.getElementById("profile-signed-out"),
+  profileSignedIn: document.getElementById("profile-signed-in"),
+  profileAvatar: document.getElementById("profileAvatar"),
+  profileEmailDisplay: document.getElementById("profileEmailDisplay"),
+  profileSyncStatus: document.getElementById("profileSyncStatus"),
+  profileSignInBtn: document.getElementById("profileSignInBtn"),
+  profileSignOutBtn: document.getElementById("profileSignOutBtn"),
 };
 
 let library = loadLibrary();
@@ -159,7 +170,7 @@ let pendingConfirmUrl = null; // url waiting on the link-confirm dialog's "Check
 // link has ever been checked, not only after: a pasted link is intercepted by the regex in
 // confirmAndRunCheck/normalizeLink and starts a real check instead of landing here. Not
 // persisted, same as pendingFollowup above — a reload starts the conversation over.
-let chatThread = []; // { question, answer, sources, incomplete, durationMs }
+let chatThread = []; // { question, rawAnswer, answer, claims, verdictKey, sources, incomplete, durationMs }
 let pendingChat = null; // { question, error? }
 
 /* ---------------------------------------------------------------- settings */
@@ -429,10 +440,14 @@ function findEntry(id) {
   return library.find((entry) => entry.id === id) ?? null;
 }
 
-/** The selected entry, but only once it has something a follow-up can build on. */
+/** The selected entry, but only once it has something a follow-up can build on. A saved
+ * link-less conversation (no `url` — see `runChat`) doesn't count: it already has its own
+ * turn-taking through `runChat` itself, keyed on `chatThread` rather than `followups`, so
+ * routing its continuation through `runFollowup` would push onto a `followups` array that
+ * doesn't exist on this entry. */
 function selectedDoneEntry() {
   const entry = selectedId ? findEntry(selectedId) : null;
-  return entry?.status === "done" ? entry : null;
+  return entry?.status === "done" && entry.url ? entry : null;
 }
 
 /* ---------------------------------------------------------- link + text helpers */
@@ -1139,7 +1154,14 @@ function createProgressTicker(barId) {
         const elapsedSeconds = (performance.now() - start) / 1000;
         // Decays toward 92%, deliberately never arriving there unassisted — a check that
         // runs long still reads as "still going", not stalled at a false-complete bar.
-        const eased = 92 * (1 - Math.exp(-elapsedSeconds / 4.5));
+        // Time constant of 9s (not 4.5): a real multi-claim check is a 30s-2min wait (video
+        // resolve, upload, three rounds of search/read/write — see CLAUDE.md), and at 4.5s
+        // this was already reading ~90% by the 20s mark, well before the model had even
+        // finished its first search round — a bar that arrives early reads as stalled for
+        // whatever's left of the wait, which defeats the whole point of easing it forward
+        // instead of just showing the raw elapsed clock. Doubling the constant keeps that
+        // early climb honest a while longer without giving up the "still moving" feel.
+        const eased = 92 * (1 - Math.exp(-elapsedSeconds / 9));
         paint(Math.max(eased, floor));
       }, 200);
     },
@@ -1354,17 +1376,64 @@ function renderLibrary(filter = "") {
 function dotClassFor(entry) {
   if (entry.status === "running") return "warn";
   if (entry.status === "error") return "muted";
+  // A saved link-less conversation (see `runChat`) has no single verdict — it's a stack of
+  // independently-answered questions, not one claim under examination.
+  if (!entry.url) return "muted";
   return VERDICTS[entry.verdictKey]?.css ?? "muted";
 }
 
 function statusLabel(entry) {
   if (entry.status === "running") return "Checking…";
   if (entry.status === "error") return "Failed";
+  if (!entry.url) return entry.turns.length === 1 ? "1 message" : `${entry.turns.length} messages`;
   // Same reasoning as `verdictHTML`: an incomplete turn that never reached a verdict must
   // not be filed in the library under one. "Unclassified" would be a truthful label and a
   // useless one — it reads as a property of the claim rather than of the check.
   if (entry.incomplete && !entry.verdictKey) return entry.incomplete.label;
   return VERDICTS[entry.verdictKey]?.label ?? "Unclassified";
+}
+
+/**
+ * Ported from the TRASE Design System's "Chat to shell" screen: `.content-grid` starts
+ * (and stays, through a link-less chat — see `runChat`, which never touches `selectedId`)
+ * as a single pane, just the composer. The moment a real check is selected or begins
+ * (`selectedId` becomes truthy — see `selectEntry`, `runCheck`), the video column grows in
+ * beside it via the CSS transition on `.content-grid.single-pane .video-pane`; toggling the
+ * class is all this does; the width/opacity animation itself lives entirely in that CSS.
+ * Idempotent, so it's cheap to call from every place `selectedId` can change rather than
+ * threading a "did this just change" flag through each of them. A saved link-less
+ * conversation (no `url` — see `runChat`) keeps the single-pane layout even once selected:
+ * there was never a video to grow the second column in for.
+ */
+function updatePaneMode() {
+  const entry = selectedId ? findEntry(selectedId) : null;
+  el.contentGrid.classList.toggle("single-pane", !entry || !entry.url);
+}
+
+/**
+ * Puts `entry` on screen in the main content pane. A real check (has a `url`) gets the
+ * video pane plus its evidence card, same as always; a saved link-less conversation (see
+ * `runChat`) has no video to show, so it points `chatThread` at the entry's own `turns` —
+ * the same array `runChat` will keep pushing onto if the reader continues it — and renders
+ * it the same way the free-standing (not-yet-saved) conversation always has. Shared by
+ * `selectEntry` and the startup restore, which walk the exact same branch a click does.
+ */
+function openEntryInPane(entry) {
+  if (!entry) return;
+  if (!entry.url) {
+    chatThread = entry.turns;
+    pendingChat = null;
+    el.videoTitle.textContent = entry.title;
+    el.videoLink.href = "#";
+    el.videoLink.textContent = "";
+    el.videoLink.classList.add("empty");
+    clearVideoMedia();
+    renderChatPane();
+    return;
+  }
+  renderVideoPane(entry);
+  if (entry.status === "done") renderResultCard(entry);
+  else if (entry.status === "error") renderErrorCard(entry);
 }
 
 function selectEntry(id) {
@@ -1373,12 +1442,10 @@ function selectEntry(id) {
   // No-op above phone width, where the sidebar is a permanent column.
   closeDrawer({ restoreFocus: false });
   selectedId = id;
+  updatePaneMode();
   pendingFollowup = null;
   renderLibrary(el.searchInput.value);
-  const entry = findEntry(id);
-  if (entry) renderVideoPane(entry);
-  if (entry?.status === "done") renderResultCard(entry);
-  else if (entry?.status === "error") renderErrorCard(entry);
+  openEntryInPane(findEntry(id));
   updateComposerMode();
 }
 
@@ -1397,6 +1464,49 @@ function renderEmptyState() {
   refreshTimeline();
 }
 
+/**
+ * Strips the model's own template syntax off a raw answer — the trailing `VERDICT: …`
+ * line and any `[[claim: …]]` markers (see claims.js for the syntax, and the CLAIM
+ * STRUCTURE section of the system prompt in lib/verified-chat.js for why the model writes
+ * it at all) — leaving the display text, the claim blocks split out if there was more than
+ * one, and whichever verdict actually parsed. Never invents one: a plain conversational
+ * reply with neither a marker nor a `VERDICT:` line gets `verdictKey: null` back, same as
+ * it arrived — it's `runCheck`'s own job to default a *real check's* missing verdict to
+ * "insufficient" (a link is always check-shaped), not this function's, since a follow-up
+ * or a link-less chat turn is not guaranteed to be a check at all: "thanks" needs no badge.
+ *
+ * Shared by `runCheck`, `runFollowup` and `runChat` so a follow-up on an existing check and
+ * a "just ask a question" turn stop leaking this syntax verbatim into `renderMarkdown` the
+ * way they used to — the same parsing `runCheck` already did for the main answer, just
+ * never applied to either of the other two turn types.
+ */
+function stripAnswerMarkers(answer) {
+  const { text, verdictKey } = splitVerdict(answer);
+  const claims = splitClaims(answer);
+  return { rawAnswer: answer, answer: text, claims, verdictKey };
+}
+
+/** The body of one answered turn — a follow-up or a link-less chat reply — as markdown
+ * plus a verdict badge, or one title+markdown+badge group per claim if the model opened
+ * more than one `[[claim: …]]` (see `stripAnswerMarkers`) — the same per-claim shape
+ * `claimPanesHTML` renders for a fresh check, just inline in a thread item instead of a
+ * grid of cards, since a thread is a stack of turns rather than a stack of claims. */
+function turnBodyHTML(turn, sources, animate, seekable) {
+  if (!turn.claims) {
+    return `
+      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(turn.answer, sources, seekable)}</div>
+      ${badgeHTML(turn.verdictKey, animate)}`;
+  }
+  return turn.claims
+    .map(
+      (claim) => `
+      <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
+      ${badgeHTML(claim.verdictKey, animate)}`,
+    )
+    .join("");
+}
+
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
  * `threadHTML` — but with no `entry` behind it. */
 function chatThreadHTML(newestIndex) {
@@ -1406,7 +1516,7 @@ function chatThreadHTML(newestIndex) {
       return `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(c.question)}</div>
-          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(c.answer, c.sources)}</div>
+          ${turnBodyHTML(c, c.sources, animate)}
           ${incompleteHTML(c.incomplete, animate)}
           ${durationHTML(c.durationMs, animate, "Answered in")}
           ${sourcePillsHTML(c.sources, animate)}
@@ -1451,8 +1561,11 @@ function renderChatPane({ newest = -1 } = {}) {
 /**
  * A conversational turn with no link involved — no video, no verdict, just an answer.
  * Mirrors `runFollowup`'s shape (history replay, pending/settled bookkeeping) but against
- * `chatThread` rather than an entry's `followups`, since there is no entry: this is what
- * "just ask a question" does before any link has ever been checked.
+ * `chatThread` rather than an entry's `followups` — this is what "just ask a question" does.
+ * The first answered turn in a conversation files a library entry for it (no `url`, so
+ * `selectedDoneEntry`/`updatePaneMode`/`dotClassFor`/`statusLabel` all tell it apart from a
+ * real check), so it survives a reload and shows up in the sidebar the same as any check;
+ * every turn after that just keeps appending to the entry it already made.
  */
 async function runChat(question) {
   if (inFlight) return;
@@ -1476,7 +1589,9 @@ async function runChat(question) {
     const message = { role: "user", content: withCustomInstructions(question), ...imagePayload(image) };
     const history = chatThread.flatMap((c) => [
       { role: "user", content: c.question },
-      { role: "assistant", content: c.answer },
+      // rawAnswer, not the stripped display text — same reasoning as historyFor's own
+      // fallback for an entry's main answer and its followups.
+      { role: "assistant", content: c.rawAnswer ?? c.answer ?? "" },
     ]);
     const { answer, sources, incomplete } = await streamChat([...history, message], {
       signal: controller.signal,
@@ -1486,8 +1601,41 @@ async function runChat(question) {
       },
     });
     chatProgress.finish();
-    chatThread.push({ question, answer, sources, incomplete, durationMs: chatElapsed.elapsedMs() });
+    const parsed = stripAnswerMarkers(answer);
+    chatThread.push({
+      question,
+      ...parsed,
+      // Same reasoning as runFollowup's own verdictKey: a link-less chat turn isn't
+      // guaranteed to be check-shaped, so only default a missing verdict to "insufficient"
+      // when the model actually opened claim markers.
+      verdictKey: parsed.claims ? aggregateVerdictKey(parsed.claims) ?? (incomplete ? null : "insufficient") : parsed.verdictKey,
+      sources,
+      incomplete,
+      durationMs: chatElapsed.elapsedMs(),
+    });
     settled = true;
+    // File this conversation in the sidebar the same way a real check always has been —
+    // lazily, on its first answered turn, rather than the moment the question is typed: an
+    // aborted or failed first attempt leaves no trace, same as it always did before this
+    // existed. A later question in the same conversation just keeps appending — chatThread
+    // and chatEntry.turns are the same array from here on (see `openEntryInPane`), so there
+    // is nothing to re-sync, only to persist.
+    let chatEntry = selectedId ? findEntry(selectedId) : null;
+    if (!chatEntry) {
+      chatEntry = {
+        id: crypto.randomUUID(),
+        platform: "Question",
+        title: truncate(question, 80),
+        createdAt: Date.now(),
+        status: "done",
+        turns: chatThread,
+      };
+      library.unshift(chatEntry);
+      selectedId = chatEntry.id;
+      updatePaneMode();
+    }
+    persistLibrary();
+    renderLibrary(el.searchInput.value);
   } catch (error) {
     if (error.name === "AbortError") {
       pendingChat = null;
@@ -1503,7 +1651,12 @@ async function runChat(question) {
     inFlight = null;
     el.checkBtn.disabled = false;
     el.newCheckBtn.disabled = false;
-    if (!selectedId) renderChatPane({ newest: settled ? chatThread.length - 1 : -1 });
+    // True both before any turn has ever been saved (selectedId still null) and once one
+    // has (selectedId now names the chat entry `runChat` just filed — see above), since
+    // neither carries a `url`; false only if the reader switched to a real check mid-flight,
+    // which `inFlight` already blocks `selectEntry` from doing.
+    const activeEntry = selectedId ? findEntry(selectedId) : null;
+    if (!activeEntry || !activeEntry.url) renderChatPane({ newest: settled ? chatThread.length - 1 : -1 });
     updateComposerMode();
   }
 }
@@ -1520,6 +1673,7 @@ function startNewCheck() {
   // behind it — so the drawer has to be out of the way before that focus call lands.
   closeDrawer({ restoreFocus: false });
   selectedId = null;
+  updatePaneMode();
   pendingFollowup = null;
   chatThread = [];
   pendingChat = null;
@@ -1574,19 +1728,45 @@ function clearVideoMedia() {
 }
 
 /**
- * The custom mute/fullscreen buttons and the claim timeline both answer to the same
- * `<video>` element, so both come and go together — visible only for a direct MP4
+ * The tap-to-play overlay and the control bar (play/scrub/mute/fullscreen — ported from the
+ * TRASE Design System's VideoPlayer, see the CSS comment on `.vp-bar`) both answer to the
+ * same `<video>` element, so both come and go together — visible only for a direct MP4
  * (TikTok/Instagram), hidden for the YouTube embed (draws its own chrome; its clock isn't
  * readable from this page either, see `syncPlayhead`), an image carousel (nothing to
  * play), and the empty/placeholder state.
  */
 function setPlayerChromeVisible(visible) {
-  el.videoControls.hidden = !visible;
-  el.videoTimeline.hidden = !visible;
-  if (!visible) {
-    el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+  el.vpOverlay.hidden = !visible;
+  el.vpBar.hidden = !visible;
+  if (visible) wakePlayerChrome();
+  else {
+    el.timelineTrack.querySelectorAll(".vp-marker").forEach((node) => node.remove());
     el.timelineProgress.style.width = "0%";
+    el.vpScrubThumb.style.left = "0%";
+    el.vpTime.textContent = "0:00";
+    el.vpDuration.textContent = "0:00";
+    el.videoThumb.classList.remove("is-active");
+    clearTimeout(playerChromeHideTimer);
   }
+}
+
+/**
+ * Fades `.vp-bar` in and resets the auto-hide clock — the DS VideoPlayer's own `wake()`.
+ * Called on interaction (mousemove over the player, a click on the scrub track) and
+ * whenever the player pauses, so the bar is never hidden while there's nothing playing to
+ * watch instead of it. Hides itself again after a couple seconds of inactivity while
+ * playing; skipped entirely on a coarse pointer (touch), which gets a resting-visible bar
+ * instead — see the `[data-pointer="coarse"] .vp-bar` CSS rule.
+ */
+let playerChromeHideTimer = null;
+function wakePlayerChrome() {
+  if (el.vpBar.hidden) return;
+  el.videoThumb.classList.add("is-active");
+  clearTimeout(playerChromeHideTimer);
+  if (document.documentElement.dataset.pointer === "coarse") return;
+  playerChromeHideTimer = setTimeout(() => {
+    if (!el.videoPlayer.paused) el.videoThumb.classList.remove("is-active");
+  }, 2200);
 }
 
 /**
@@ -1643,6 +1823,10 @@ function showVideoElement(media) {
   // away, and the pane silently plays at 1×.
   el.videoPlayer.playbackRate = VIDEO_PLAYBACK_RATE;
   el.videoPlayer.hidden = false;
+  // Assumed paused until the `play` event says otherwise (see that listener) — a previous
+  // entry's video may have left this `true` if it was mid-playback, and autoplay here can
+  // be silently refused, in which case `play` never fires to correct it.
+  el.vpPlayIcon.hidden = false;
   el.videoPlayer.play().catch(() => {}); // Autoplay can be refused; controls stay visible either way.
   setPlayerChromeVisible(true);
   // Muted is the element's own starting attribute and this button's assumed starting
@@ -1846,13 +2030,14 @@ function refreshTimeline() {
  * isn't known yet — `loadedmetadata` calls this again once it is.
  */
 function renderTimelineTrack() {
-  el.timelineTrack.querySelectorAll(".video-timeline-mark").forEach((node) => node.remove());
+  el.timelineTrack.querySelectorAll(".vp-marker").forEach((node) => node.remove());
   const duration = el.videoPlayer.duration;
-  if (el.videoTimeline.hidden || !Number.isFinite(duration) || duration <= 0) return;
+  if (el.vpBar.hidden || !Number.isFinite(duration) || duration <= 0) return;
+  const track = el.timelineTrack.querySelector(".vp-scrub-track");
 
   for (const window of claimWindows) {
     const mark = document.createElement("div");
-    mark.className = "video-timeline-mark";
+    mark.className = "vp-marker";
     const left = Math.min(100, (window.from / duration) * 100);
     const width = Math.max(0.6, ((Math.min(window.to, duration) - window.from) / duration) * 100);
     mark.style.left = `${left}%`;
@@ -1861,7 +2046,7 @@ function renderTimelineTrack() {
     // lighting up moves both the chip in the answer and its band on the scrubber from one
     // `activeWindow` assignment in `syncPlayhead` — never two sources of "which claim".
     window.trackNode = mark;
-    el.timelineTrack.appendChild(mark);
+    track.appendChild(mark);
   }
 }
 
@@ -1882,7 +2067,10 @@ function syncPlayhead() {
   if (playing && Number.isFinite(duration) && duration > 0) {
     const percent = Math.min(100, (el.videoPlayer.currentTime / duration) * 100);
     el.timelineProgress.style.width = `${percent}%`;
+    el.vpScrubThumb.style.left = `${percent}%`;
     el.timelineTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+    el.vpTime.textContent = formatClock(el.videoPlayer.currentTime);
+    el.vpDuration.textContent = formatClock(duration);
   }
 
   const next = playing ? activeAt(claimWindows, el.videoPlayer.currentTime) : null;
@@ -1993,6 +2181,114 @@ function renderRunningCard() {
   refreshTimeline();
   runProgress.start();
   runElapsed.start();
+}
+
+/* ---------------------------------------------------------------- claim card tilt
+ *
+ * Pointer-driven 3D tilt + a violet glare that follows the cursor, ported from the TRASE
+ * Design System's ClaimCard (`useTilt`). Delegated on the claims pane rather than attached
+ * per-card: `.claim-card` markup gets torn down and rebuilt constantly while a check streams
+ * in (renderRunningCard, renderClaimSkeletons, settleClaimPane, renderResultCard all replace
+ * or touch it), so a listener attached to one card node would need re-attaching on every one
+ * of those instead of once, here, on the pane that outlives all of them.
+ *
+ * `mouseout`, not `mouseleave`, for the per-card reset: `mouseleave` doesn't bubble, so a
+ * delegated listener for it never fires for anything but the pane's own boundary. `mouseout`
+ * does bubble, and checking `relatedTarget` against `card.contains(...)` is what tells "the
+ * pointer left this card" apart from "the pointer moved between two elements inside it".
+ */
+function tiltGlare(card) {
+  let glare = card.querySelector(":scope > .tilt-glare");
+  if (!glare) {
+    glare = document.createElement("div");
+    glare.className = "tilt-glare";
+    card.prepend(glare);
+  }
+  return glare;
+}
+
+function resetCardTilt(card) {
+  card.style.transform = "";
+  const glare = card.querySelector(":scope > .tilt-glare");
+  if (glare) glare.style.opacity = "0";
+}
+
+el.claimsPane.addEventListener("mousemove", (e) => {
+  if (prefersReducedMotion()) return;
+  const card = e.target.closest(".claim-card");
+  if (!card) return;
+  const rect = card.getBoundingClientRect();
+  const px = (e.clientX - rect.left) / rect.width;
+  const py = (e.clientY - rect.top) / rect.height;
+  const rx = (0.5 - py) * 4.5;
+  const ry = (px - 0.5) * 4.5;
+  card.style.transform = `perspective(900px) rotateX(${rx}deg) rotateY(${ry}deg) scale3d(1.006,1.006,1.006)`;
+  const glare = tiltGlare(card);
+  glare.style.opacity = "1";
+  glare.style.background = `radial-gradient(circle at ${px * 100}% ${py * 100}%, rgba(156,140,240,0.12), transparent 60%)`;
+});
+el.claimsPane.addEventListener("mouseout", (e) => {
+  const card = e.target.closest(".claim-card");
+  if (!card || card.contains(e.relatedTarget)) return;
+  resetCardTilt(card);
+});
+
+/* ---------------------------------------------------------------- claim grid split (FLIP)
+ *
+ * The loading view grows from one big card into a grid of skeleton boxes as `[[claim: …]]`
+ * markers stream in (see renderClaimSkeletons below) — ported from the TRASE Design System's
+ * ClaimGridSplit, which animates that growth as the original panel visibly dividing into its
+ * new cells rather than boxes simply appearing in a bigger grid.
+ *
+ * The DS component drives this from React state with a hand-picked pixel layout per stage
+ * (1/2/4 claims, its demo's fixed ceiling); nothing here knows in advance how many claims a
+ * real check will find or what `claimGridColumns` will lay them out as. So instead of
+ * pre-computing target rects, this reads whatever the grid's own CSS actually put on screen
+ * before and after a rebuild and animates the difference — the standard "FLIP" technique
+ * (First, Last, Invert, Play): measure every `.claim-card`'s rect, let `render` replace the
+ * pane's markup as it already does, then for each box now on screen, animate *from* its old
+ * rect *to* its new one via the Web Animations API (independent of the CSS `transition`
+ * property, so it can't collide with `.claim-grid-loading .claim-pane.in`'s own opacity
+ * transition on the same element — see that rule's comment in index.html).
+ *
+ * Boxes are matched old-to-new by `data-claim` index; the single running card from
+ * renderRunningCard (no `data-claim`) uses the key `"__single__"`. A box with no direct
+ * predecessor — claim 3 appearing for the first time, or every box on the very first
+ * rebuild — falls back to the one old rect there was, if there was exactly one (the usual
+ * case: the lone running card splitting into the first grid), so it grows out of that rather
+ * than snapping in from nowhere.
+ */
+function flipClaimsPane(render) {
+  if (prefersReducedMotion()) {
+    render();
+    return;
+  }
+  const before = new Map();
+  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
+    before.set(node.dataset.claim ?? "__single__", node.getBoundingClientRect());
+  });
+  const fallback =
+    before.size === 1 ? [...before.values()][0] : el.claimsPane.getBoundingClientRect();
+
+  render();
+
+  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
+    const from = before.get(node.dataset.claim ?? "__single__") ?? fallback;
+    const to = node.getBoundingClientRect();
+    if (!from || !to.width || !to.height) return;
+    const dx = from.left - to.left;
+    const dy = from.top - to.top;
+    const sx = from.width / to.width;
+    const sy = from.height / to.height;
+    if (!dx && !dy && sx === 1 && sy === 1) return; // already where it lands — nothing to play
+    node.animate(
+      [
+        { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: "top left" },
+        { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left" },
+      ],
+      { duration: 550, easing: "cubic-bezier(0.76, 0, 0.24, 1)" },
+    );
+  });
 }
 
 /**
@@ -2506,7 +2802,7 @@ function threadHTML(entry, newestIndex) {
       return `
         <div class="thread-item">
           <div class="thread-q">${escapeHTML(f.question)}</div>
-          <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(f.answer, f.sources, seekable)}</div>
+          ${turnBodyHTML(f, f.sources, animate, seekable)}
           ${incompleteHTML(f.incomplete, animate)}
           ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
@@ -2830,7 +3126,9 @@ function historyFor(entry) {
     { role: "assistant", content: entry.rawAnswer ?? entry.answer ?? "" },
   ];
   for (const f of entry.followups) {
-    history.push({ role: "user", content: f.question }, { role: "assistant", content: f.answer });
+    // Same fallback as the main answer above, and for the same reason: a followup written
+    // before `rawAnswer` existed only has the already-stripped `answer`.
+    history.push({ role: "user", content: f.question }, { role: "assistant", content: f.rawAnswer ?? f.answer ?? "" });
   }
   return history;
 }
@@ -2860,6 +3158,7 @@ async function runCheck(url, existingId, hint) {
     entry.followups = [];
   }
   selectedId = id;
+  updatePaneMode();
   pendingFollowup = null;
   persistLibrary();
   renderLibrary(el.searchInput.value);
@@ -2927,7 +3226,7 @@ async function runCheck(url, existingId, hint) {
         if (!rebuild && settled.length === 0) return;
         drawn = claims;
         if (rebuild) {
-          renderClaimSkeletons(claims, stage, liveSources, seekable);
+          flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
@@ -2940,12 +3239,11 @@ async function runCheck(url, existingId, hint) {
       },
     });
 
-    const { text, verdictKey } = splitVerdict(answer);
-    const claims = splitClaims(answer);
+    const parsed = stripAnswerMarkers(answer); // rawAnswer kept whole — history needs it verbatim
     entry.status = "done";
-    entry.rawAnswer = answer; // kept whole, VERDICT line(s) included — history needs it verbatim
-    entry.answer = text;
-    entry.claims = claims; // null (render as one card, see renderResultCard), or one block per claim
+    entry.rawAnswer = parsed.rawAnswer;
+    entry.answer = parsed.answer;
+    entry.claims = parsed.claims; // null (render as one card, see renderResultCard), or one block per claim
     entry.sources = sources;
     entry.incomplete = incomplete;
     // A cut-off answer never reaches its VERDICT line, and the `?? "insufficient"` fallback
@@ -2953,10 +3251,12 @@ async function runCheck(url, existingId, hint) {
     // the model never made and the reader has no way to tell from one it did. Left null when
     // the turn is known to be incomplete; the notice above the card says what happened
     // instead, which is the true answer to "why is there no verdict". Same reasoning for the
-    // aggregate: see `aggregateVerdictKey`.
-    entry.verdictKey = claims
-      ? aggregateVerdictKey(claims) ?? (incomplete ? null : "insufficient")
-      : verdictKey ?? (incomplete ? null : "insufficient");
+    // aggregate: see `aggregateVerdictKey`. (A real check is always check-shaped, so this
+    // fallback belongs here rather than in `stripAnswerMarkers` itself — see that function's
+    // own doc comment for why a follow-up or a link-less chat turn can't assume the same.)
+    entry.verdictKey = parsed.claims
+      ? aggregateVerdictKey(parsed.claims) ?? (incomplete ? null : "insufficient")
+      : parsed.verdictKey ?? (incomplete ? null : "insufficient");
     entry.durationMs = runElapsed.elapsedMs();
     persistLibrary();
     renderLibrary(el.searchInput.value);
@@ -3033,7 +3333,18 @@ async function runFollowup(entry, question) {
     // Kept in the thread even when it came back damaged. A partial answer is text the model
     // genuinely wrote, so replaying it as history is honest — and it carries its own notice,
     // so the next turn is not built on prose the reader was never told was cut off.
-    entry.followups.push({ question, answer, sources, incomplete, durationMs: followupElapsed.elapsedMs() });
+    const parsed = stripAnswerMarkers(answer);
+    entry.followups.push({
+      question,
+      ...parsed,
+      // A follow-up isn't guaranteed to be check-shaped the way the original link was
+      // (see stripAnswerMarkers) — only default a missing verdict to "insufficient" when
+      // the model actually opened claim markers, i.e. clearly meant this as a check.
+      verdictKey: parsed.claims ? aggregateVerdictKey(parsed.claims) ?? (incomplete ? null : "insufficient") : parsed.verdictKey,
+      sources,
+      incomplete,
+      durationMs: followupElapsed.elapsedMs(),
+    });
     persistLibrary();
     renderLibrary(el.searchInput.value);
     settled = true;
@@ -3139,15 +3450,20 @@ async function loadServerConfig() {
 
 /* ---------------------------------------------------------------- account dialog */
 
-/** Sets up Supabase (a no-op if this deploy has no SUPABASE_URL/SUPABASE_ANON_KEY),
- * hides the account entry point entirely when it's not configured, and merges cloud
- * history in on every sign-in from here on. */
+/** Sets up Supabase (a no-op if this deploy has no SUPABASE_URL/SUPABASE_ANON_KEY) and
+ * merges cloud history in on every sign-in from here on. The Profile tab itself is hidden
+ * entirely when accounts aren't configured — see profileTabButton() — rather than showing
+ * a sign-in prompt with nothing behind it. */
 async function initAccounts(supabaseConfig) {
   await accounts.configure(supabaseConfig);
   const enabled = accounts.isConfigured();
-  el.accountBtn.hidden = !enabled;
-  el.topbarAccountBtn.hidden = !enabled;
-  if (!enabled) return;
+  profileTabButton().hidden = !enabled;
+  if (!enabled) {
+    // Nothing to show on the tab this deploy doesn't have — land on General instead of a
+    // hidden Profile tab whenever the dialog is (re)opened, see openSettingsDialog.
+    if (settingsTab === "profile") setSettingsTab("general");
+    return;
+  }
 
   let lastUserId = accounts.getUser()?.id ?? null;
   accounts.onAuthChange((user) => {
@@ -3193,31 +3509,59 @@ async function mergeCloudLibrary() {
   if (startupEntry) renderVideoPane(startupEntry);
 }
 
+/** Two-letter monogram for the profile avatar — first name's first letter, plus the last
+ * name's if there is one. Falls back to "?" for an empty/unusable name, same as the DS
+ * SettingsMenu source this is ported from (`initials`). This app has no display-name field
+ * of its own (Supabase here is email/password only, no profile metadata), so the "name" is
+ * always just the email — good enough for a monogram, which is all this is for. */
+function initials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
+}
+
+/** The signed-in/signed-out state of the settings dialog's Profile tab, and the dot on the
+ * settings gear itself (`.account-btn[data-signed-in]`, shared with `#topbarSettingsBtn` —
+ * see the comment on those buttons in index.html for why there's no separate account icon
+ * any more). Also drives the account-dialog's own state on open (openAccountDialog below),
+ * since the two are meant to read as one continuous flow: gear → Profile tab → "Sign in". */
 function renderAccountUI() {
   const user = accounts.getUser();
-  el.accountBtn.dataset.signedIn = String(Boolean(user));
-  el.topbarAccountBtn.dataset.signedIn = String(Boolean(user));
-  el.accountSignedOut.hidden = Boolean(user);
-  el.accountSignedIn.hidden = !user;
-  if (user) el.accountEmailDisplay.textContent = user.email ?? "Signed in";
+  el.settingsBtn.dataset.signedIn = String(Boolean(user));
+  el.topbarSettingsBtn.dataset.signedIn = String(Boolean(user));
+  el.profileSignedOut.hidden = Boolean(user);
+  el.profileSignedIn.hidden = !user;
+  if (user) {
+    el.profileAvatar.textContent = initials(user.email);
+    el.profileEmailDisplay.textContent = user.email ?? "Signed in";
+  }
 }
 
-let accountMode = "signin"; // "signin" | "signup", which tab is active
+let accountMode = "signin"; // "signin" | "signup", which the dialog currently shows
 
+/** Headline, submit label and the switch-row link at the bottom of the sign-in/up card —
+ * ported from the TRASE Design System's Screens-Auth.html, whose own `isSignup` React flag
+ * drives the exact same three things off one piece of state. `accountMode` is that flag. */
 function setAccountMode(mode) {
   accountMode = mode;
-  el.accountTabs.querySelectorAll("button[data-mode]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.mode === mode);
-  });
-  el.accountSubmit.textContent = mode === "signup" ? "Sign up" : "Sign in";
+  const isSignup = mode === "signup";
+  el.accountHeading.textContent = isSignup ? "Create your account" : "Welcome back";
+  el.accountSub.textContent = isSignup
+    ? "Start checking claims against real sources."
+    : "Sign in to pick up where you left off.";
+  el.accountSubmitLabel.textContent = isSignup ? "Create account" : "Sign in";
+  el.accountSwitch.innerHTML = isSignup
+    ? `<span>Already have an account?</span> <button type="button" class="auth-switch-link" data-mode="signin">Sign in</button>`
+    : `<span>New to Seer?</span> <button type="button" class="auth-switch-link" data-mode="signup">Create an account</button>`;
   el.accountMessage.textContent = "";
   el.accountMessage.classList.remove("error");
 }
 
+/** Opened from the settings dialog's Profile tab ("Sign in" button) rather than its own
+ * icon — see the account-dialog comment in index.html for why sign-in/up still needs a
+ * dialog of its own even though the rest of account state moved into Settings. */
 function openAccountDialog() {
-  el.accountMessage.textContent = "";
-  el.accountMessage.classList.remove("error");
-  renderAccountUI();
+  setAccountMode("signin");
   el.accountDialog.showModal();
 }
 
@@ -3235,6 +3579,29 @@ function updateThemeButtons() {
   });
 }
 
+function profileTabButton() {
+  return el.settingsNavList.querySelector('[data-tab="profile"]');
+}
+
+/** Which of the settings dialog's four tabs (ported from the TRASE Design System's
+ * SettingsMenu — Profile/General/Search/Instructions) is showing. Module-level rather than
+ * reset on every open so returning to Settings mid-session lands back where the reader left
+ * it, the one exception being `initAccounts` steering away from a Profile tab this deploy
+ * doesn't have. */
+let settingsTab = "profile";
+
+function setSettingsTab(tab) {
+  settingsTab = tab;
+  el.settingsNavList.querySelectorAll(".settings-nav-item").forEach((btn) => {
+    const active = btn.dataset.tab === tab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  });
+  el.settingsDialog.querySelectorAll(".settings-section[data-tab-panel]").forEach((section) => {
+    section.hidden = section.dataset.tabPanel !== tab;
+  });
+}
+
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
@@ -3242,6 +3609,8 @@ function openSettingsDialog() {
   updateFontSizeButtons();
   updateThemeButtons();
   renderSearchStatus();
+  renderAccountUI();
+  setSettingsTab(settingsTab);
   el.settingsDialog.showModal();
 }
 
@@ -3447,39 +3816,50 @@ el.videoPlayer.addEventListener("timeupdate", syncPlayhead);
 el.videoPlayer.addEventListener("seeked", syncPlayhead);
 el.videoPlayer.addEventListener("ended", syncPlayhead);
 
-// The play/pause button. Toggles the element directly rather than tracking state of its
-// own — the `play`/`pause` listeners below are what actually keep the icon and label
-// right, from this click or any other way playback starts or stops.
+// The play/pause button, in the bar. Toggles the element directly rather than tracking
+// state of its own — the `play`/`pause` listeners below are what actually keep the icon
+// and label right, from this click or any other way playback starts or stops.
 el.playBtn.addEventListener("click", () => {
   if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
   else el.videoPlayer.pause();
+  wakePlayerChrome();
 });
 
-// A tap anywhere else on the video does the same thing — the button is there for
-// discoverability and for a screen reader, not because the video itself shouldn't work
-// the way every short-form player's does. Excludes the control buttons themselves (they're
-// inside `.video-thumb` too, so this handler would otherwise fire a second time on top of
-// theirs) and anywhere there's no direct MP4 loaded to toggle in the first place.
-el.videoThumb.addEventListener("click", (event) => {
-  if (el.videoControls.hidden || event.target.closest(".video-controls")) return;
+// A tap anywhere on `.vp-overlay` does the same thing — the button in the bar is there for
+// discoverability and for a screen reader, not because the video itself shouldn't work the
+// way every short-form player's does (ported from the DS VideoPlayer's own `togglePlay`,
+// bound to its `.vp-overlay` the same way). No need to exclude the bar's own buttons the
+// way this used to: `.vp-bar` sits at a higher z-index than `.vp-overlay` (see the CSS), so
+// a click that lands on the bar never reaches the overlay underneath it.
+el.vpOverlay.addEventListener("click", () => {
   if (el.videoPlayer.paused) el.videoPlayer.play().catch(() => {});
   else el.videoPlayer.pause();
+  wakePlayerChrome();
 });
+// Wakes the bar on any interaction, matching the DS component's `onMouseMove={wake}` on
+// the player root — see `wakePlayerChrome`'s own doc comment for the touch exception.
+el.videoThumb.addEventListener("mousemove", wakePlayerChrome);
 
 // The single source of truth for the play/pause icon and label — set from the element's
 // own state, not assumed at whichever click asked for it, so it's still right when
 // autoplay is silently refused or playback stops some way neither handler above covers.
+// A pause also wakes the bar and keeps it up rather than letting the auto-hide timer run
+// it down on nothing to watch (the DS component's own `!playing → always visible` rule;
+// `wakePlayerChrome`'s hide timeout already checks `paused` before ever hiding it).
 el.videoPlayer.addEventListener("play", () => {
   el.playBtn.classList.add("playing");
   el.playBtn.setAttribute("aria-pressed", "true");
   el.playBtn.setAttribute("aria-label", "Pause");
   el.playBtn.title = "Pause";
+  el.vpPlayIcon.hidden = true;
 });
 el.videoPlayer.addEventListener("pause", () => {
   el.playBtn.classList.remove("playing");
   el.playBtn.setAttribute("aria-pressed", "false");
   el.playBtn.setAttribute("aria-label", "Play");
   el.playBtn.title = "Play";
+  el.vpPlayIcon.hidden = false;
+  wakePlayerChrome();
 });
 
 // The unmute button. Muted is where every clip starts (autoplay only works muted, and a
@@ -3493,14 +3873,16 @@ el.muteBtn.addEventListener("click", () => {
   const label = unmuted ? "Mute" : "Unmute";
   el.muteBtn.setAttribute("aria-label", label);
   el.muteBtn.title = label;
+  wakePlayerChrome();
 });
 
-// Fullscreens `.video-thumb` rather than the bare `<video>`, so the custom controls and
-// the timeline stay on screen and usable — the browser's native video fullscreen would
-// take just the element itself, chrome and all, out of the page.
+// Fullscreens `.video-thumb` rather than the bare `<video>`, so the overlay and bar stay
+// on screen and usable — the browser's native video fullscreen would take just the element
+// itself, chrome and all, out of the page.
 el.fullscreenBtn.addEventListener("click", () => {
   if (document.fullscreenElement) document.exitFullscreen?.();
   else el.videoThumb.requestFullscreen?.().catch(() => {}); // Refused (no gesture, disabled) — the button just does nothing.
+  wakePlayerChrome();
 });
 
 // The class/label answer to `fullscreenElement` rather than being set at the click above,
@@ -3527,7 +3909,9 @@ function timelineSeekTarget(clientX) {
 el.timelineTrack.addEventListener("click", (event) => {
   const target = timelineSeekTarget(event.clientX);
   if (target != null) seekVideoTo(target);
+  wakePlayerChrome();
 });
+el.timelineTrack.addEventListener("mousedown", wakePlayerChrome);
 
 // A slider in everything but name — see the `role="slider"` set alongside `tabindex` on
 // the element itself — so the usual left/right (and up/down, for a vertical-video reader
@@ -3606,25 +3990,26 @@ el.settingsForm.addEventListener("submit", () => {
   settings.systemPrompt = el.settingSystemPrompt.value.slice(0, 1000);
   persistSettings();
 });
-
-el.accountBtn.addEventListener("click", openAccountDialog);
-el.topbarAccountBtn.addEventListener("click", () => {
-  closeDrawer({ restoreFocus: false });
-  openAccountDialog();
+el.settingsNavList.addEventListener("click", (event) => {
+  const btn = event.target.closest(".settings-nav-item");
+  if (!btn) return;
+  setSettingsTab(btn.dataset.tab);
 });
-el.accountTabs.addEventListener("click", (event) => {
+
+el.profileSignInBtn.addEventListener("click", openAccountDialog);
+// The switch-row link at the bottom of the card ("New to Seer? Create an account" /
+// "Already have an account? Sign in") — setAccountMode rewrites this row's own markup on
+// every mode change, so the listener is delegated on its stable container rather than a
+// button that gets replaced out from under a direct one.
+el.accountSwitch.addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-mode]");
   if (!btn) return;
   setAccountMode(btn.dataset.mode);
 });
-el.accountSignout.addEventListener("click", () => {
+el.profileSignOutBtn.addEventListener("click", () => {
   accounts.signOut();
 });
 el.accountForm.addEventListener("submit", async (event) => {
-  // The signed-in half of this form just needs its "Done" button to close the dialog —
-  // <dialog method="dialog"> already does that natively. Only the signed-out submit
-  // (sign in / sign up) needs to stay open through an async call and report an error.
-  if (event.submitter !== el.accountSubmit) return;
   event.preventDefault();
   const email = el.accountEmail.value.trim();
   const password = el.accountPassword.value;
@@ -3681,13 +4066,15 @@ renderLibrary();
 // blank app. Falling through to the empty state makes that case say something.
 const startupEntry = selectedId ? findEntry(selectedId) : null;
 if (startupEntry) {
-  renderVideoPane(startupEntry);
-  if (startupEntry.status === "done") renderResultCard(startupEntry);
-  else if (startupEntry.status === "error") renderErrorCard(startupEntry);
+  openEntryInPane(startupEntry);
 } else {
   selectedId = null;
   renderEmptyState();
 }
+// The markup's own `single-pane` class on #contentGrid is only right for a first-ever
+// visit — a returning reader's `selectedId` can restore to a real entry right here (see
+// the comment above), which should show the shell immediately, not grow into it.
+updatePaneMode();
 updateComposerMode();
 loadServerConfig();
 // Focusing the composer on load saves a click on desktop. On a touchscreen it costs one
