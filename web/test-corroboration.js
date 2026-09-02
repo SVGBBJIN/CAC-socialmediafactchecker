@@ -410,6 +410,59 @@ test("auditCorroboration ignores a marker the ledger cannot resolve", () => {
   assert.deepEqual(audited.downgrades[0].cited, []);
 });
 
+test("a batch of 'X holds office Y' claims never gets corroborated by a generic office page alone", () => {
+  // Manual verification requested against a prior finding: a Corroborated verdict resting
+  // on a source that is merely on-topic (a generic office/role reference page) rather than
+  // one that actually names the officeholder. Mix of true and deliberately false claims —
+  // sourceConfirms is not an entailment checker (see the test below), so truth doesn't
+  // matter here; what matters is that a source never naming the person can't corroborate a
+  // claim about who that person is.
+  const cases = [
+    ["Kim Jong Un is the President of the United States", "The President of the United States is the head of state and head of government, elected every four years."],
+    ["Vladimir Putin is the Prime Minister of the United Kingdom", "The Prime Minister of the United Kingdom is the head of His Majesty's Government, appointed by the monarch."],
+    ["Xi Jinping is the Chancellor of Germany", "The Chancellor of Germany is the head of the federal government, elected by the Bundestag."],
+    ["Emmanuel Macron is the Prime Minister of Japan", "The Prime Minister of Japan is the head of government and leader of the Cabinet."],
+    ["Narendra Modi is the President of Brazil", "The President of Brazil is both head of state and head of government of the Federative Republic."],
+    ["Justin Trudeau is the President of Mexico", "The President of Mexico is the head of state and head of government of the United Mexican States."],
+    ["Rishi Sunak is the Chancellor of Austria", "The Chancellor of Austria heads the federal government and is appointed by the Federal President."],
+    ["Olaf Scholz is the King of Spain", "The Monarchy of Spain is a constitutional monarchy; the King is the head of state."],
+    ["Volodymyr Zelenskyy is the President of Russia", "The President of Russia is the head of state, elected for a six-year term."],
+    ["Benjamin Netanyahu is the Prime Minister of Italy", "The Prime Minister of Italy, formally the President of the Council of Ministers, leads the Council."],
+    ["Joe Biden is the President of the United States", "The President is elected to a four-year term and serves as commander-in-chief."],
+    ["Donald Trump is the Prime Minister of the United Kingdom", "Number 10 Downing Street is the official residence of the Prime Minister."],
+    ["Recep Tayyip Erdogan is the President of France", "The President of France is elected for a five-year term as head of state of the Republic."],
+    ["Anthony Albanese is the President of South Korea", "The President of South Korea is the head of state, directly elected for one five-year term."],
+    ["Ursula von der Leyen is the Prime Minister of Canada", "The Prime Minister of Canada chairs the Cabinet and advises the monarch as the Crown's primary minister."],
+  ];
+
+  for (const [claim, generic] of cases) {
+    const answer = answerOf(claim, `Sources checked [1].`, "Corroborated");
+    // Deliberately generic title/URL too — a slug or headline naming the person would leak
+    // the answer into the "evidence" via sourceEvidenceText and defeat the point of the case.
+    const ledger = ledgerOf({
+      title: "Office overview - government reference page",
+      url: "https://example.org/office-reference",
+      snippet: generic,
+    });
+    const audited = auditCorroboration(answer, ledger);
+    assert.equal(audited.changed, true, `expected a downgrade for: ${claim}`);
+    assert.equal(audited.downgrades[0]?.title, claim);
+  }
+});
+
+test("a source that actually names the officeholder is left as Corroborated", () => {
+  // Positive control for the batch above: the mechanism isn't simply refusing every
+  // Corroborated verdict, only ones a generic source can't back up.
+  const answer = answerOf("Joe Biden is the President of the United States", "The Wikipedia page [1].", "Corroborated");
+  const ledger = ledgerOf({
+    title: "Joe Biden - Wikipedia",
+    url: "https://en.wikipedia.org/wiki/Joe_Biden",
+    snippet: "Joe Biden is the President of the United States, having taken office in January 2021.",
+  });
+  const audited = auditCorroboration(answer, ledger);
+  assert.equal(audited.changed, false);
+});
+
 test("the audit checks what a source is about, not whether it entails the claim", () => {
   // Stated as a test because it is the boundary of the mechanism rather than a gap in it.
   // A page reporting that measles cases rose contains every name and figure of a claim that
