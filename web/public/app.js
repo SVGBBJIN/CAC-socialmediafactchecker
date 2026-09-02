@@ -1481,9 +1481,18 @@ function renderEmptyState() {
  * never applied to either of the other two turn types.
  */
 function stripAnswerMarkers(answer) {
-  const { text, verdictKey } = splitVerdict(answer);
-  const claims = splitClaims(answer);
-  return { rawAnswer: answer, answer: text, claims, verdictKey };
+  try {
+    const { text, verdictKey } = splitVerdict(answer);
+    const claims = splitClaims(answer);
+    return { rawAnswer: answer, answer: text, claims, verdictKey };
+  } catch (error) {
+    // A backend answer that actually arrived should never be lost to a rendering-side bug —
+    // the reader gets the raw text with no claim cards / verdict badge rather than a "check
+    // failed" card carrying a JS error string, which is a strictly worse outcome than an
+    // unparsed answer for a check that server-side genuinely completed.
+    console.error("stripAnswerMarkers failed to parse answer", error);
+    return { rawAnswer: answer, answer: String(answer ?? ""), claims: null, verdictKey: null };
+  }
 }
 
 /** The body of one answered turn — a follow-up or a link-less chat reply — as markdown
@@ -3273,9 +3282,9 @@ async function runCheck(url, existingId, hint) {
         // already read is the flash `revealAttrs` exists to prevent, and it would land at
         // the one moment the check looks finished.
         const alreadyOnScreen =
-          Array.isArray(claims) &&
-          claims.length > 0 &&
-          claims.length === drawn.length &&
+          Array.isArray(parsed.claims) &&
+          parsed.claims.length > 0 &&
+          parsed.claims.length === drawn.length &&
           drawn.every((claim) => claim.verdictKey);
         renderResultCard(entry, { animateAnalysis: !alreadyOnScreen });
       }
