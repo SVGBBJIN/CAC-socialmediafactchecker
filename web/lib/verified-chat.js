@@ -40,6 +40,7 @@ import { RESEARCH_TOOLS, validateFindQuery, FindQueryError } from "./find-schema
 import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
+import { auditCorroboration } from "./corroboration.js";
 import { captionQuery, captionSearchEnabled } from "./caption-search.js";
 
 /**
@@ -142,6 +143,27 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "sentences settles most of them. Save bullet points for a claim that genuinely has several",
   "parts (see FORMATTING WITH BULLET POINTS below), and skip headings and multi-paragraph",
   "asides inside a block — they read as padding in a card sized for one claim, not a full essay.",
+  "",
+  "WHAT COUNTS AS CORROBORATION",
+  "A source corroborates a claim when it states the thing the claim asserts. Being about",
+  "the same subject is not the same thing and is the one mistake that turns this tool into",
+  "a liar: an encyclopedia entry for an office, a department's list of its ministers, a",
+  "topic overview, a definition page — these confirm that the subject exists, not that the",
+  "specific thing said about it is true. If the claim names a person, a figure, a date or a",
+  "quote, the source has to contain that person, that figure, that date, that quote. A page",
+  "about the office that never names who holds it settles nothing about who holds it.",
+  "",
+  "So before you write Corroborated, check the source you are about to cite for the",
+  "specific part of the claim, not for the topic. If the snippet only shows the topic, open",
+  "the page with `find_in_page` and look for the specific part; if it is not there, the",
+  "verdict is Insufficient evidence and saying so is the correct answer, not a failure.",
+  "Same rule for Contradicted: a source has to state the opposite, not merely fail to",
+  "mention the claim. Absence of a claim from a general page is absence of evidence.",
+  "",
+  "The app checks this after you write: a claim marked Corroborated whose cited sources",
+  "never mention what it is specifically about is lowered to Insufficient evidence, with a",
+  "line saying why. That check cannot read your reasoning, only your citations — so cite",
+  "the source that carries the specific fact, not the one that introduces the subject.",
   "",
   "FORMATTING WITH BULLET POINTS",
   "Within a claim's block, use bullet points to structure the evidence when the claim has",
@@ -1041,9 +1063,21 @@ export async function* verifiedChat({
     let cited = false;
 
     if (answer.trim()) {
+      // Before the copy-editing: does each **Corroborated** verdict rest on a source that
+      // confirms it, or only on one about the same subject? A claim marked confirmed whose
+      // cited pages never mention the person, figure or date it turns on is lowered to
+      // Insufficient evidence — see lib/corroboration.js, which also explains why this is
+      // not the sentence-level claim detection this app tore out, and why it only ever
+      // moves a verdict in the one direction.
+      //
+      // It runs first, on the ledger's own numbering, so a marker still means here exactly
+      // what it meant when the model wrote it; cleanup then renumbers text and note alike.
+      const audited = auditCorroboration(answer, ledger);
+      if (audited.changed) answer = audited.text;
+
       const cleaned = cleanCitations(answer, ledger, { renumber: !flawed });
-      if (cleaned.changed) {
-        answer = cleaned.text;
+      if (cleaned.changed || audited.changed) {
+        answer = cleaned.changed ? cleaned.text : answer;
         // A replacement rather than more deltas: the answer streamed token by token while it
         // was being written, and this pass could only run once it was whole.
         yield { type: "answer", text: answer };
