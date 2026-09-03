@@ -391,6 +391,15 @@ function imagePayload(image) {
 
 /* ---------------------------------------------------------------- storage */
 
+// How stale a `running` entry's heartbeat has to be before this tab treats it as dead
+// rather than merely still in flight in *another* live tab. `runCheck` below touches
+// `heartbeatAt` on this cadence while a check is actually running; a tab that crashed or
+// was closed stops touching it immediately, so any real interruption clears this bar almost
+// as soon as the library is next read — while a check genuinely still running in a sibling
+// tab keeps re-arming it well inside the window. See `loadLibrary`.
+const RUN_HEARTBEAT_MS = 3000;
+const RUN_STALE_MS = 4 * RUN_HEARTBEAT_MS;
+
 function loadLibrary() {
   let parsed;
   try {
@@ -401,19 +410,23 @@ function loadLibrary() {
   if (!Array.isArray(parsed)) return [];
 
   // A `running` entry only means anything while the `runCheck` that set it is still
-  // alive, and that call dies with the page. Left as `running` across a reload, an entry
-  // is stuck for good: no request is coming back to finish it, `selectedDoneEntry()`
-  // returns null so there is no follow-up path either, and there is no retry button —
-  // that exists only on the error card. So any entry still `running` when the library is
-  // read back in was interrupted, not merely slow, and is reported as such: this is what
-  // gives it a retry button and an honest status instead of a permanent "Checking…".
+  // alive, and that call dies with the page (or, now, stops refreshing `heartbeatAt` —
+  // see `RUN_HEARTBEAT_MS`). Reaping unconditionally on `status === "running"` used to
+  // mean opening a *second* tab while a check was genuinely still going in the first one
+  // stamped it "interrupted" there, even though nothing had failed: this tab has no way to
+  // tell "abandoned" from "in flight elsewhere" from status alone. A heartbeat does: an
+  // entry only reads as interrupted once its heartbeat is older than a live check could
+  // ever leave it, which a crashed-or-closed tab reaches almost immediately and a genuinely
+  // running one never does. An entry with no heartbeat at all predates this field and is
+  // treated the old way — there is nothing fresher to check it against.
   let reaped = false;
   for (const entry of parsed) {
-    if (entry?.status === "running") {
-      entry.status = "error";
-      entry.error = "This check was interrupted — the page was closed or reloaded before it finished.";
-      reaped = true;
-    }
+    if (entry?.status !== "running") continue;
+    const age = typeof entry.heartbeatAt === "number" ? Date.now() - entry.heartbeatAt : Infinity;
+    if (age <= RUN_STALE_MS) continue; // still fresh — likely running in another open tab
+    entry.status = "error";
+    entry.error = "This check was interrupted — the page was closed or reloaded before it finished.";
+    reaped = true;
   }
   if (reaped) {
     try {
@@ -1481,9 +1494,18 @@ function renderEmptyState() {
  * never applied to either of the other two turn types.
  */
 function stripAnswerMarkers(answer) {
-  const { text, verdictKey } = splitVerdict(answer);
-  const claims = splitClaims(answer);
-  return { rawAnswer: answer, answer: text, claims, verdictKey };
+  try {
+    const { text, verdictKey } = splitVerdict(answer);
+    const claims = splitClaims(answer);
+    return { rawAnswer: answer, answer: text, claims, verdictKey };
+  } catch (error) {
+    // A backend answer that actually arrived should never be lost to a rendering-side bug —
+    // the reader gets the raw text with no claim cards / verdict badge rather than a "check
+    // failed" card carrying a JS error string, which is a strictly worse outcome than an
+    // unparsed answer for a check that server-side genuinely completed.
+    console.error("stripAnswerMarkers failed to parse answer", error);
+    return { rawAnswer: answer, answer: String(answer ?? ""), claims: null, verdictKey: null };
+  }
 }
 
 /** The body of one answered turn — a follow-up or a link-less chat reply — as markdown
@@ -3149,14 +3171,22 @@ async function runCheck(url, existingId, hint) {
   const prompt = composeCheckPrompt(url);
   let entry = findEntry(id);
   if (!entry) {
-    entry = { id, url, platform: platformFor(url), title: url, createdAt: Date.now(), status: "running", prompt, followups: [] };
+    entry = { id, url, platform: platformFor(url), title: url, createdAt: Date.now(), status: "running", heartbeatAt: Date.now(), prompt, followups: [] };
     library.unshift(entry);
   } else {
     entry.status = "running";
+    entry.heartbeatAt = Date.now();
     entry.error = undefined;
     entry.prompt = prompt;
     entry.followups = [];
   }
+  // Kept alive for as long as this call is actually running, so a sibling tab's
+  // `loadLibrary` can tell "still going here" from "abandoned" — see RUN_STALE_MS. Cleared
+  // in `finally` below regardless of how the check ends.
+  const heartbeat = setInterval(() => {
+    entry.heartbeatAt = Date.now();
+    persistLibrary();
+  }, RUN_HEARTBEAT_MS);
   selectedId = id;
   updatePaneMode();
   pendingFollowup = null;
@@ -3273,9 +3303,9 @@ async function runCheck(url, existingId, hint) {
         // already read is the flash `revealAttrs` exists to prevent, and it would land at
         // the one moment the check looks finished.
         const alreadyOnScreen =
-          Array.isArray(claims) &&
-          claims.length > 0 &&
-          claims.length === drawn.length &&
+          Array.isArray(parsed.claims) &&
+          parsed.claims.length > 0 &&
+          parsed.claims.length === drawn.length &&
           drawn.every((claim) => claim.verdictKey);
         renderResultCard(entry, { animateAnalysis: !alreadyOnScreen });
       }
@@ -3292,6 +3322,7 @@ async function runCheck(url, existingId, hint) {
     // `runProgress.finish()`) only runs when this entry is still selected, so a check the
     // reader navigated away from mid-flight would otherwise leave the ticker running against
     // a bar that's no longer on screen.
+    clearInterval(heartbeat);
     runProgress.stop();
     runElapsed.stop();
     inFlight = null;
