@@ -210,10 +210,19 @@
   .lib-item.active { background: var(--surface-raised); }
   .lib-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
+  /* The history row's icon tile. It holds either the site's own favicon or the fallback
+     glyph `fillLibThumb` (app.js) draws — never nothing, which is what an empty tile on
+     every row used to read as. */
   .lib-thumb {
     width: 34px; height: 34px; border-radius: 7px; flex-shrink: 0;
     background: linear-gradient(135deg, #2A3140, #1A1E27);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
   }
+  .lib-thumb svg { width: 17px; height: 17px; color: var(--ink-dim); }
+  /* Favicons are drawn at every size and quality; a fixed box with `contain` keeps a 16px
+     .ico and a 512px .png the same size in the row. */
+  .lib-favicon { width: 18px; height: 18px; object-fit: contain; border-radius: 3px; }
   .lib-meta { min-width: 0; }
   .lib-title {
     font-size: 12.5px; color: var(--ink); line-height: 1.3;
@@ -348,6 +357,15 @@
   .video-thumb .play {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
     width: 34px; height: 34px; color: rgba(240,237,230,0.55);
+  }
+  /* Sits just under the placeholder glyph, which is centred on the pane — hence the
+     translate off the same 50% line rather than a bottom offset, so the two stay a fixed
+     distance apart at every pane height. */
+  .video-empty-note {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, 30px);
+    margin: 0; width: 100%; padding: 0 16px; box-sizing: border-box;
+    text-align: center; font-size: 12px; line-height: 1.4;
+    color: rgba(240,237,230,0.55);
   }
 
   /* `#fullscreenBtn` (below) puts `.video-thumb` itself into the fullscreen top layer via
@@ -873,9 +891,13 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-raised);
-    color: var(--muted);
-    font-family: var(--font-mono); font-size: 10.5px;
-    letter-spacing: 0.04em; text-transform: uppercase;
+    /* `--ink-dim` rather than `--muted`, at 11px and semibold: this pill is the only thing
+       separating one claim from the next in the stacked mobile layout, so it has to survive
+       being skimmed. Uppercase mono at 10.5px in `--muted` was borderline against the
+       raised surface behind it and read as decoration rather than as a position marker. */
+    color: var(--ink-dim);
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
   }
   /* Still being checked (see `skeletonClaimHTML`) — accent-tinted so a reader scanning the
      grid can tell a box apart from an already-settled one without reading its text. */
@@ -2028,6 +2050,10 @@
         <div class="video-pane">
           <div class="video-thumb" id="videoThumb">
             <svg class="play" id="videoPlaceholder" viewBox="0 0 24 24" fill="none"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+            <!-- Only for a link with nothing to play (an article, a page): the sheet-of-paper
+                 glyph alone reads as a preview that failed, so it says so in words. See
+                 `renderVideoPane` in app.js for when it's shown. -->
+            <p class="video-empty-note" id="videoEmptyNote" hidden>No preview available for this link</p>
             <video class="video-media" id="videoPlayer" playsinline muted loop hidden></video>
             <iframe class="video-media" id="videoEmbed" title="YouTube video" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen hidden></iframe>
             <!-- Photo-mode TikToks and Instagram carousels: a horizontal strip of stills in

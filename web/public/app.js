@@ -80,6 +80,7 @@ const el = {
   videoLink: document.getElementById("videoLink"),
   videoThumb: document.getElementById("videoThumb"),
   videoPlaceholder: document.getElementById("videoPlaceholder"),
+  videoEmptyNote: document.getElementById("videoEmptyNote"),
   videoPlayer: document.getElementById("videoPlayer"),
   videoEmbed: document.getElementById("videoEmbed"),
   videoImages: document.getElementById("videoImages"),
@@ -421,6 +422,12 @@ function loadLibrary() {
   // treated the old way — there is nothing fresher to check it against.
   let reaped = false;
   for (const entry of parsed) {
+    // `renderResultCard` and `runFollowup` both read this array without checking it — every
+    // entry `runCheck` creates has one. An entry that reached storage without it (an older
+    // schema, a hand-edited or partially-written row) would crash the render of the whole
+    // pane on the click that opened it, which is a worse outcome than a check with no
+    // follow-ups, and indistinguishable from a broken app to the reader.
+    if (entry && entry.url && !Array.isArray(entry.followups)) entry.followups = [];
     if (entry?.status !== "running") continue;
     const age = typeof entry.heartbeatAt === "number" ? Date.now() - entry.heartbeatAt : Infinity;
     if (age <= RUN_STALE_MS) continue; // still fresh — likely running in another open tab
@@ -1358,6 +1365,7 @@ function renderLibrary(filter = "") {
 
     const thumb = document.createElement("div");
     thumb.className = "lib-thumb";
+    fillLibThumb(thumb, entry);
 
     const meta = document.createElement("div");
     meta.className = "lib-meta";
@@ -1384,6 +1392,68 @@ function renderLibrary(filter = "") {
     });
     el.libList.append(item);
   }
+}
+
+/**
+ * What goes in the 34px square at the left of a history row.
+ *
+ * It used to be nothing — an empty gradient tile, which reads as an image that failed to
+ * load rather than as a deliberate placeholder, on every row in the sidebar at once. The
+ * row already knows the site it came from, so it can show it: the site's own
+ * `/favicon.ico`, fetched by the browser straight from the host the reader chose to check
+ * (no third-party favicon service, which would mean handing every checked URL to someone
+ * else purely for decoration).
+ *
+ * Plenty of sites don't answer that path, so the glyph is the real design and the favicon
+ * is the upgrade: the fallback is drawn first and the image only replaces it once it has
+ * actually decoded. A link-less conversation has no host at all and keeps the glyph.
+ */
+const THUMB_GLYPHS = {
+  // A globe for a page, a play triangle for anything with a clip behind it, speech marks
+  // for a saved conversation — three shapes, told apart at 16px, none of them a broken box.
+  page: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/>',
+  video: '<circle cx="12" cy="12" r="9"/><path d="M10.4 8.8l5.2 3.2-5.2 3.2z"/>',
+  chat: '<path d="M4 6.5A1.5 1.5 0 015.5 5h13A1.5 1.5 0 0120 6.5v8a1.5 1.5 0 01-1.5 1.5H9l-4 3.2V16H5.5A1.5 1.5 0 014 14.5z"/>',
+};
+
+function thumbGlyphKind(entry) {
+  if (!entry.url) return "chat";
+  return SUPPORTED_PLATFORMS.has(entry.platform) ? "video" : "page";
+}
+
+function fillLibThumb(thumb, entry) {
+  const glyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  glyph.setAttribute("viewBox", "0 0 24 24");
+  glyph.setAttribute("fill", "none");
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.setAttribute("stroke", "currentColor");
+  glyph.setAttribute("stroke-width", "1.5");
+  glyph.setAttribute("stroke-linejoin", "round");
+  glyph.innerHTML = THUMB_GLYPHS[thumbGlyphKind(entry)];
+  thumb.replaceChildren(glyph);
+
+  if (!entry.url) return;
+  let origin;
+  try {
+    const parsed = new URL(entry.url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+    origin = parsed.origin;
+  } catch {
+    return; // a saved entry with an unparseable URL keeps the glyph
+  }
+  const icon = new Image();
+  icon.className = "lib-favicon";
+  icon.alt = "";
+  icon.decoding = "async";
+  // Deliberately not `loading="lazy"`: an image that isn't in the document yet — which this
+  // one isn't until it loads — is never in any viewport, so a lazy one never requests at
+  // all, and every row keeps the fallback glyph forever.
+  // Only swap on a successful load — an `onerror` swap would flash a broken-image box in
+  // the meantime, which is the exact thing this replaces.
+  icon.addEventListener("load", () => {
+    if (icon.naturalWidth > 0) thumb.replaceChildren(icon);
+  });
+  icon.src = `${origin}/favicon.ico`;
 }
 
 function dotClassFor(entry) {
@@ -1665,7 +1735,7 @@ async function runChat(question) {
     }
     // Left as the pending item, with its error — not pushed into `chatThread`, since a
     // turn with no real answer would corrupt the history the next question replays.
-    pendingChat = { question, error: error.message };
+    pendingChat = { question, error: readerFacingError(error, "Question") };
   } finally {
     chatProgress.stop();
     chatElapsed.stop();
@@ -1741,6 +1811,10 @@ function clearVideoMedia() {
   el.videoImages.hidden = true;
   el.videoThumb.querySelector(".image-count")?.remove();
   el.videoPlaceholder.hidden = false;
+  // Re-armed by `renderVideoPane` for the one case that warrants it; every other path back
+  // to the placeholder (a new check, a torn-down clip) is showing the play glyph, which
+  // needs no caption.
+  el.videoEmptyNote.hidden = true;
   setVideoAspect(DEFAULT_VIDEO_ASPECT);
   // A seek asked for against the media being torn down here has nothing left to land on,
   // and the chip it lit belongs to a card that may already have been replaced.
@@ -1801,6 +1875,7 @@ function wakePlayerChrome() {
  */
 function showImageSet(media) {
   el.videoPlaceholder.hidden = true;
+  el.videoEmptyNote.hidden = true;
   const first = media.images[0];
   if (first?.width && first?.height) setVideoAspect(`${first.width} / ${first.height}`);
 
@@ -1834,6 +1909,7 @@ function showResolvedMedia(media) {
 
 function showVideoElement(media) {
   el.videoPlaceholder.hidden = true;
+  el.videoEmptyNote.hidden = true;
   // The platform's own reported width/height, if the API returned one — corrected below by
   // `loadedmetadata` against what the browser actually decoded, which is authoritative
   // even when the API's numbers are missing or wrong.
@@ -1873,6 +1949,7 @@ function youTubeAspectRatio(urlString) {
 
 function showYouTubeEmbed(videoID, aspect) {
   el.videoPlaceholder.hidden = true;
+  el.videoEmptyNote.hidden = true;
   setVideoAspect(aspect);
   // youtube-nocookie.com: this is a fact-check tool, not a place that should be dropping
   // YouTube's regular tracking cookies on every pasted link.
@@ -1980,12 +2057,15 @@ function renderVideoTitle(entry) {
 
 function renderVideoPane(entry) {
   renderVideoTitle(entry);
-  el.videoPlaceholder
-    .querySelector("path")
-    ?.setAttribute("d", SUPPORTED_PLATFORMS.has(entry.platform) ? PLAY_GLYPH : PAGE_GLYPH);
+  const playable = SUPPORTED_PLATFORMS.has(entry.platform);
+  el.videoPlaceholder.querySelector("path")?.setAttribute("d", playable ? PLAY_GLYPH : PAGE_GLYPH);
 
   const token = ++videoPaneToken;
   clearVideoMedia();
+  // After `clearVideoMedia`, which resets the caption along with everything else: a page
+  // has nothing to load, so this placeholder is final rather than a state on the way to a
+  // clip, and saying so is what stops it reading as a preview that broke.
+  el.videoEmptyNote.hidden = playable;
 
   if (entry.platform === "TikTok" || entry.platform === "Instagram") {
     loadDirectMedia(entry, token);
@@ -2498,12 +2578,55 @@ function settleClaimPane(index, claim, total, sources, seekable) {
   refreshTimeline();
 }
 
+/**
+ * The sentence a failed turn is allowed to show the reader.
+ *
+ * Two kinds of thing reach a catch block here. One is a real, explainable outcome the app
+ * or the server worked out on the reader's behalf — "That link answered 401", "Server has
+ * no GEMINI_API_KEY" — and saying it plainly is the whole point of the failure card. The
+ * other is this app crashing on its own code (a `ReferenceError` from a rename that missed
+ * a call site, a `TypeError` on a shape that wasn't what the renderer assumed), and there
+ * the `message` is a variable name, not information: "claims is not defined" tells the
+ * reader nothing they did, nothing they can change, and nothing about whether the check
+ * itself worked — it is the app leaking its own stack trace onto the results screen.
+ *
+ * So a programming error gets the generic line and the real error goes to the console,
+ * where it is still there for whoever is debugging. This is a net under the bug, never a
+ * substitute for fixing one: the console line is the thing that says which.
+ */
+const INTERNAL_ERROR_NAMES = new Set(["ReferenceError", "TypeError", "SyntaxError", "RangeError"]);
+const GENERIC_ERROR_TEXT = "Something went wrong reading this check — please try again.";
+
+/** Errors already stored in a saved library entry (or in a tab that has been open across a
+ * deploy) predate the classification above, so a raw JS message can still arrive from
+ * `localStorage` long after the code that threw it is gone. Recognising the handful of
+ * shapes an engine writes is cheaper — and much less brittle — than migrating history. */
+const INTERNAL_ERROR_TEXT = /\b(?:is not defined|is not a function|Cannot read propert|undefined is not|null is not|of undefined|of null)\b/i;
+
+function readerFacingError(error, context) {
+  const internal =
+    (error instanceof Error && INTERNAL_ERROR_NAMES.has(error.name)) ||
+    INTERNAL_ERROR_TEXT.test(error?.message ?? "");
+  if (internal) {
+    console.error(`${context} failed with an internal error:`, error);
+    return GENERIC_ERROR_TEXT;
+  }
+  return error?.message || GENERIC_ERROR_TEXT;
+}
+
+/** The same guard applied on the way *out* rather than on the way in — see
+ * `INTERNAL_ERROR_TEXT` for why a stored entry can still be carrying a raw one. */
+function errorCardText(message) {
+  if (!message) return GENERIC_ERROR_TEXT;
+  return INTERNAL_ERROR_TEXT.test(message) ? GENERIC_ERROR_TEXT : message;
+}
+
 function renderErrorCard(entry) {
   setClaimsGridMode(null);
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="eyebrow">Check failed</div>
-      <p class="claim-text in">${escapeHTML(entry.error || "Something went wrong.")}</p>
+      <p class="claim-text in">${escapeHTML(errorCardText(entry.error))}</p>
       <button type="button" class="retry-button" id="retryBtn">Try again</button>
     </div>`;
   refreshTimeline();
@@ -3313,7 +3436,7 @@ async function runCheck(url, existingId, hint) {
   } catch (error) {
     if (error.name === "AbortError") return;
     entry.status = "error";
-    entry.error = error.message;
+    entry.error = readerFacingError(error, "Check");
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) renderErrorCard(entry);
@@ -3386,7 +3509,7 @@ async function runFollowup(entry, question) {
     }
     // Left as the pending item, with its error — not pushed into `followups`, since a
     // turn with no real answer would corrupt the history the next follow-up replays.
-    pendingFollowup = { entryId: entry.id, question, error: error.message };
+    pendingFollowup = { entryId: entry.id, question, error: readerFacingError(error, "Follow-up") };
   } finally {
     followupProgress.stop();
     followupElapsed.stop();
