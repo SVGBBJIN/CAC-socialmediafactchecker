@@ -61,12 +61,27 @@ async function serveStatic(req, res) {
     res.writeHead(200, {
       "content-type": contentType(path),
       "cache-control": "no-store",
+      ...SECURITY_HEADERS,
     });
     res.end(body);
   } catch {
     await serveNotFound(req, res);
   }
 }
+
+/* Mirrors the `headers` block in the root vercel.json, so a page served by `node server.js`
+ * behaves the same as the deployed one. The CSP is deliberately only `frame-ancestors` —
+ * the anti-clickjacking half, which X-Frame-Options above already states and which a <meta>
+ * tag cannot express at all. A script-src/style-src policy is the half that would blunt
+ * XSS, and it can't be added until the ~100 KB of inline <style> and the inline scripts in
+ * index.html move to their own files; a policy with 'unsafe-inline' would only look like
+ * protection. */
+const SECURITY_HEADERS = {
+  "x-frame-options": "DENY",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "content-security-policy": "frame-ancestors 'none'",
+};
 
 /** A miss on serveStatic — a typo'd link, a page that's moved, a stale asset URL. Browser
  * navigations (the request's own Accept header says so) get the design system's styled
