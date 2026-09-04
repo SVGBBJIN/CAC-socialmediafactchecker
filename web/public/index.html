@@ -749,6 +749,30 @@
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
   }
 
+  /* The one control that has to be visible when it is focused and invisible otherwise: the
+     skip link. `.sr-only`'s clip trick hides it from sight without hiding it from the tab
+     order, so the first Tab on the page lands here and reveals it. Without it a keyboard
+     or screen-reader visitor tabs through the whole library list — every saved check — to
+     reach the composer. */
+  .skip-link:focus {
+    position: fixed;
+    top: 12px; left: 12px;
+    z-index: 999;
+    width: auto; height: auto;
+    margin: 0; padding: 10px 14px;
+    clip: auto;
+    clip-path: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  /* Focused only because the skip link sent focus here; it is not an interactive target of
+     its own, so it gets no ring. */
+  #main:focus { outline: none; }
+
   .sr-only {
     position: absolute;
     width: 1px; height: 1px;
@@ -1988,6 +2012,8 @@
        topbar — and only one of the two is ever displayed. Promoting either to <h1> would
        leave the document with no main heading at the other breakpoint, so the one true
        heading lives here instead, exposed to assistive tech and to nothing else. -->
+  <a class="sr-only skip-link" href="#main">Skip to main content</a>
+
   <h1 class="sr-only">Seer</h1>
 
   <div class="app">
@@ -2034,7 +2060,7 @@
       <ul class="lib-list" id="libList"></ul>
     </aside>
 
-    <div class="main">
+    <div class="main" id="main" tabindex="-1">
       <!-- Phone-only (CSS `display: none` above 700px): the drawer's handle, plus the
            wordmark and settings button that live in the sidebar header on desktop. -->
       <div class="topbar">
@@ -2216,7 +2242,11 @@
         <label for="account-password">Password</label>
         <input type="password" id="account-password" placeholder="••••••••" autocomplete="current-password" />
       </div>
-      <p class="account-message" id="account-message"></p>
+      <!-- Sign-in's only feedback channel, success and failure both — a colour change on a
+           line of text, which is nothing at all to a screen reader. `role="status"` makes it
+           speak; polite rather than assertive because the same node also carries the benign
+           "check your email to confirm" case. -->
+      <p class="account-message" id="account-message" role="status"></p>
       <button type="submit" class="auth-submit" id="account-submit">
         <svg class="auth-submit-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <circle cx="12" cy="12" r="7.5" stroke="currentColor" stroke-width="1.8" stroke-dasharray="9 2 9 2" stroke-linecap="round"/>
