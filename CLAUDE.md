@@ -30,8 +30,14 @@ Node 20+ stdlib. To run a single test file directly: `node --test test-search.js
 see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
-test-timestamps.js test-claims.js test-corroboration.js test-caption-search.js`). As of this writing the whole
-suite is 558 tests; `worker/`'s is 5.
+test-timestamps.js test-claims.js test-corroboration.js test-caption-search.js
+test-page-shapes.js`). As of this writing the whole suite is 574 tests; `worker/`'s is 5.
+
+`test-page-shapes.js` is the one suite backed by files rather than inline HTML: `web/fixtures/`
+holds one page per *shape* (front page, story, paywalled, JS shell, AMP copy, link-heavy
+reference page), because "is this a front page" is judged from three signals at once and an
+inline fixture written to satisfy that judgement only proves it agrees with itself. Still no
+network — the files are handed to the same stub fetch as every other article test.
 
 ### `worker/` (optional browser-resolve fallback)
 
@@ -65,6 +71,13 @@ Two routes run *before* the check and exist to keep the check from repeating the
   hop, redirect cap, short deadline — is load-bearing rather than defensive tidiness. A
   non-200 from this route means the probe couldn't run, and the client falls back to
   URL-shape classification.
+- **`api/page-outline.js`** (`fetchPageOutline`) — asked only when the pasted URL's *shape*
+  could be a front page (`shallowPagePath` in `public/app.js`, the cheap half of the
+  server's test). It shares `readPage` with the check's own fetch, so there is one
+  implementation of the hop vetting rather than two that can drift; what differs is only
+  what comes back — link text and same-origin URLs, never the page's prose. A front page is
+  refused as a check subject and its headlines are offered as checks instead, so the refusal
+  arrives at the paste rather than at the end of a run.
 - **`api/resolve-media.js`** — the library UI's video pane needs a real MP4, because neither
   TikTok nor Instagram has an iframe embed that plays for a logged-out visitor. This exposes
   the same resolve step the check runs internally. YouTube never calls it: a video ID is
@@ -83,7 +96,7 @@ regardless — so a stale or hostile hint costs a wasted attempt and never a wro
 1. **YouTube** — handed to Gemini as a `file_data` URL part; Gemini fetches and watches it itself. No bytes touch this app.
 2. **TikTok** — `lib/tiktok.js`: embed page → `__FRONTITY_CONNECT_STATE__` blob → CDN URL (video or, for photo posts, `imagePostInfo.displayImages[]`) → bytes downloaded and attached (inline or via `lib/gemini-files.js`'s resumable upload past ~14 MB).
 3. **Instagram** — `lib/instagram.js`: same shape via `/graphql/query` (`doc_id` + shortcode + CSRF) → `video_url` or each `XDTGraphImage.display_url` for carousels.
-4. **Any other link** — treated as a "page", not a video: `lib/article.js` fetches and extracts text, quoted into the prompt as the subject under examination (never cited as a source). A homepage or section front is refused rather than read (`looksLikeIndexPage` — shallow path + link furniture + no paragraphs): there is no single claim on one, and the failure it prevents is the model checking whichever headline it happened to see.
+4. **Any other link** — treated as a "page", not a video: `lib/article.js` fetches and extracts text, quoted into the prompt as the subject under examination (never cited as a source). A homepage or section front is refused rather than read (`looksLikeIndexPage` — shallow path + a wall of anchors + almost no prose that isn't link text): there is no single claim on one, and the failure it prevents is the model checking whichever headline it happened to see. Two other shapes are handled rather than mis-read: a page whose text extracts to nothing is retried once against its own AMP/print copy (`readerVariants`, same-origin only, half the deadline), and a metered page is flagged `partial` (`looksPaywalled` — the site's own `isAccessibleForFree`, or a meter phrase in a short body) so the model is told the rest is unread rather than absent.
 
 `lib/media-fetch.js` is what TikTok/Instagram share: deadline, CDN host allowlist, capped
 streamed read (48 MB ceiling, refused/aborted rather than buffered past it).

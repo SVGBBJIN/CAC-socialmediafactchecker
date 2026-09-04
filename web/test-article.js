@@ -214,8 +214,9 @@ const FRONT_PAGE_HTML = `
   <nav>${'<a href="/story">A headline that is a link and nothing else</a>'.repeat(120)}</nav>
   </body></html>`;
 
-test("looksLikeIndexPage wants a shallow path, link furniture and no paragraphs", () => {
-  const front = { url: "https://cnn.test/", html: FRONT_PAGE_HTML, text: "Headline\nHeadline\n" };
+test("looksLikeIndexPage wants a shallow path, a wall of anchors and no unlinked prose", () => {
+  const headlines = "A headline that is a link and nothing else\n".repeat(120);
+  const front = { url: "https://cnn.test/", html: FRONT_PAGE_HTML, text: headlines };
   assert.equal(looksLikeIndexPage(front), true);
   assert.equal(looksLikeIndexPage({ ...front, url: "https://cnn.test/politics" }), true);
 
@@ -229,12 +230,10 @@ test("looksLikeIndexPage wants a shallow path, link furniture and no paragraphs"
   // A short page at a shallow path with no wall of links is an about page, not a front.
   assert.equal(looksLikeIndexPage({ ...front, html: "<a href=/x>one</a>" }), false);
 
-  // Paragraphs mean it is the subject, even at `/` with a navigation bar over it.
+  // Paragraphs that are not link text mean the page is the subject, however many links
+  // surround them — the Wikipedia list article the anchor count alone would have eaten.
   assert.equal(
-    looksLikeIndexPage({
-      ...front,
-      text: `${"word ".repeat(60)}\n${"word ".repeat(60)}\n${"word ".repeat(60)}`,
-    }),
+    looksLikeIndexPage({ ...front, text: `${headlines}${"word ".repeat(200)}` }),
     false,
   );
 });

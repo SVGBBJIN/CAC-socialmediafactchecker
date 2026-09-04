@@ -155,6 +155,7 @@ web/
   api/chat.js      The only reader of GEMINI_API_KEY. Streams SSE to the browser.
   api/config.js    Booleans for the UI: is a passphrase needed, is a key present.
   api/probe-link.js  Pings a pasted link so intake knows what's really there.
+  api/page-outline.js  Reads a link that looks like a front page and lists the stories on it.
   api/resolve-media.js  Resolves a TikTok/Instagram post to an MP4 the video pane can play.
   lib/gemini.js    Gemini client + the model fallback chain + video + the tool loop.
   lib/degradation.js  When to stop asking for the best model, and how the UI says so.
@@ -359,7 +360,9 @@ rather than holding the request open.
 
 Anything that is not a TikTok, YouTube or Instagram link is a **page**, and a page is now a
 first-class thing to check rather than a link the app talked you out of. Intake pings it
-(`/api/probe-link`), and if something readable answers, the check runs; `/api/chat` then
+(`/api/probe-link`), and if something readable answers, the check runs — unless the URL's
+shape says front page, in which case `/api/page-outline` reads it once and intake offers the
+headlines on it as checks instead, because a homepage carries no single claim to check; `/api/chat` then
 fetches the page server-side, extracts its text with the same `htmlToText` the in-page find
 uses, and quotes it into the prompt between `<<<PAGE` markers as the material under
 examination — the exact role a video plays for a clip.
