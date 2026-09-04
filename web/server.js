@@ -14,6 +14,7 @@ import chatHandler from "./api/chat.js";
 import configHandler from "./api/config.js";
 import resolveMediaHandler from "./api/resolve-media.js";
 import probeLinkHandler from "./api/probe-link.js";
+import pageOutlineHandler from "./api/page-outline.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
 import { providerFromEnv } from "./lib/search.js";
 import { searchEnabled } from "./lib/verified-chat.js";
@@ -95,6 +96,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/config") return await configHandler(req, res);
     if (pathname === "/api/resolve-media") return await resolveMediaHandler(req, res);
     if (pathname === "/api/probe-link") return await probeLinkHandler(req, res);
+    if (pathname === "/api/page-outline") return await pageOutlineHandler(req, res);
     return await serveStatic(req, res);
   } catch (error) {
     console.error("[server]", error);

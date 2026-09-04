@@ -2341,10 +2341,46 @@
     </form>
   </dialog>
 
+<style>
+  /* The headline chooser inside the link-confirm dialog. A front page is refused as a
+     check subject, and this is what is offered in its place — see `showLinkConfirm`. Each
+     row is a button rather than a link: nothing here navigates, it starts a check. */
+  .headline-list {
+    list-style: none;
+    margin: 0.75rem 0 0;
+    padding: 0;
+    max-height: 42vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .headline-list button {
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    line-height: 1.35;
+    padding: 0.55rem 0.7rem;
+    border-radius: 0.5rem;
+    border: 1px solid color-mix(in oklab, currentColor 18%, transparent);
+    background: color-mix(in oklab, currentColor 5%, transparent);
+    color: inherit;
+    cursor: pointer;
+  }
+  .headline-list button:hover,
+  .headline-list button:focus-visible {
+    background: color-mix(in oklab, currentColor 12%, transparent);
+  }
+</style>
+
   <dialog class="passphrase" id="link-confirm-dialog">
     <form method="dialog" id="link-confirm-form">
       <h2 id="link-confirm-title">Can't confirm this link</h2>
       <p id="link-confirm-body"></p>
+      <!-- Populated only when the link was a front page (see `showLinkConfirm`): the
+           headlines on it, each one a check the reader can start instead. Empty and hidden
+           for every other kind of refusal. -->
+      <ul class="headline-list" id="link-confirm-headlines" hidden></ul>
       <div class="actions">
         <button type="button" class="secondary" id="link-confirm-cancel">Cancel</button>
         <button type="submit" id="link-confirm-proceed">Check anyway</button>

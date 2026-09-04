@@ -103,6 +103,7 @@ const el = {
   linkConfirmTitle: document.getElementById("link-confirm-title"),
   linkConfirmBody: document.getElementById("link-confirm-body"),
   linkConfirmCancel: document.getElementById("link-confirm-cancel"),
+  linkConfirmHeadlines: document.getElementById("link-confirm-headlines"),
   settingsBtn: document.getElementById("settingsBtn"),
   settingsDialog: document.getElementById("settings-dialog"),
   settingsForm: document.getElementById("settings-form"),
@@ -750,6 +751,51 @@ function readablePage(probe) {
 }
 
 /**
+ * The cheap half of the server's front-page test, run here so the expensive half is only
+ * asked for when it might say yes.
+ *
+ * Duplicated across the boundary exactly as `platformFor` is, and for the same reason: the
+ * client needs an answer with no network to decide whether to spend a request, and the
+ * server needs the real judgement on the page it actually fetched. This half is the one
+ * that can be made from the URL alone — a front page lives at `/` or `/politics`, a story
+ * carries a slug, a date or an id — so a pasted article never pays for an outline it was
+ * never going to get. It is a gate, not a verdict: `looksLikeIndexPage` on the server is
+ * what actually decides, from the page's own markup.
+ */
+function shallowPagePath(url) {
+  try {
+    const segments = new URL(url).pathname.split("/").filter(Boolean);
+    if (segments.length > 1) return false;
+    return segments.length === 0 || !/[-_]|\d/.test(segments[0]);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask the server what is on a page that looks like a front page.
+ *
+ * Returns `null` for anything that isn't a usable answer — an old deployment without the
+ * route, a rate limit, a page that turned out to be a story after all — because every one
+ * of those means "carry on as before": the paste proceeds to a normal check, and the worst
+ * case is the refusal the reader would have got anyway.
+ */
+async function pageOutline(url) {
+  try {
+    const response = await fetch("/api/page-outline", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ url }),
+    });
+    if (!response.ok) return null;
+    const outline = await response.json();
+    return outline?.index ? outline : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ask the platform itself whether this link is a post we can pull media from.
  *
  * YouTube is answered from the URL alone — a valid video ID is all Gemini needs, since it
@@ -834,7 +880,52 @@ async function verifyOnPlatform(url, platform, probe = null) {
       reason: `That link is ${type}, not a page — there's no text on it to check.`,
     };
   }
+  // A front page is a link this app can fetch and cannot check: there is no single claim
+  // on one (see `looksLikeIndexPage` in lib/article.js). Catching it here rather than
+  // inside the run is the whole point — the refusal used to arrive at the end of a full
+  // fact-check, which is the most expensive moment to learn the link was the wrong link.
+  // The outline comes back with the headlines, so the answer is a menu, not a dead end.
+  if (shallowPagePath(url)) {
+    const outline = await pageOutline(url);
+    if (outline) {
+      return {
+        ok: false,
+        url,
+        platform,
+        kind: "index",
+        outline,
+        reason:
+          "That's a homepage or section front, not a single story — there's no one claim on " +
+          "it to check." + (outline.headlines?.length ? " Pick a story from it:" : ""),
+      };
+    }
+  }
+
   return { ok: true, url, platform, kind: "page" };
+}
+
+/** The headlines a refused front page offered, as buttons that start a check on one. */
+function renderHeadlineChoices(result) {
+  const list = el.linkConfirmHeadlines;
+  list.innerHTML = "";
+  const rows = result.kind === "index" ? result.outline?.headlines ?? [] : [];
+  list.hidden = rows.length === 0;
+  for (const row of rows) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    // `textContent`, never innerHTML: this string is the link text of a page the user
+    // pasted, which is to say it was written by whoever owns that domain.
+    button.textContent = row.title;
+    button.addEventListener("click", () => {
+      // Consumed here, so the dialog's `close` handler doesn't run the front page too.
+      pendingConfirmUrl = null;
+      el.linkConfirmDialog.close();
+      runCheck(row.url);
+    });
+    item.append(button);
+    list.append(item);
+  }
 }
 
 function showLinkConfirm(url, result) {
@@ -844,8 +935,11 @@ function showLinkConfirm(url, result) {
   // with *that* link rather than with its platform.
   el.linkConfirmTitle.textContent = SUPPORTED_PLATFORMS.has(result.platform)
     ? `Couldn't confirm this ${result.platform} link`
-    : "Couldn't read this link";
+    : result.kind === "index"
+      ? "That's a front page, not a story"
+      : "Couldn't read this link";
   el.linkConfirmBody.textContent = result.reason;
+  renderHeadlineChoices(result);
   el.linkConfirmDialog.showModal();
 }
 
@@ -1141,14 +1235,62 @@ function setStatusText(id, text) {
 const STAGE_PROGRESS_FLOOR = { attaching: 10, reading: 15, waiting: 30, thinking: 55, busy: 40, rewriting: 75 };
 
 /**
+ * Where the creep is allowed to get to on its own *within* a stage — the next stage's
+ * floor, and 92% for the last one.
+ *
+ * This is the difference between a bar that moves and a bar that means something. It used
+ * to ease toward 92% from the moment it started, on elapsed time alone, so its position
+ * was a statement about the clock and not about the check: a fast video check was at 80%
+ * while it was still downloading, and a slow one sat at 90% through the entire model
+ * round it was actually waiting for. Both read as stalled, which is exactly the complaint
+ * an eased bar exists to prevent.
+ *
+ * Easing *inside a segment* fixes both ends of that. The bar can never overtake the stage
+ * it is in — reaching 92% now requires actually getting to the last one — and it still
+ * creeps continuously, so a long stage keeps moving. What a reader sees at 55% is that
+ * the model is thinking, every time, on every check, rather than that roughly 40 seconds
+ * have gone by.
+ */
+const STAGE_PROGRESS_CEILING = { attaching: 15, reading: 30, waiting: 55, thinking: 75, busy: 55, rewriting: 92 };
+
+/** Where the creep stops before any stage has been reported at all — a paste that has not
+ * come back yet is at the very start of the run, and a bar that has already crossed a
+ * third of the track is lying about that. */
+const OPENING_CEILING = 12;
+
+/** The last stage's ceiling, and the bar's hard limit short of `finish()`. */
+const MAX_CREEP = 92;
+
+/**
+ * Seconds for a segment to cover ~63% of its own remaining span.
+ *
+ * Slower than the 9s this used to run at (and than the 4.5s before that), because the
+ * number no longer has to carry the whole bar: each segment is short, so a gentle constant
+ * keeps a stage that runs long visibly moving without arriving. A stage that finishes fast
+ * is jumped forward by its own `bump`, which is the thing that should be moving the bar
+ * quickly — the creep is what fills the silence, not what reports progress.
+ */
+const PROGRESS_TAU_SECONDS = 14;
+
+function stageCeiling(stageOrPercent) {
+  if (typeof stageOrPercent === "number") {
+    // A numeric bump is a caller counting something it can count (sources found, claims
+    // settled); give it a segment the same shape a stage gets rather than the whole track.
+    return Math.min(MAX_CREEP, stageOrPercent + 12);
+  }
+  return STAGE_PROGRESS_CEILING[stageOrPercent] ?? MAX_CREEP;
+}
+
+/**
  * One eased, stage-aware progress bar. `runCheck`, `runFollowup` and `runChat` each get
  * their own instance (and their own `<div id="…ProgressBar">` in the markup) since each
  * drives a different part of the UI, even though only one of them is ever actually running
  * at a time (see `inFlight`).
  */
 function createProgressTicker(barId) {
-  let start = 0;
+  let segmentStart = 0;
   let floor = 0;
+  let ceiling = OPENING_CEILING;
   let timer = null;
   // The source of truth for "how far along is this bar", independent of the DOM — the
   // loading grid rebuilds its markup from scratch every time a new claim is discovered
@@ -1162,35 +1304,39 @@ function createProgressTicker(barId) {
     if (node) node.style.width = `${pct}%`;
   }
 
+  /** The eased position inside the current segment: never below what a stage has already
+   * established, never past what the *next* stage will establish. */
+  function creep() {
+    const elapsed = (performance.now() - segmentStart) / 1000;
+    const span = Math.max(0, ceiling - floor);
+    return floor + span * (1 - Math.exp(-elapsed / PROGRESS_TAU_SECONDS));
+  }
+
   return {
     start() {
-      start = performance.now();
+      segmentStart = performance.now();
       floor = 0;
+      ceiling = OPENING_CEILING;
       paint(0);
       if (timer) clearInterval(timer);
       timer = null;
       if (prefersReducedMotion()) return; // stays put rather than creeping on its own
-      timer = setInterval(() => {
-        const elapsedSeconds = (performance.now() - start) / 1000;
-        // Decays toward 92%, deliberately never arriving there unassisted — a check that
-        // runs long still reads as "still going", not stalled at a false-complete bar.
-        // Time constant of 9s (not 4.5): a real multi-claim check is a 30s-2min wait (video
-        // resolve, upload, three rounds of search/read/write — see CLAUDE.md), and at 4.5s
-        // this was already reading ~90% by the 20s mark, well before the model had even
-        // finished its first search round — a bar that arrives early reads as stalled for
-        // whatever's left of the wait, which defeats the whole point of easing it forward
-        // instead of just showing the raw elapsed clock. Doubling the constant keeps that
-        // early climb honest a while longer without giving up the "still moving" feel.
-        const eased = 92 * (1 - Math.exp(-elapsedSeconds / 9));
-        paint(Math.max(eased, floor));
-      }, 200);
+      timer = setInterval(() => paint(Math.max(creep(), lastPct)), 200);
     },
     /** Pulls the floor forward on a known stage name (from STAGE_PROGRESS_FLOOR) or a raw
-     * percentage — whichever the bar is already past wins, so this only ever moves it ahead. */
+     * percentage — whichever the bar is already past wins, so this only ever moves it ahead
+     * — and starts a fresh segment, since the creep's whole claim is that it is easing
+     * across *this* stage rather than across the run. */
     bump(stageOrPercent) {
       const next = typeof stageOrPercent === "number" ? stageOrPercent : STAGE_PROGRESS_FLOOR[stageOrPercent];
       if (next == null) return;
+      const nextCeiling = stageCeiling(stageOrPercent);
+      // A stage that arrives out of order (or one the bar has already crept past) must not
+      // drag the ceiling back down onto the bar and freeze it where it stands.
+      if (next <= floor && nextCeiling <= ceiling) return;
       floor = Math.max(floor, next);
+      ceiling = Math.max(ceiling, nextCeiling, floor);
+      segmentStart = performance.now();
       paint(Math.max(floor, lastPct));
     },
     finish() {
