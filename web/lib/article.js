@@ -57,8 +57,19 @@ import { fetchStream } from "./media-fetch.js";
  */
 export const ARTICLE_TIMEOUT_MS = 10_000;
 
-/** Most bytes of HTML worth pulling down. Past this it is an application, not an article. */
-export const MAX_ARTICLE_BYTES = 2_000_000;
+/**
+ * Most bytes of HTML worth pulling down. Past this it is an application, not an article.
+ *
+ * Raised from 2 MB once real newspaper front pages started tripping it: a modern
+ * section front ships several megabytes of inlined JSON and markup around a page of
+ * words, and a long feature on the same site is often over 2 MB by itself. The cap is
+ * still a cap — it is what keeps a won DNS-rebinding race bounded to a page of text —
+ * and the character budget below, not this number, is what decides how much reaches the
+ * model. So the cost of raising it is bytes read and discarded, and the benefit is that
+ * "too large to read" once again means "this is an application", which is what the number
+ * was always supposed to mean.
+ */
+export const MAX_ARTICLE_BYTES = 8_000_000;
 
 /**
  * Most characters of extracted text that go into the prompt.
@@ -173,6 +184,55 @@ export function trimBoilerplate(text) {
   return lines.slice(keptFrom).join("\n").trim();
 }
 
+/**
+ * Signals that a page is a section front rather than a story.
+ *
+ * A homepage passes every check above — it is HTML, it is a readable type, and it has far
+ * more than `MIN_ARTICLE_CHARS` of text — and then fails at the only thing that matters:
+ * there is no claim on it to check. What the model does with one is search for the
+ * headlines it can see and check whatever it finds, which is the exact failure mode
+ * `lib/article.js` was written to end. Saying "this is a front page, paste the story" is
+ * both true and actionable; handing over a list of headlines is neither.
+ *
+ * Two signals, and both are required, because either alone has a real false positive:
+ *
+ *   - **Shallow path.** A front page lives at `/` or at `/politics`. A story does not —
+ *     every publisher puts a slug, a date or an id under the section. This alone would
+ *     catch the short about-page and the single-segment permalink some blogs still use.
+ *   - **Link furniture and no paragraphs.** A front page is a wall of anchors with no
+ *     prose between them; a story has paragraphs. Counting anchors on the raw HTML rather
+ *     than the extracted text is deliberate — `htmlToText` throws the tags away, and the
+ *     density of them is the clearest thing on the page. This alone would catch a
+ *     link-heavy reference page that is genuinely the subject being checked.
+ *
+ * `PROSE_LINE_CHARS` is reused rather than re-tuned: a line long enough to be a paragraph
+ * of the article is the same question `trimBoilerplate` asks, and answering it two
+ * different ways in one file is how the two drift apart.
+ */
+const INDEX_MIN_ANCHORS = 60;
+const INDEX_MAX_PROSE_LINES = 2;
+
+export function looksLikeIndexPage({ url, html, text }) {
+  let path;
+  try {
+    path = new URL(String(url)).pathname;
+  } catch {
+    return false;
+  }
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length > 1) return false;
+  // A single segment carrying a date, an id or a slug is a story, not a section.
+  if (segments.length === 1 && /[-_]|\d/.test(segments[0])) return false;
+
+  const anchors = (String(html ?? "").match(/<a[\s>]/gi) ?? []).length;
+  if (anchors < INDEX_MIN_ANCHORS) return false;
+
+  const prose = String(text ?? "")
+    .split("\n")
+    .filter((line) => line.trim().length >= PROSE_LINE_CHARS).length;
+  return prose <= INDEX_MAX_PROSE_LINES;
+}
+
 /** The one request, with the deadline still armed while the body is read. */
 async function requestPage(url, { fetchImpl, timeoutMs, signal }) {
   return fetchStream(url.toString(), {
@@ -276,6 +336,18 @@ export async function fetchArticle(
 
       const { title, text: extracted } = htmlToText(body);
       const text = trimBoilerplate(extracted);
+      // Checked before the empty case, not after it. Both can be true of the same response
+      // — a front page whose headlines all live in `<nav>` extracts to almost nothing once
+      // `htmlToText` drops it — and of the two, "this is a front page" is the one the
+      // reader can act on. A shell page genuinely drawn by JavaScript has no wall of
+      // anchors in its HTML either, so it still falls through to the message below.
+      if (looksLikeIndexPage({ url: current.toString(), html: body, text })) {
+        throw new ArticleError(
+          "that is a homepage or section front, not a single story — there is no one claim " +
+            "on it to check. Paste the link to the specific article.",
+          { kind: "index" },
+        );
+      }
       if (text.length < MIN_ARTICLE_CHARS) {
         throw new ArticleError(
           "that page has no readable text — it is probably rendered by JavaScript.",
@@ -329,7 +401,14 @@ export async function resolveArticles(
       } catch (error) {
         // `ProbeRefused` and `ArticleError` both arrive here already worded as a reason;
         // anything else is unexpected and is reported in the same shape rather than thrown.
-        pages.set(link, { url: link, error: error?.message || "it could not be fetched." });
+        pages.set(link, {
+          url: link,
+          error: error?.message || "it could not be fetched.",
+          // Carried so `describeArticle` can tell the model what to do about it. Every
+          // other unreadable page is one the model should work around by searching; a
+          // front page is one where the useful reply is to ask for the story instead.
+          kind: error?.kind,
+        });
       }
     }),
   );
@@ -354,6 +433,13 @@ export async function resolveArticles(
 export function describeArticle(link, page) {
   if (page?.error) {
     const reason = String(page.error).replace(/\.\s*$/, "");
+    if (page.kind === "index") {
+      return (
+        `[The page at ${link} could not be checked: ${reason}. Do not fact-check the ` +
+        `headlines on it and do not search for them — say plainly that this is a front ` +
+        `page rather than a story, and ask for the link to the specific article.]`
+      );
+    }
     return `[The page at ${link} could not be read: ${reason}. Work from the link and from what you can find out about it.]`;
   }
   if (!page?.text) return "";

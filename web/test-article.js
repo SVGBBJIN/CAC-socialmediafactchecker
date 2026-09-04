@@ -16,6 +16,8 @@ import {
   trimBoilerplate,
   ArticleError,
   MAX_ARTICLES,
+  MAX_ARTICLE_BYTES,
+  looksLikeIndexPage,
 } from "./lib/article.js";
 import { ProbeRefused } from "./lib/link-probe.js";
 import { toGeminiContents, streamChat } from "./lib/gemini.js";
@@ -199,8 +201,69 @@ test("fetchArticle asks for brotli, and holds the cap against what inflates", as
     fetchArticle("https://news.test/x", { fetchImpl: bomb, lookupImpl: publicLookup }),
     (error) => error instanceof ArticleError && /too large/.test(error.message),
   );
-  // 2MB cap, 500KB a chunk: the fifth crosses it, and the generator is left there.
-  assert.equal(pulled, 5);
+  // 500KB a chunk: the one that crosses the cap is the last pulled, and the generator is
+  // left there. Derived from the cap rather than written out, so raising the cap does not
+  // silently turn this into an assertion about nothing.
+  assert.equal(pulled, Math.ceil(MAX_ARTICLE_BYTES / 500_000) + 1);
+});
+
+/* ------------------------------------------------------------------ front pages */
+
+const FRONT_PAGE_HTML = `
+  <html><head><title>CNN — Breaking News</title></head><body>
+  <nav>${'<a href="/story">A headline that is a link and nothing else</a>'.repeat(120)}</nav>
+  </body></html>`;
+
+test("looksLikeIndexPage wants a shallow path, link furniture and no paragraphs", () => {
+  const front = { url: "https://cnn.test/", html: FRONT_PAGE_HTML, text: "Headline\nHeadline\n" };
+  assert.equal(looksLikeIndexPage(front), true);
+  assert.equal(looksLikeIndexPage({ ...front, url: "https://cnn.test/politics" }), true);
+
+  // A story under the same section is not a front page, however many links are around it.
+  assert.equal(
+    looksLikeIndexPage({ ...front, url: "https://cnn.test/2026/09/04/coverage-fell" }),
+    false,
+  );
+  assert.equal(looksLikeIndexPage({ ...front, url: "https://cnn.test/coverage-fell" }), false);
+
+  // A short page at a shallow path with no wall of links is an about page, not a front.
+  assert.equal(looksLikeIndexPage({ ...front, html: "<a href=/x>one</a>" }), false);
+
+  // Paragraphs mean it is the subject, even at `/` with a navigation bar over it.
+  assert.equal(
+    looksLikeIndexPage({
+      ...front,
+      text: `${"word ".repeat(60)}\n${"word ".repeat(60)}\n${"word ".repeat(60)}`,
+    }),
+    false,
+  );
+});
+
+test("fetchArticle refuses a front page with a reason that asks for the story", async () => {
+  const fetchImpl = stubFetch({ "https://cnn.test/": page(FRONT_PAGE_HTML) });
+  await assert.rejects(
+    fetchArticle("https://cnn.test/", { fetchImpl, lookupImpl: publicLookup }),
+    (error) =>
+      error instanceof ArticleError &&
+      error.kind === "index" &&
+      /specific article/.test(error.message),
+  );
+});
+
+test("describeArticle tells the model to ask for the story, not to check the headlines", async () => {
+  const fetchImpl = stubFetch({ "https://cnn.test/": page(FRONT_PAGE_HTML) });
+  const { pages } = await resolveArticles([{ role: "user", content: "https://cnn.test/" }], {
+    fetchImpl,
+    lookupImpl: publicLookup,
+  });
+  const entry = pages.get("https://cnn.test/");
+  assert.equal(entry.kind, "index");
+
+  const note = describeArticle("https://cnn.test/", entry);
+  assert.match(note, /front page rather than a story/);
+  assert.match(note, /ask for the link to the specific article/);
+  // The generic advice for an unreadable page is the wrong advice for this one.
+  assert.doesNotMatch(note, /Work from the link/);
 });
 
 test("fetchArticle cuts a long page and says that it did", async () => {

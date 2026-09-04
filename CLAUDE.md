@@ -83,7 +83,7 @@ regardless — so a stale or hostile hint costs a wasted attempt and never a wro
 1. **YouTube** — handed to Gemini as a `file_data` URL part; Gemini fetches and watches it itself. No bytes touch this app.
 2. **TikTok** — `lib/tiktok.js`: embed page → `__FRONTITY_CONNECT_STATE__` blob → CDN URL (video or, for photo posts, `imagePostInfo.displayImages[]`) → bytes downloaded and attached (inline or via `lib/gemini-files.js`'s resumable upload past ~14 MB).
 3. **Instagram** — `lib/instagram.js`: same shape via `/graphql/query` (`doc_id` + shortcode + CSRF) → `video_url` or each `XDTGraphImage.display_url` for carousels.
-4. **Any other link** — treated as a "page", not a video: `lib/article.js` fetches and extracts text, quoted into the prompt as the subject under examination (never cited as a source).
+4. **Any other link** — treated as a "page", not a video: `lib/article.js` fetches and extracts text, quoted into the prompt as the subject under examination (never cited as a source). A homepage or section front is refused rather than read (`looksLikeIndexPage` — shallow path + link furniture + no paragraphs): there is no single claim on one, and the failure it prevents is the model checking whichever headline it happened to see.
 
 `lib/media-fetch.js` is what TikTok/Instagram share: deadline, CDN host allowlist, capped
 streamed read (48 MB ceiling, refused/aborted rather than buffered past it).
