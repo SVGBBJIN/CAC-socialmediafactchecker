@@ -1776,8 +1776,8 @@ function renderChatPane({ newest = -1 } = {}) {
         <div class="thread-q">${escapeHTML(pendingChat.question)}</div>
         ${
           pendingChat.error
-            ? `<div class="thread-error">${escapeHTML(pendingChat.error)}</div>`
-            : `<div class="thread-pending"><span class="thread-spinner"></span><span id="chatStatus" class="stage-text">Thinking…</span><span class="elapsed-time" id="chatElapsed">0:00</span></div>
+            ? `<div class="thread-error" role="alert">${escapeHTML(pendingChat.error)}</div>`
+            : `<div class="thread-pending"><span class="thread-spinner" aria-hidden="true"></span><span id="chatStatus" class="stage-text" role="status">Thinking…</span><span class="elapsed-time" id="chatElapsed">0:00</span></div>
                <div class="mini-progress"><div class="mini-progress-bar" id="chatProgressBar"></div></div>`
         }
       </div>`
@@ -2398,7 +2398,7 @@ function revealPlayer() {
 
 function irisMarkup() {
   return `
-    <div class="iris-wrap">
+    <div class="iris-wrap" aria-hidden="true">
       <svg viewBox="0 0 100 100">
         <g>
           <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
@@ -2413,13 +2413,24 @@ function irisMarkup() {
     </div>`;
 }
 
+/* `role="status"` on the stage line, and nowhere else in this card.
+ *
+ * It is the one node whose text says what the check is doing, so it is the one a screen
+ * reader should hear as the stages advance — `setStatusText` only rewrites it when the
+ * stage actually changed, which is exactly the announcement cadence wanted. The elapsed
+ * clock and the progress bar are deliberately left silent: they tick every second and
+ * would drown the stage line out.
+ *
+ * There is no `aria-busy="true"` on the card either, tempting as it looks. `aria-busy` on
+ * an ancestor suppresses live-region announcements from everything inside it, so setting
+ * it here would mute the very status line it was meant to describe. */
 function renderRunningCard() {
   setClaimsGridMode(null);
   el.claimsPane.innerHTML = `
     <div class="claim-card">
       <div class="card-loading">
         ${irisMarkup()}
-        <div class="status-text stage-text" id="runStatus">Sending to the model…</div>
+        <div class="status-text stage-text" id="runStatus" role="status">Sending to the model…</div>
         <div class="source-counter" id="runCounter">&nbsp;</div>
         <div class="elapsed-time" id="runElapsed">0:00</div>
         <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
@@ -2587,7 +2598,7 @@ function renderLiveSources(sources) {
 function claimGridStatusHTML(stage) {
   return `
     <div class="claim-grid-status">
-      <div class="status-text stage-text" id="runStatus">${escapeHTML(stage.text)}</div>
+      <div class="status-text stage-text" id="runStatus" role="status">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
       <div class="elapsed-time" id="runElapsed">0:00</div>
       <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
@@ -2770,7 +2781,7 @@ function errorCardText(message) {
 function renderErrorCard(entry) {
   setClaimsGridMode(null);
   el.claimsPane.innerHTML = `
-    <div class="claim-card">
+    <div class="claim-card" role="alert">
       <div class="eyebrow">Check failed</div>
       <p class="claim-text in">${escapeHTML(errorCardText(entry.error))}</p>
       <button type="button" class="retry-button" id="retryBtn">Try again</button>
@@ -3109,8 +3120,8 @@ function threadHTML(entry, newestIndex) {
           <div class="thread-q">${escapeHTML(pendingFollowup.question)}</div>
           ${
             pendingFollowup.error
-              ? `<div class="thread-error">${escapeHTML(pendingFollowup.error)}</div>`
-              : `<div class="thread-pending"><span class="thread-spinner"></span><span id="followupStatus" class="stage-text">Asking…</span><span class="elapsed-time" id="followupElapsed">0:00</span></div>
+              ? `<div class="thread-error" role="alert">${escapeHTML(pendingFollowup.error)}</div>`
+              : `<div class="thread-pending"><span class="thread-spinner" aria-hidden="true"></span><span id="followupStatus" class="stage-text" role="status">Asking…</span><span class="elapsed-time" id="followupElapsed">0:00</span></div>
                  <div class="mini-progress"><div class="mini-progress-bar" id="followupProgressBar"></div></div>`
           }
         </div>`
