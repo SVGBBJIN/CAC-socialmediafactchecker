@@ -2545,7 +2545,12 @@ function flipClaimsPane(render) {
         { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: "top left" },
         { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left" },
       ],
-      { duration: 550, easing: "cubic-bezier(0.76, 0, 0.24, 1)" },
+      // Slower than a typical UI transition on purpose — this is the one moment the reader
+      // sees the card visibly become the grid, so it should read as a deliberate motion
+      // rather than a snap. The easing is a pure ease-out (fast start, long gentle settle)
+      // rather than the old ease-in-out S-curve, which had a harsh accelerating start that
+      // read as a jump-cut before the eye had registered the box moving at all.
+      { duration: 800, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
     );
   });
 }
@@ -2651,7 +2656,9 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
   // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
   // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
   // status strip is another <div> ahead of these, so nth-of-type would be off by one.
-  const style = `--split-delay: ${Math.min(index * 0.05, 0.3)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
+  // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
+  // box has visibly finished sliding into place, instead of outrunning it.
+  const style = `--split-delay: ${Math.min(index * 0.07, 0.42)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
   return `
     <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       <div class="claim-eyebrow${done ? "" : " pending"}">${
