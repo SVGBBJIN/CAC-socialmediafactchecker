@@ -1500,11 +1500,39 @@
      one place this app breaks its own "no drop shadows" rule, because the DS's own Auth
      screen does too) a shadow to lift the card off the backdrop. */
   .auth-card {
+    position: relative;
     width: min(360px, 92vw);
     padding: 32px 28px;
     border-radius: 16px;
     box-shadow: 0 24px 60px rgba(0,0,0,0.5);
   }
+  /* Absolutely positioned against `.auth-card`'s own `position: relative` above — the one
+     escape hatch here that isn't "finish the form": closes without signing in, same as Esc
+     or a backdrop click already do (see the click listener in app.js).
+     `#account-dialog` prefix for the same reason `.auth-sub`/`.auth-switch-link`/
+     `.account-message` all need it above: this is a bare `<button>`, and `.passphrase
+     button` (one class + one type = specificity 0,1,1) outranks a single-class selector
+     like `.auth-close-btn` (0,1,0) regardless of source order — every property the two
+     rules both set (border/background/color) was silently coming from the shared dialog's
+     accent-teal pill button instead, and `padding` (never overridden below at all) was
+     still inflating this from a 28px icon square into that pill's own 9px/16px box on top
+     of it, which is what was squeezing its svg down to 0 width in a box actually not much
+     wider than the padding demanded. */
+  #account-dialog .auth-close-btn {
+    position: absolute; top: 14px; right: 14px;
+    width: 28px; height: 28px;
+    padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--ink-dim);
+    font-weight: 400;
+    cursor: pointer;
+  }
+  .auth-close-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
+  #account-dialog .auth-close-btn:hover { border-color: var(--border); background: var(--surface-raised); color: var(--ink); }
+  .auth-close-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* `display` gated on `[open]` rather than set unconditionally above: an author-origin
      rule beats the UA stylesheet's `dialog:not([open]) { display: none }` regardless of
      specificity (origin, not specificity, decides that fight), so an unconditional
@@ -2372,6 +2400,15 @@
       </button>
     </form>
     <div class="auth-switch" id="accountSwitch"></div>
+    <!-- Esc already closes any <dialog> opened via showModal() — this and a backdrop click
+         (see the accountDialog click listener in app.js) are the other two ways out that
+         don't require actually signing in, which the dialog had neither of before. Last in
+         the DOM on purpose, styled to the top-right corner by `.auth-close-btn`'s own
+         `position: absolute` regardless of source order: showModal() autofocuses the first
+         focusable descendant, and that needs to stay the email field, not this. -->
+    <button type="button" class="auth-close-btn" id="accountCloseBtn" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
   </dialog>
 
   <!-- Ported from the TRASE Design System's SettingsMenu: a nav rail (Profile/General/

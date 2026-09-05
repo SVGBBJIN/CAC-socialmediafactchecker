@@ -134,6 +134,7 @@ const el = {
   // Sign-in/up only — see the account-dialog comment in index.html. The signed-in identity
   // view lives in the settings dialog's Profile tab (profile* below) instead.
   accountDialog: document.getElementById("account-dialog"),
+  accountCloseBtn: document.getElementById("accountCloseBtn"),
   accountForm: document.getElementById("account-form"),
   accountHeading: document.getElementById("accountHeading"),
   accountSub: document.getElementById("accountSub"),
@@ -4461,6 +4462,24 @@ el.accountSwitch.addEventListener("click", (event) => {
 });
 el.profileSignOutBtn.addEventListener("click", () => {
   accounts.signOut();
+});
+
+el.accountCloseBtn.addEventListener("click", () => el.accountDialog.close());
+
+// Click-outside-to-close. A native <dialog> already closes on Esc once opened via
+// showModal() — this is the other way out that isn't the X button, and it isn't as simple
+// as `event.target === el.accountDialog`: a click that lands on the dialog's own padding
+// (inside its box, outside every child element) also targets the dialog element itself,
+// same as a genuine backdrop click does, so target alone can't tell the two apart. The
+// bounding rect can: only a click outside those bounds is actually outside the card.
+el.accountDialog.addEventListener("click", (event) => {
+  const rect = el.accountDialog.getBoundingClientRect();
+  const inside =
+    event.clientX >= rect.left &&
+    event.clientX <= rect.right &&
+    event.clientY >= rect.top &&
+    event.clientY <= rect.bottom;
+  if (!inside) el.accountDialog.close();
 });
 el.accountForm.addEventListener("submit", async (event) => {
   event.preventDefault();
