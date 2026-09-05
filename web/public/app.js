@@ -104,6 +104,10 @@ const el = {
   linkConfirmBody: document.getElementById("link-confirm-body"),
   linkConfirmCancel: document.getElementById("link-confirm-cancel"),
   linkConfirmHeadlines: document.getElementById("link-confirm-headlines"),
+  deleteConfirmDialog: document.getElementById("delete-confirm-dialog"),
+  deleteConfirmForm: document.getElementById("delete-confirm-form"),
+  deleteConfirmBody: document.getElementById("delete-confirm-body"),
+  deleteConfirmCancel: document.getElementById("delete-confirm-cancel"),
   settingsBtn: document.getElementById("settingsBtn"),
   settingsDialog: document.getElementById("settings-dialog"),
   settingsForm: document.getElementById("settings-form"),
@@ -147,6 +151,8 @@ const el = {
   profileSyncStatus: document.getElementById("profileSyncStatus"),
   profileSignInBtn: document.getElementById("profileSignInBtn"),
   profileSignOutBtn: document.getElementById("profileSignOutBtn"),
+  sidebarFooter: document.getElementById("sidebarFooter"),
+  sidebarSignInBtn: document.getElementById("sidebarSignInBtn"),
 };
 
 let library = loadLibrary();
@@ -1525,7 +1531,25 @@ function renderLibrary(filter = "") {
     sub.append(dot, document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`));
     meta.append(title, sub);
 
-    item.append(thumb, meta);
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "lib-delete";
+    deleteBtn.setAttribute("aria-label", `Delete "${entry.title}"`);
+    deleteBtn.title = "Delete";
+    deleteBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m2 0v13a2 2 0 01-2 2H8a2 2 0 01-2-2V7h12z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    // Both listeners stop the event where it is: a click or a keyboard activation on this
+    // button is "delete this row", never also "select this row" — the `.lib-item` handlers
+    // right below would otherwise fire second, since this button lives inside that row.
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      confirmDeleteEntry(entry.id);
+    });
+    deleteBtn.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+    });
+
+    item.append(thumb, meta, deleteBtn);
     item.addEventListener("click", () => selectEntry(entry.id));
     item.addEventListener("keydown", (e) => {
       // Space as well as Enter: anything announcing itself as a button is expected to
@@ -1676,6 +1700,55 @@ function selectEntry(id) {
   renderLibrary(el.searchInput.value);
   openEntryInPane(findEntry(id));
   updateComposerMode();
+}
+
+// The row a delete click is waiting on a confirmation for — cleared the same way
+// `pendingConfirmUrl` is, by the dialog's own `close` listener, so Esc and the Cancel
+// button both leave nothing behind without needing their own separate handler.
+let pendingDeleteId = null;
+
+/**
+ * Asks before removing a row — the one list action here with no undo (see
+ * delete-confirm-dialog in index.html, the same shape link-confirm-dialog already uses).
+ *
+ * Same `inFlight` guard `selectEntry` has, and for the same reason plus one more: deleting
+ * the row a stream is actively writing into out from under it would leave `runCheck`
+ * finishing a turn against a `library` entry no longer in the array, and `persistLibrary`
+ * racing that splice. Simplest correct answer is the one `selectEntry` already made —
+ * nothing about the library changes while a turn is running.
+ */
+function confirmDeleteEntry(id) {
+  if (inFlight) return;
+  const entry = findEntry(id);
+  if (!entry) return;
+  pendingDeleteId = id;
+  el.deleteConfirmBody.textContent = `"${entry.title}" will be deleted${
+    accounts.isConfigured() && accounts.getUser() ? " everywhere it's synced" : ""
+  }. This can't be undone.`;
+  el.deleteConfirmDialog.showModal();
+}
+
+/** Removes one entry from the library — local storage immediately, the cloud row
+ * best-effort right behind it (see `deleteConversation` in auth.js). If the row being
+ * removed is the one on screen, this falls back to the empty state exactly as
+ * `startNewCheck` does, rather than leaving the pane pointed at an id `findEntry` can no
+ * longer resolve. */
+function deleteEntry(id) {
+  const index = library.findIndex((entry) => entry.id === id);
+  if (index === -1) return;
+  library.splice(index, 1);
+  if (selectedId === id) {
+    selectedId = null;
+    updatePaneMode();
+    pendingFollowup = null;
+    chatThread = [];
+    pendingChat = null;
+    renderEmptyState();
+    updateComposerMode();
+  }
+  persistLibrary();
+  renderLibrary(el.searchInput.value);
+  accounts.deleteConversation(id);
 }
 
 /** The un-started state: nothing selected, video pane blank. The claims pane isn't
@@ -2223,27 +2296,32 @@ function renderVideoPane(entry) {
     const aspect = youTubeAspectRatio(entry.url);
     mediaCache.set(entry.id, { kind: "youtube", videoID, aspect });
     showYouTubeEmbed(videoID, aspect);
-    loadYouTubeTitle(entry, token);
   }
+  // Whatever's left — the YouTube embed above, or a generic article/page link with no
+  // media of its own — still needs a title. `/api/resolve-media`'s `kind: "title"` branch
+  // covers both off the one request: YouTube's oEmbed for the first, `fetchPageTitle` for
+  // the second (see the route for which is which).
+  loadLinkTitle(entry, token);
 }
 
 /**
- * YouTube's video needs no round trip (see `renderVideoPane`'s embed branch above), but its
- * *title* does: the pane otherwise names the post by the pasted URL forever, the one thing
- * TikTok/Instagram posts don't do once `loadDirectMedia` resolves. One oEmbed request
- * (`/api/resolve-media`'s `kind: "title"` branch — the browser can't ask YouTube directly,
- * no CORS header on that endpoint) is all it takes.
+ * Neither a YouTube embed nor a plain article/page has a round trip of its own the way
+ * TikTok/Instagram's `loadDirectMedia` does — a video ID builds the embed URL client-side,
+ * and a page has no media to fetch at all — so nothing else ever learns either one's
+ * *title*, and the pane fell back to naming the post by the pasted URL forever, the one
+ * thing a TikTok/Instagram post doesn't do once its own resolve lands. One request to
+ * `/api/resolve-media`'s `kind: "title"` branch is all either shape needs.
  *
- * `youtubeTitleFetched` is a fire-once guard, not a cache of the result: unlike
- * `mediaCache`, there is nothing to show from a cached title on a later render — it's
- * already been applied to `entry.title` itself (see `applyPostTitle`), so a re-render just
- * reads that. This only exists to stop a pane the reader flips back to re-requesting a
- * title it already has.
+ * `linkTitleFetched` is a fire-once guard, not a cache of the result: unlike `mediaCache`,
+ * there is nothing to show from a cached title on a later render — it's already been
+ * applied to `entry.title` itself (see `applyPostTitle`), so a re-render just reads that.
+ * This only exists to stop a pane the reader flips back to re-requesting a title it
+ * already has.
  */
-const youtubeTitleFetched = new Set();
-async function loadYouTubeTitle(entry, token) {
-  if (youtubeTitleFetched.has(entry.id)) return;
-  youtubeTitleFetched.add(entry.id);
+const linkTitleFetched = new Set();
+async function loadLinkTitle(entry, token) {
+  if (linkTitleFetched.has(entry.id)) return;
+  linkTitleFetched.add(entry.id);
   try {
     const response = await fetch("/api/resolve-media", {
       method: "POST",
@@ -2252,7 +2330,12 @@ async function loadYouTubeTitle(entry, token) {
     });
     if (!response.ok) return; // Pane keeps showing the pasted URL — not fatal to the check.
     const { title, authorName } = await response.json();
-    applyPostTitle(entry, title ?? (authorName ? `A video by ${authorName}` : null), token);
+    // `truncate`, not the bare string: a YouTube title is short by convention, but a page's
+    // own `<title>` carries no such promise — a long one would otherwise blow past
+    // `MAX_TITLE_CHARS`, the same ceiling `titleFromMetadata` holds TikTok/Instagram
+    // captions to.
+    const named = title ? truncate(title, MAX_TITLE_CHARS) : authorName ? `A video by ${authorName}` : null;
+    applyPostTitle(entry, named, token);
   } catch {
     // Network hiccup or the passphrase dialog intercepting — same as loadDirectMedia.
   }
@@ -3881,6 +3964,10 @@ function renderAccountUI() {
   el.topbarSettingsBtn.dataset.signedIn = String(Boolean(user));
   el.profileSignedOut.hidden = Boolean(user);
   el.profileSignedIn.hidden = !user;
+  // Only reached when accounts are configured at all (see initAccounts) — the footer's
+  // `hidden` attribute in the markup is what keeps it off an unconfigured deploy, since
+  // this function never runs there to remove it.
+  el.sidebarFooter.hidden = Boolean(user);
   if (user) {
     el.profileAvatar.textContent = initials(user.email);
     el.profileEmailDisplay.textContent = user.email ?? "Signed in";
@@ -4067,6 +4154,21 @@ el.linkConfirmCancel.addEventListener("click", () => {
 // already consumed the URL by the time this clears it.
 el.linkConfirmDialog.addEventListener("close", () => {
   pendingConfirmUrl = null;
+});
+
+el.deleteConfirmForm.addEventListener("submit", () => {
+  if (pendingDeleteId) deleteEntry(pendingDeleteId);
+  pendingDeleteId = null;
+});
+
+el.deleteConfirmCancel.addEventListener("click", () => {
+  el.deleteConfirmDialog.close();
+});
+
+// Same reasoning as link-confirm-dialog's own close listener just above: Esc leaves
+// `pendingDeleteId` set unless every way out of the dialog clears it here.
+el.deleteConfirmDialog.addEventListener("close", () => {
+  pendingDeleteId = null;
 });
 
 el.newCheckBtn.addEventListener("click", startNewCheck);
@@ -4347,6 +4449,7 @@ el.settingsNavList.addEventListener("click", (event) => {
 });
 
 el.profileSignInBtn.addEventListener("click", openAccountDialog);
+el.sidebarSignInBtn.addEventListener("click", openAccountDialog);
 // The switch-row link at the bottom of the card ("New to Seer? Create an account" /
 // "Already have an account? Sign in") — setAccountMode rewrites this row's own markup on
 // every mode change, so the listener is delegated on its stable container rather than a

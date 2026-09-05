@@ -567,6 +567,35 @@ export async function fetchPageOutline(raw, options = {}) {
 }
 
 /**
+ * The page's `<title>` alone — for a caller that only wants "what is this called", not the
+ * full readable text `fetchArticle` extracts for the check itself. Backs `/api/resolve-media`'s
+ * `kind: "title"` branch for a generic page link, the same job `fetchTikTokOEmbed` and
+ * `fetchYouTubeOEmbed` do for their own platforms — see `loadPageTitle` in public/app.js.
+ *
+ * Deliberately skips `fetchArticle`'s index-page/paywall/reader-fallback judgment: none of
+ * it bears on a title. A front page has one same as any other page, and a paywalled
+ * excerpt's title is still the real one — so this is a bare call to the same hop-vetted
+ * `readPage` `fetchArticle` itself wraps, same fetch, same per-hop vetting, same caps.
+ *
+ * Best-effort like its TikTok/Instagram/YouTube counterparts: returns `null` on any
+ * failure — a bad link, a timeout, a page with no `<title>` — rather than throwing, since
+ * every caller already has a URL or a pasted-link fallback to show instead. The page this
+ * resolves gets fetched a second time a moment later, when the check itself calls
+ * `fetchArticle` — the same "paid for twice, because the two routes are separate functions
+ * with no shared cache" trade the resolve-media doc in CLAUDE.md already accepts for
+ * TikTok/Instagram, and cheaper here: a page's text costs far less to re-fetch than a
+ * video's bytes.
+ */
+export async function fetchPageTitle(raw, options = {}) {
+  try {
+    const page = await readPage(raw, options);
+    return page.title ? { title: page.title, finalURL: page.finalURL } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read every page mentioned in a conversation's user turns, once each.
  *
  * Never throws. A page that will not open is recorded as an `error` string and reported to

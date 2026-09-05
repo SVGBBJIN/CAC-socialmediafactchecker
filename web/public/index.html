@@ -181,6 +181,38 @@
 
   .lib-empty { font-size: 12px; color: var(--muted); padding: 10px; }
 
+  /* Pinned to the sidebar's bottom edge regardless of how tall `.lib-list` is — `.sidebar`
+     is a flex column, and `margin-top: auto` claims whatever space the list didn't, the
+     same trick `.sidebar-header .wordmark`'s own `margin-right: auto` uses along the row
+     axis above. `flex-shrink: 0` keeps it from being squeezed if the list ever does fill
+     the column, so the button stays a fixed, tappable size rather than shrinking away. */
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: 12px;
+    flex-shrink: 0;
+  }
+  .sidebar-signin-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sidebar-signin-btn svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
+  .sidebar-signin-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .sidebar-signin-btn:hover svg { color: var(--accent); }
+  .sidebar-signin-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Same collapsed-rail treatment `.new-check-label` gets: icon only, centered, no label
+     text fighting a 60px-wide rail for room. */
+  [data-sidebar="collapsed"] .sidebar-signin-btn span { display: none; }
+  [data-sidebar="collapsed"] .sidebar-signin-btn { padding: 10px; }
+
   .lib-item {
     display: flex; align-items: center; gap: 10px;
     padding: 9px 10px;
@@ -230,6 +262,40 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+
+  /* The row's delete control — invisible until the row itself is hovered/focused/active,
+     the same "reveal on intent" pattern `.source-expand`'s own controls use elsewhere, so a
+     list of a dozen checks doesn't carry a dozen visible trash icons at rest. Kept in the
+     layout at `opacity: 0` rather than `display: none`/`hidden`, so it's still reachable by
+     keyboard Tab (a screen-reader or keyboard user shouldn't need to hover to find it) and
+     never shifts `.lib-meta`'s width when it appears. `flex-shrink: 0` keeps it a fixed
+     square regardless of how the row's `min-width: 0` title/subtitle squeeze. */
+  .lib-delete {
+    flex-shrink: 0;
+    width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink-dim);
+    opacity: 0;
+    cursor: pointer;
+  }
+  .lib-delete svg { width: 14px; height: 14px; }
+  .lib-item:hover .lib-delete,
+  .lib-item:focus-within .lib-delete,
+  .lib-delete:focus-visible {
+    opacity: 1;
+  }
+  .lib-delete:hover { border-color: var(--bad); color: var(--bad); background: color-mix(in oklab, var(--bad) 10%, transparent); }
+  .lib-delete:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* A touch screen has no hover to reveal this with, and tapping the row selects the check
+     rather than merely focusing it (see the `lib-item` click handler in app.js) — so below
+     the phone breakpoint the row's own real estate is spent keeping it on rather than
+     leaving it undiscoverable. */
+  @media (max-width: 700px) {
+    .lib-delete { opacity: 1; }
+  }
 
   .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
   .dot.bad { background: var(--bad); }
@@ -1279,6 +1345,12 @@
   .passphrase button.secondary {
     border-color: var(--border); background: transparent; color: var(--ink-dim);
   }
+  /* Delete-confirm dialog's proceed button — the one destructive action in either dialog,
+     so it gets `--bad` (the same red `.thread-error` already uses) instead of the default
+     accent teal every other dialog button carries. */
+  .passphrase button.danger {
+    border-color: var(--bad); background: color-mix(in oklab, var(--bad) 12%, transparent); color: var(--bad);
+  }
 
   /* ---------- Settings ---------- */
   .settings-btn {
@@ -2074,6 +2146,19 @@
       </button>
       <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks…" />
       <ul class="lib-list" id="libList"></ul>
+      <!-- A second way into the same account-dialog the Profile tab of Settings opens
+           (`openAccountDialog` in app.js) — not a competing auth surface, just a shortcut
+           that doesn't need two clicks through the gear icon first. Hidden by
+           `renderAccountUI` under the same two conditions Settings' own Profile tab already
+           hides under: no SUPABASE_URL/SUPABASE_ANON_KEY on this deploy at all (see
+           initAccounts), or already signed in — the Settings profile tab is where sign-out
+           lives, not the sidebar. -->
+      <div class="sidebar-footer" id="sidebarFooter" hidden>
+        <button type="button" class="sidebar-signin-btn" id="sidebarSignInBtn">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Sign in</span>
+        </button>
+      </div>
     </aside>
 
     <div class="main" id="main" tabindex="-1">
@@ -2446,6 +2531,21 @@
       <div class="actions">
         <button type="button" class="secondary" id="link-confirm-cancel">Cancel</button>
         <button type="submit" id="link-confirm-proceed">Check anyway</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Same shape as link-confirm-dialog above, for the one other place this app asks
+       before doing something it can't undo. `#delete-confirm-body` is filled in per entry
+       (see confirmDeleteEntry in app.js) rather than a fixed string, so a reader deleting
+       the wrong row by name has one more chance to notice. -->
+  <dialog class="passphrase" id="delete-confirm-dialog">
+    <form method="dialog" id="delete-confirm-form">
+      <h2>Delete this check?</h2>
+      <p id="delete-confirm-body"></p>
+      <div class="actions">
+        <button type="button" class="secondary" id="delete-confirm-cancel">Cancel</button>
+        <button type="submit" class="danger" id="delete-confirm-proceed">Delete</button>
       </div>
     </form>
   </dialog>

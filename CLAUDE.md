@@ -85,6 +85,12 @@ Two routes run *before* the check and exist to keep the check from repeating the
   post's *title* (`lib/youtube.js`, `kind: "title"` branch) — YouTube's oEmbed has no CORS
   header, so the browser can't ask it directly, and without this the pane named a YouTube
   post by its pasted URL forever instead of its real title the way TikTok/Instagram posts do.
+  A generic page/article link gets the same `kind: "title"` treatment off
+  `lib/article.js`'s `fetchPageTitle` — a bare call to the same hop-vetted `readPage`
+  `fetchArticle` wraps, skipping its index-page/paywall/reader-fallback judgment since none
+  of that bears on a title. Client-side, `loadLinkTitle` (public/app.js) is the one function
+  behind both branches — the video pane, the composer's follow-up placeholder, and the
+  sidebar row all read off the same `entry.title` it updates via `applyPostTitle`.
 
 That second resolve would otherwise be paid twice — once at intake, once when the user hits
 Check — and a shared cache **cannot** fix it, because `api/chat.js` and `api/resolve-media.js`

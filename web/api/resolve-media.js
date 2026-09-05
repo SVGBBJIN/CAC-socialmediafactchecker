@@ -12,6 +12,10 @@
 // (no CORS header on that endpoint) — so a YouTube link gets a `kind: "title"` branch below
 // that resolves nothing playable, just the name the video pane's "open original" link and
 // heading should use instead of the pasted URL.
+//
+// A generic page/article link (anything that isn't TikTok, Instagram or YouTube) gets the
+// same `kind: "title"` treatment, off `lib/article.js`'s `fetchPageTitle` — a page has no
+// video for this route to resolve either, so title is the whole of what it asks for.
 
 import {
   resolveTikTokVideo,
@@ -26,6 +30,7 @@ import {
   ALLOWED_MEDIA_HOSTS as INSTAGRAM_MEDIA_HOSTS,
 } from "../lib/instagram.js";
 import { fetchYouTubeOEmbed, isYouTubeHost } from "../lib/youtube.js";
+import { fetchPageTitle } from "../lib/article.js";
 import { hostAllowed } from "../lib/media-fetch.js";
 import { hintFromResolved } from "../lib/resolve-hint.js";
 import { authorize, config, GuardError } from "../lib/guard.js";
@@ -138,9 +143,21 @@ export default async function handler(req, res) {
       ? resolveInstagramVideo
       : null;
   if (!resolve) {
-    return sendJSON(res, 400, {
-      error: "Only TikTok, Instagram and YouTube links resolve here.",
-    });
+    // Not a video platform — a generic page/article link, title-only same as the YouTube
+    // branch above. `fetchPageTitle` is itself best-effort (returns `null` rather than
+    // throwing), so there is nothing here to distinguish "not a valid page" from "page
+    // fetched fine but had no <title>" — both just mean the client keeps showing the
+    // pasted URL, exactly as a TikTok/Instagram/YouTube title miss already does.
+    const controller = new AbortController();
+    const budget = setTimeout(() => controller.abort(), RESOLVE_BUDGET_MS);
+    res.on("close", () => controller.abort());
+    try {
+      const page = await fetchPageTitle(url, { signal: controller.signal, timeoutMs: RESOLVE_TIMEOUT_MS });
+      if (!page) return sendJSON(res, 502, { error: "Could not resolve that page's title." });
+      return sendJSON(res, 200, { kind: "title", title: page.title });
+    } finally {
+      clearTimeout(budget);
+    }
   }
   // Same list `downloadTikTokMedia`/`downloadInstagramMedia` fetch bytes against — see the
   // README's media-path guarantees. This route never fetches the media itself, but it does
