@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { EntryBar } from "@seer/design-system";
+import { EntryBar } from "@trase/design-system";
 
 export const Empty = () => {
   const [value, setValue] = useState("");

@@ -1,4 +1,4 @@
-/* Seer design system — root stylesheet. Import this once; every component's CSS is
+/* Trase design system — root stylesheet. Import this once; every component's CSS is
    reachable from here so a design built with the bundle picks it all up. */
 @import "./tokens.css";
 @import "./components/Sidebar.css";

@@ -1,8 +1,8 @@
 {
-  "name": "@seer/design-system",
+  "name": "@trase/design-system",
   "version": "0.1.0",
   "private": true,
-  "description": "Seer's real UI pieces (sidebar, claim cards, verdict badges, timestamp chips, composer) extracted from web/public into a buildable React component package, for design-sync.",
+  "description": "Trase's real UI pieces (sidebar, claim cards, verdict badges, timestamp chips, composer) extracted from web/public into a buildable React component package, for design-sync.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.es.js",

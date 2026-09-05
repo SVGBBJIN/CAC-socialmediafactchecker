@@ -1,10 +1,9 @@
 // Retrying the platform fetches that fail for reasons that pass.
 //
-// Mirrors Sources/SeerCore/Networking/RetryPolicy.swift: exponential backoff with full
-// jitter, a ceiling per delay, and a ceiling on the whole operation. Read that file for
-// the reasoning behind full jitter; the short version is that share sheets cluster — a
-// user pastes three links at once, or a whole cohort hits the same rate limit — and
-// unjittered retries just reconverge on the same instant.
+// Exponential backoff with full jitter, a ceiling per delay, and a ceiling on the whole
+// operation. The short version of why full jitter: share sheets cluster — a user pastes
+// three links at once, or a whole cohort hits the same rate limit — and unjittered
+// retries just reconverge on the same instant.
 //
 // ## Why this exists at all
 //

@@ -15,7 +15,7 @@
 /** JSON Schema (2020-12) for one search query. Also what the CLI validates against. */
 export const SEARCH_QUERY_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://seer.local/schemas/search-query.json",
+  $id: "https://trase.local/schemas/search-query.json",
   title: "SearchQuery",
   description:
     "One web search, issued to verify one specific factual claim. Every field is chosen " +

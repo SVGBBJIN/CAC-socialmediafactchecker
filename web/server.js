@@ -136,7 +136,7 @@ const port = Number(process.env.PORT) || 3000;
 const host = process.env.HOST || "127.0.0.1";
 
 server.listen(port, host, () => {
-  console.log(`\n  Seer       →  http://${host}:${port}\n`);
+  console.log(`\n  Trase       →  http://${host}:${port}\n`);
   console.log(`  env file   ${loadedEnv.length ? loadedEnv.join(", ") : "none found"}`);
   console.log(`  API key    ${process.env.GEMINI_API_KEY ? "loaded" : "MISSING — see web/README.md"}`);
   console.log(

@@ -1,9 +1,7 @@
 // TikTok → an MP4 the model can watch.
 //
-// Mirrors Sources/SeerCore/Media/TikTokMediaResolver.swift and MediaDownloader.swift:
-// same embed-page trick, same URL shapes, same "strict about the fields we need,
-// permissive about the ones we don't" parse. Read that file for the full reasoning; the
-// short version is below.
+// An embed-page trick, a fixed set of URL shapes, and a "strict about the fields we need,
+// permissive about the ones we don't" parse. The reasoning is below.
 //
 // ## Why this is not just another `file_data` part
 //

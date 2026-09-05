@@ -1,4 +1,4 @@
-# design-sync notes — Seer
+# design-sync notes — Trase
 
 ## Where the component package comes from
 
@@ -19,7 +19,7 @@ web/public/index.html" comment naming its source).
 
 ## Target project
 
-Re-adopted the existing **Seer Design System** project (`9310f352-c8b4-4404-9a33-59321721029b`)
+Re-adopted the existing **Trase Design System** project (`9310f352-c8b4-4404-9a33-59321721029b`)
 rather than creating a new one — it already had this name and appeared to be a prior,
 unrelated attempt at the same product's DS (different component set: MessageBubble,
 ConversationListItem, Composer, SourceList, StageIndicator, Chip, CitationLink, Badge,

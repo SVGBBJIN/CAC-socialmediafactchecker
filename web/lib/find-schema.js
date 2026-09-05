@@ -16,7 +16,7 @@ import { toGeminiSchema, WEB_SEARCH_TOOL } from "./search-schema.js";
 /** JSON Schema (2020-12) for one in-page find. */
 export const FIND_IN_PAGE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://seer.local/schemas/find-in-page.json",
+  $id: "https://trase.local/schemas/find-in-page.json",
   title: "FindInPage",
   description:
     "Open one page a search already returned and pull out the passages that address one " +

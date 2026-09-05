@@ -28,8 +28,8 @@ import {
 import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 
-const LIBRARY_KEY = "seer.library.v1";
-const PASSPHRASE_KEY = "seer.chat.pass"; // shared with the chat UI on purpose
+const LIBRARY_KEY = "trase.library.v1";
+const PASSPHRASE_KEY = "trase.chat.pass"; // shared with the chat UI on purpose
 
 // How much faster than real time the video pane plays back. There's no server-side
 // transcode in this pipeline (no ffmpeg step anywhere in the repo) — the cheap, correct
@@ -177,7 +177,7 @@ let pendingChat = null; // { question, error? }
 
 /* ---------------------------------------------------------------- settings */
 
-const SETTINGS_KEY = "seer.settings.v1";
+const SETTINGS_KEY = "trase.settings.v1";
 const DEFAULT_SETTINGS = {
   theme: "dark", // "dark" | "light"
   reducedMotion: false,
@@ -306,7 +306,7 @@ function syncDrawerInert() {
 
 /* ---------------------------------------------------------------- feedback (like/dislike) */
 
-const FEEDBACK_KEY = "seer.feedback.v1";
+const FEEDBACK_KEY = "trase.feedback.v1";
 
 function loadFeedback() {
   try {
@@ -3069,7 +3069,7 @@ async function handleClaimsPaneClick(event) {
   if (action === "share") {
     if (navigator.share) {
       try {
-        await navigator.share({ title: "Seer fact-check", text, url: entry.url });
+        await navigator.share({ title: "Trase fact-check", text, url: entry.url });
       } catch {
         // AbortError from the user cancelling the share sheet isn't a failure worth reporting.
       }
@@ -3863,7 +3863,7 @@ function setAccountMode(mode) {
   el.accountSubmitLabel.textContent = isSignup ? "Create account" : "Sign in";
   el.accountSwitch.innerHTML = isSignup
     ? `<span>Already have an account?</span> <button type="button" class="auth-switch-link" data-mode="signin">Sign in</button>`
-    : `<span>New to Seer?</span> <button type="button" class="auth-switch-link" data-mode="signup">Create an account</button>`;
+    : `<span>New to Trase?</span> <button type="button" class="auth-switch-link" data-mode="signup">Create an account</button>`;
   el.accountMessage.textContent = "";
   el.accountMessage.classList.remove("error");
 }
@@ -4308,7 +4308,7 @@ el.settingsNavList.addEventListener("click", (event) => {
 });
 
 el.profileSignInBtn.addEventListener("click", openAccountDialog);
-// The switch-row link at the bottom of the card ("New to Seer? Create an account" /
+// The switch-row link at the bottom of the card ("New to Trase? Create an account" /
 // "Already have an account? Sign in") — setAccountMode rewrites this row's own markup on
 // every mode change, so the listener is delegated on its stable container rather than a
 // button that gets replaced out from under a direct one.
