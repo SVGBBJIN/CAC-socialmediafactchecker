@@ -1042,8 +1042,12 @@
      gives this something to center within. */
   .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
   .claim-empty-text {
-    font-family: var(--font-body); font-size: 15px; line-height: 1.55; color: var(--ink-dim);
-    max-width: 34ch; margin: 0;
+    /* Back on the app's own display serif (`var(--font-display)`, the same face
+       `.claim-title`/`.wordmark` use) rather than the plain body sans — bigger and in a
+       serif, this reads as a considered opening line instead of a system message, which is
+       the whole of what an empty state has to do. */
+    font-family: var(--font-display); font-size: 20px; line-height: 1.5; color: var(--ink-dim);
+    max-width: 30ch; margin: 0;
   }
 
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
@@ -2016,6 +2020,7 @@
   [data-font-size="large"] .claim-text { font-size: calc(16.5px * 1.16); }
   [data-font-size="large"] .claim-title { font-size: calc(15.5px * 1.16); }
   [data-font-size="large"] .thread-a.claim-text { font-size: calc(14.5px * 1.16); }
+  [data-font-size="large"] .claim-empty-text { font-size: calc(20px * 1.16); }
   [data-font-size="large"] body, [data-font-size="large"] .entry-bar input, [data-font-size="large"] .lib-title { font-size: 1.1em; }
 
   [data-contrast="high"] {
