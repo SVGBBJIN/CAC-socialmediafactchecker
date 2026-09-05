@@ -1,4 +1,4 @@
-import { LibraryItem } from "@seer/design-system";
+import { LibraryItem } from "@trase/design-system";
 
 export const Corroborated = () => (
   <ul style={{ listStyle: "none", margin: 0, padding: 0, width: 260 }}>

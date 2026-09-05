@@ -530,7 +530,7 @@ test("the model searches, the sources are numbered, the answer is shown", async 
  * left in the app has an opinion about that either way.
  */
 const GREETING_REPLY = [
-  "Hi there! I'm Seer, a social-media fact-checker.",
+  "Hi there! I'm Trase, a social-media fact-checker.",
   "Send me a TikTok, YouTube, or Instagram link and I'll check the claims in it.",
   "Just share the URL and I'll tell you whether it's accurate.",
   "Supported platforms include TikTok, YouTube, and Instagram.",

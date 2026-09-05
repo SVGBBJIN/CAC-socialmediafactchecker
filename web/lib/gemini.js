@@ -1,10 +1,9 @@
 // Gemini chat client.
 //
-// Deliberately mirrors Sources/SeerCore/Gemini/GeminiModel.swift: the same ordered
-// model chain, and the same rule for when a failure means "try the next model" rather
-// than "give up". Model availability is not a constant — preview IDs get retired and a
-// key's tier may not be entitled to the newest model — so pinning one ID breaks in the
-// field. See the comments in GeminiModel.swift for the full reasoning.
+// Walks an ordered model chain, with one rule for when a failure means "try the next
+// model" rather than "give up". Model availability is not a constant — preview IDs get
+// retired and a key's tier may not be entitled to the newest model — so pinning one ID
+// breaks in the field.
 
 import {
   findTikTokLinks,
@@ -233,10 +232,7 @@ export function supportsThinkingBudget(model) {
 
 /**
  * Flash 3.7 preferred, then 3.6, 3.5, 3, 2.5, 2 — full models before any Lite one, newest
- * first within each group. `Sources/SeerCore/Gemini/GeminiModel.swift`'s
- * `GeminiModelChain.flashPreferred` predates this chain's Lite tier and the 3.7 model;
- * per CLAUDE.md's freeze policy this is a `web/`-only change and that gap is expected, not
- * a bug — don't port it there.
+ * first within each group.
  *
  * The three Lite models sit after every full model, not interleaved with same-generation
  * ones (a `3.5-flash-lite` failure doesn't fall through to `3-flash-preview` before
@@ -526,9 +522,8 @@ function describeFailure(status, message, model) {
 /**
  * Extract an 11-character YouTube video ID from a URL, or null.
  *
- * Mirrors `YouTubeExtractor.videoID(from:)` in Sources/SeerCore/Extractors/YouTubeExtractor.swift:
- * same formats handled (`watch?v=`, `youtu.be/`, `/shorts/`, `/embed/`, `/live/`, `/v/`),
- * same 11-character base64url shape check.
+ * Handles `watch?v=`, `youtu.be/`, `/shorts/`, `/embed/`, `/live/`, and `/v/` URLs, with
+ * an 11-character base64url shape check on the extracted ID.
  */
 export function youTubeVideoID(urlString) {
   let url;

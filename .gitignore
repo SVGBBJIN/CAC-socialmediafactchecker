@@ -14,7 +14,7 @@ secrets.json
 node_modules/
 .vercel/
 
-# design-sync (SEER DS) — machine state, never committed
+# design-sync (TRASE DS) — machine state, never committed
 /.ds-sync/
 /ds-bundle/
 /.design-sync/.cache/

@@ -1,4 +1,4 @@
-import { SourcePills } from "@seer/design-system";
+import { SourcePills } from "@trase/design-system";
 
 const sources = [
   { url: "https://apnews.com/article/example", domain: "apnews.com", title: "AP News: fact-check context" },

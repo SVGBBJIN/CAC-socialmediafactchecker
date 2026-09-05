@@ -1,6 +1,6 @@
-# Seer design system — build conventions
+# Trase design system — build conventions
 
-Seer is a dark-mode fact-checking UI: a sidebar library of past checks, a composer that
+Trase is a dark-mode fact-checking UI: a sidebar library of past checks, a composer that
 takes a pasted link, and a claims feed of verdict cards. Everything below is real — verify
 against `styles.css` and `tokens/` in this bundle before styling anything new.
 
@@ -10,12 +10,12 @@ Every component here is a plain function component with no context/provider depe
 there is nothing to wrap the app in. Just import and render:
 
 ```jsx
-import { Sidebar, LibraryItem, EntryBar, ClaimCard, VerdictBadge } from "@seer/design-system";
+import { Sidebar, LibraryItem, EntryBar, ClaimCard, VerdictBadge } from "@trase/design-system";
 ```
 
 ## The styling idiom: CSS custom properties, dark by default
 
-Seer has no utility-class system and no prop-driven theming — components style themselves
+Trase has no utility-class system and no prop-driven theming — components style themselves
 from a fixed token set defined on `:root` (see `tokens.css` in this bundle). Build your own
 layout glue (page background, spacing between these components) with the **same** tokens
 rather than inventing new colors:

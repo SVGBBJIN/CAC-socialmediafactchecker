@@ -1,4 +1,4 @@
-import { ClaimCard, TimestampChip } from "@seer/design-system";
+import { ClaimCard, TimestampChip } from "@trase/design-system";
 
 const sources = [
   { url: "https://apnews.com/article/example", domain: "apnews.com", title: "AP News" },

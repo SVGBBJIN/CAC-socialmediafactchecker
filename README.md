@@ -1,4 +1,4 @@
-# Seer
+# Trase
 
 Paste a link to a short-form video; get its claims checked against live sources, each one
 carrying a citation you can follow.
@@ -28,7 +28,7 @@ Four shapes, cheapest first, decided per platform:
 
 The iframe TikTok's embed script builds points at `tiktok.com/embed/v2/<id>`, that page is
 served to anonymous requests, and its `__FRONTITY_CONNECT_STATE__` blob carries **a direct
-CDN URL for the MP4** along with the duration, caption and author. So Seer fetches the
+CDN URL for the MP4** along with the duration, caption and author. So Trase fetches the
 file and hands the bytes to Gemini Flash directly — no player, no recording permission, no
 waiting on a physical device, and it runs at network speed instead of in real time.
 
