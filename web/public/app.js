@@ -126,6 +126,7 @@ const el = {
   micBtn: document.getElementById("micBtn"),
   listeningWave: document.getElementById("listeningWave"),
   listeningLabel: document.getElementById("listeningLabel"),
+  listeningSubmitBtn: document.getElementById("listeningSubmitBtn"),
   sidebar: document.getElementById("sidebar"),
   sidebarCollapseBtn: document.getElementById("sidebarCollapseBtn"),
   drawerToggle: document.getElementById("drawerToggle"),
@@ -4058,13 +4059,28 @@ const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRec
 let recognizer = null;
 let recognizing = false;
 
+// The mic button's two faces. Swapped in place by setListening rather than a second
+// button beside it: while listening, everything else this button could mean (attach an
+// image, type instead) is already unavailable — see setListening's own hides — so the one
+// button on screen might as well just become the one thing left to do with it, tap to
+// finish and send, rather than adding a whole extra control for that.
+const MIC_ICON =
+  '<svg viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 003-3V6a3 3 0 10-6 0v6a3 3 0 003 3z" stroke="currentColor" stroke-width="1.6"/><path d="M19 11a7 7 0 01-14 0M12 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const MIC_SUBMIT_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
 function setListening(on) {
   recognizing = on;
   el.micBtn.classList.toggle("listening", on);
   el.micBtn.setAttribute("aria-pressed", String(on));
+  const label = on ? "Stop recording and submit" : "Speak instead of typing";
+  el.micBtn.setAttribute("aria-label", label);
+  el.micBtn.title = label;
+  el.micBtn.innerHTML = on ? MIC_SUBMIT_ICON : MIC_ICON;
   // While listening, the wave+label take the place of the input/image/check trio rather
   // than sitting alongside a bar the reader can't type or tap into anyway — recognition
-  // owns the input until it stops.
+  // owns the input until it stops. micBtn itself stays exactly where it is throughout;
+  // it's what stops and submits, so it's never part of what this hides.
   el.imageBtn.hidden = on;
   el.linkInput.hidden = on;
   el.checkBtn.hidden = on;
@@ -4105,9 +4121,22 @@ function initSpeechToText() {
     el.linkInput.value = el.linkInput.value ? `${el.linkInput.value} ${transcript}` : transcript;
     updateComposerMode();
   });
-  recognizer.addEventListener("end", () => setListening(false));
+  // "end" always fires once a session is fully over — after "result" if there was one,
+  // after "nomatch" or "error" if there wasn't — so it's the one place that can act on
+  // whatever ended up in el.linkInput, regardless of which of those got it there. The
+  // click that stopped recognition can't submit synchronously on its own: the final
+  // transcript isn't in el.linkInput yet at that point, only once "result" has fired.
+  recognizer.addEventListener("end", () => {
+    setListening(false);
+    // Same no-op-on-nothing a manual Check click already gives an empty composer: if
+    // recognition caught nothing, this just leaves the composer sitting ready instead of
+    // submitting a blank turn.
+    if (el.linkInput.value.trim()) el.checkBtn.click();
+  });
   recognizer.addEventListener("error", () => setListening(false));
 
+  // One button, both directions: start listening when idle, stop-and-submit when not —
+  // recognizing is exactly what setListening last set, so it's what tells the two apart.
   el.micBtn.addEventListener("click", () => {
     if (recognizing) {
       recognizer.stop();

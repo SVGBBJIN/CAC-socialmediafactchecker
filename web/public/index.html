@@ -2324,11 +2324,18 @@
         </button>
         <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
         <input type="text" id="linkInput" aria-label="Video or article link to check" placeholder="Paste a video or article link…" />
+        <!-- One button, two icons: a mic to start listening, swapped for a checkmark while
+             listening (see setListening/MIC_ICON/MIC_SUBMIT_ICON in app.js) so tapping it
+             again both stops recognition and submits, instead of only stopping and landing
+             back on a composer that still needed a second tap on Check. The aria-label/title
+             swap the same way so a screen reader hears "submit" rather than "speak" for the
+             second tap. -->
         <button type="button" class="icon-btn" id="micBtn" aria-label="Speak instead of typing" title="Speak instead of typing" aria-pressed="false">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 003-3V6a3 3 0 10-6 0v6a3 3 0 003 3z" stroke="currentColor" stroke-width="1.6"/><path d="M19 11a7 7 0 01-14 0M12 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         </button>
-        <!-- Shown instead of the input/mic/check trio while recognizer.listening is true —
-             see setListening in app.js. -->
+        <!-- Shown instead of the input/check pair while recognizer.listening is true — see
+             setListening in app.js. micBtn itself stays on screen and in place throughout
+             (it's what stops and submits), so it isn't part of what this replaces. -->
         <div class="listening-wave" id="listeningWave" hidden aria-hidden="true">
           <span></span><span></span><span></span><span></span><span></span>
         </div>
