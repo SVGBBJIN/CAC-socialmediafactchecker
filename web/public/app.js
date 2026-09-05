@@ -1785,7 +1785,7 @@ function renderChatPane({ newest = -1 } = {}) {
 
   setClaimsGridMode(null);
   if (!settled && !pending) {
-    el.claimsPane.innerHTML = `<div class="claim-card"><p class="claim-text in">Paste a link below and press Check — a TikTok, YouTube or Instagram post, or any article or web page — or just ask a question.</p></div>`;
+    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><p class="claim-empty-text">Paste a link or ask a question to get started.</p></div>`;
     return;
   }
   el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;

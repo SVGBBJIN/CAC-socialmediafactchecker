@@ -967,6 +967,19 @@
   .claim-text a.citation { color: var(--accent); text-decoration: none; }
   .claim-text a.citation:hover { text-decoration: underline; }
 
+  /* The claims pane's very first state, before any check has run — `.claim-card`'s only
+     child then (see the empty-state render in app.js). Its own class rather than a
+     `.claim-text` override: that class is the body copy of every settled claim elsewhere in
+     the app, and this message isn't a claim's analysis, it's an instruction. Centered both
+     ways (the flex rules) because there's nothing else in the card yet for the eye to land
+     on top-left of; `.claim-card`'s own `display: flex; flex-direction: column` is what
+     gives this something to center within. */
+  .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
+  .claim-empty-text {
+    font-family: var(--font-body); font-size: 15px; line-height: 1.55; color: var(--ink-dim);
+    max-width: 34ch; margin: 0;
+  }
+
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
      leaves the page for a source, a timestamp moves the player a few inches away, and the
      two being visually interchangeable would be a promise about where a click goes. So this
