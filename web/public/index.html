@@ -8,9 +8,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="Trase fact-checks a social video or article link: it reads the post, researches the claims, and answers with a cited verdict.">
 <title>Trase</title>
+<!-- The brand mark itself (see .mark/.auth-mark below), not an emoji glyph — the old
+     favicon was an eye, a pun on "Seer" this app hasn't been called since the rebrand.
+     Colors are the dark-theme --accent/--accent-2 values inlined as literal hex: a data-URI
+     SVG has no cascade of its own, so a CSS var() here would resolve to nothing. -->
 <link
   rel="icon"
-  href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>👁</text></svg>"
+  href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='none' stroke='%234FD1C5' stroke-width='3' stroke-dasharray='13 3 13 3' stroke-linecap='round'/><circle cx='16' cy='16' r='3.5' fill='%234FD1C5'/><rect x='20.5' y='13.5' width='3' height='5' rx='1' fill='%239C8CF0'/></svg>"
 />
 <style>
   :root {
@@ -181,6 +185,38 @@
 
   .lib-empty { font-size: 12px; color: var(--muted); padding: 10px; }
 
+  /* Pinned to the sidebar's bottom edge regardless of how tall `.lib-list` is — `.sidebar`
+     is a flex column, and `margin-top: auto` claims whatever space the list didn't, the
+     same trick `.sidebar-header .wordmark`'s own `margin-right: auto` uses along the row
+     axis above. `flex-shrink: 0` keeps it from being squeezed if the list ever does fill
+     the column, so the button stays a fixed, tappable size rather than shrinking away. */
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: 12px;
+    flex-shrink: 0;
+  }
+  .sidebar-signin-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--surface-raised);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sidebar-signin-btn svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
+  .sidebar-signin-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .sidebar-signin-btn:hover svg { color: var(--accent); }
+  .sidebar-signin-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Same collapsed-rail treatment `.new-check-label` gets: icon only, centered, no label
+     text fighting a 60px-wide rail for room. */
+  [data-sidebar="collapsed"] .sidebar-signin-btn span { display: none; }
+  [data-sidebar="collapsed"] .sidebar-signin-btn { padding: 10px; }
+
   .lib-item {
     display: flex; align-items: center; gap: 10px;
     padding: 9px 10px;
@@ -230,6 +266,40 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+
+  /* The row's delete control — invisible until the row itself is hovered/focused/active,
+     the same "reveal on intent" pattern `.source-expand`'s own controls use elsewhere, so a
+     list of a dozen checks doesn't carry a dozen visible trash icons at rest. Kept in the
+     layout at `opacity: 0` rather than `display: none`/`hidden`, so it's still reachable by
+     keyboard Tab (a screen-reader or keyboard user shouldn't need to hover to find it) and
+     never shifts `.lib-meta`'s width when it appears. `flex-shrink: 0` keeps it a fixed
+     square regardless of how the row's `min-width: 0` title/subtitle squeeze. */
+  .lib-delete {
+    flex-shrink: 0;
+    width: 26px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink-dim);
+    opacity: 0;
+    cursor: pointer;
+  }
+  .lib-delete svg { width: 14px; height: 14px; }
+  .lib-item:hover .lib-delete,
+  .lib-item:focus-within .lib-delete,
+  .lib-delete:focus-visible {
+    opacity: 1;
+  }
+  .lib-delete:hover { border-color: var(--bad); color: var(--bad); background: color-mix(in oklab, var(--bad) 10%, transparent); }
+  .lib-delete:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* A touch screen has no hover to reveal this with, and tapping the row selects the check
+     rather than merely focusing it (see the `lib-item` click handler in app.js) — so below
+     the phone breakpoint the row's own real estate is spent keeping it on rather than
+     leaving it undiscoverable. */
+  @media (max-width: 700px) {
+    .lib-delete { opacity: 1; }
+  }
 
   .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
   .dot.bad { background: var(--bad); }
@@ -831,7 +901,10 @@
   .claim-grid-loading .claim-pane[data-reveal] { opacity: 0; }
   .claim-grid-loading .claim-pane.in {
     opacity: 1;
-    transition: opacity 0.32s cubic-bezier(.2,1,.3,1);
+    /* Matches flipClaimsPane's slower 800ms/ease-out FLIP transform (app.js) — the fade
+       used to finish (0.32s) well before that motion did, so a box would go fully opaque
+       mid-slide instead of arriving solid right as it settled into its cell. */
+    transition: opacity 0.45s cubic-bezier(.2,1,.3,1);
     transition-delay: var(--split-delay, 0s);
   }
 
@@ -963,6 +1036,23 @@
   .claim-text pre { font-family: var(--font-mono); font-size: 0.8em; background: var(--surface-raised); padding: 10px; border-radius: 8px; overflow-x: auto; }
   .claim-text a.citation { color: var(--accent); text-decoration: none; }
   .claim-text a.citation:hover { text-decoration: underline; }
+
+  /* The claims pane's very first state, before any check has run — `.claim-card`'s only
+     child then (see the empty-state render in app.js). Its own class rather than a
+     `.claim-text` override: that class is the body copy of every settled claim elsewhere in
+     the app, and this message isn't a claim's analysis, it's an instruction. Centered both
+     ways (the flex rules) because there's nothing else in the card yet for the eye to land
+     on top-left of; `.claim-card`'s own `display: flex; flex-direction: column` is what
+     gives this something to center within. */
+  .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
+  .claim-empty-text {
+    /* Back on the app's own display serif (`var(--font-display)`, the same face
+       `.claim-title`/`.wordmark` use) rather than the plain body sans — bigger and in a
+       serif, this reads as a considered opening line instead of a system message, which is
+       the whole of what an empty state has to do. */
+    font-family: var(--font-display); font-size: 20px; line-height: 1.5; color: var(--ink-dim);
+    max-width: 30ch; margin: 0;
+  }
 
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
      leaves the page for a source, a timestamp moves the player a few inches away, and the
@@ -1263,6 +1353,12 @@
   .passphrase button.secondary {
     border-color: var(--border); background: transparent; color: var(--ink-dim);
   }
+  /* Delete-confirm dialog's proceed button — the one destructive action in either dialog,
+     so it gets `--bad` (the same red `.thread-error` already uses) instead of the default
+     accent teal every other dialog button carries. */
+  .passphrase button.danger {
+    border-color: var(--bad); background: color-mix(in oklab, var(--bad) 12%, transparent); color: var(--bad);
+  }
 
   /* ---------- Settings ---------- */
   .settings-btn {
@@ -1408,11 +1504,39 @@
      one place this app breaks its own "no drop shadows" rule, because the DS's own Auth
      screen does too) a shadow to lift the card off the backdrop. */
   .auth-card {
+    position: relative;
     width: min(360px, 92vw);
     padding: 32px 28px;
     border-radius: 16px;
     box-shadow: 0 24px 60px rgba(0,0,0,0.5);
   }
+  /* Absolutely positioned against `.auth-card`'s own `position: relative` above — the one
+     escape hatch here that isn't "finish the form": closes without signing in, same as Esc
+     or a backdrop click already do (see the click listener in app.js).
+     `#account-dialog` prefix for the same reason `.auth-sub`/`.auth-switch-link`/
+     `.account-message` all need it above: this is a bare `<button>`, and `.passphrase
+     button` (one class + one type = specificity 0,1,1) outranks a single-class selector
+     like `.auth-close-btn` (0,1,0) regardless of source order — every property the two
+     rules both set (border/background/color) was silently coming from the shared dialog's
+     accent-teal pill button instead, and `padding` (never overridden below at all) was
+     still inflating this from a 28px icon square into that pill's own 9px/16px box on top
+     of it, which is what was squeezing its svg down to 0 width in a box actually not much
+     wider than the padding demanded. */
+  #account-dialog .auth-close-btn {
+    position: absolute; top: 14px; right: 14px;
+    width: 28px; height: 28px;
+    padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--ink-dim);
+    font-weight: 400;
+    cursor: pointer;
+  }
+  .auth-close-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
+  #account-dialog .auth-close-btn:hover { border-color: var(--border); background: var(--surface-raised); color: var(--ink); }
+  .auth-close-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* `display` gated on `[open]` rather than set unconditionally above: an author-origin
      rule beats the UA stylesheet's `dialog:not([open]) { display: none }` regardless of
      specificity (origin, not specificity, decides that fight), so an unconditional
@@ -1434,7 +1558,16 @@
     color: var(--ink-dim); text-transform: uppercase; margin-bottom: 26px;
   }
   .auth-card h2 { font-size: 24px; text-align: center; }
-  .auth-sub { margin: 0 0 28px; font-size: 13.5px; color: var(--ink-dim); text-align: center; line-height: 1.5; }
+  /* `#account-dialog` prefix on every rule below that also targets a bare tag the shared
+     `.passphrase` reset already styles (p, button) — not decoration, load-bearing.
+     `.passphrase p`/`.passphrase button` (one class + one type = specificity 0,1,1) sit
+     *above* a same-level single-class selector like `.auth-sub` or `.auth-switch-link`
+     (0,1,0) regardless of source order, so without the id every margin/font-size/padding
+     override below was silently losing to the passphrase dialog's own defaults: the
+     subtitle sat 14px instead of 28px off the form, and "Create an account" rendered as
+     the shared bordered pill button instead of the plain inline link `.auth-switch`'s row
+     was laid out for. The id (specificity 1,0,0) makes every selector here win outright. */
+  #account-dialog .auth-sub { margin: 0 0 28px; font-size: 13.5px; color: var(--ink-dim); text-align: center; line-height: 1.5; }
   .auth-form { display: flex; flex-direction: column; gap: 12px; width: 100%; }
   .auth-form .field { display: flex; flex-direction: column; }
   .auth-form label { font-size: 12px; color: var(--muted); margin-bottom: 5px; }
@@ -1445,17 +1578,17 @@
   }
   .auth-submit-icon { width: 16px; height: 16px; }
   .auth-switch {
-    margin-top: 22px; display: flex; gap: 5px;
+    margin-top: 22px; display: flex; align-items: baseline; gap: 5px;
     font-size: 13px; color: var(--ink-dim);
   }
-  .auth-switch-link {
+  #account-dialog .auth-switch-link {
     padding: 0; border: 0; background: none;
     color: var(--accent); font: inherit; cursor: pointer;
   }
   .auth-switch-link:hover { text-decoration: underline; }
   .auth-switch-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .account-message { font-size: 12px; color: var(--ink-dim); margin: -4px 0 12px; text-align: center; }
+  #account-dialog .account-message { font-size: 12px; color: var(--ink-dim); margin: -4px 0 12px; text-align: center; }
   .account-message.error { color: var(--bad); }
   .account-message:empty { display: none; }
 
@@ -1928,6 +2061,7 @@
   [data-font-size="large"] .claim-text { font-size: calc(16.5px * 1.16); }
   [data-font-size="large"] .claim-title { font-size: calc(15.5px * 1.16); }
   [data-font-size="large"] .thread-a.claim-text { font-size: calc(14.5px * 1.16); }
+  [data-font-size="large"] .claim-empty-text { font-size: calc(20px * 1.16); }
   [data-font-size="large"] body, [data-font-size="large"] .entry-bar input, [data-font-size="large"] .lib-title { font-size: 1.1em; }
 
   [data-contrast="high"] {
@@ -2058,6 +2192,19 @@
       </button>
       <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks…" />
       <ul class="lib-list" id="libList"></ul>
+      <!-- A second way into the same account-dialog the Profile tab of Settings opens
+           (`openAccountDialog` in app.js) — not a competing auth surface, just a shortcut
+           that doesn't need two clicks through the gear icon first. Hidden by
+           `renderAccountUI` under the same two conditions Settings' own Profile tab already
+           hides under: no SUPABASE_URL/SUPABASE_ANON_KEY on this deploy at all (see
+           initAccounts), or already signed in — the Settings profile tab is where sign-out
+           lives, not the sidebar. -->
+      <div class="sidebar-footer" id="sidebarFooter" hidden>
+        <button type="button" class="sidebar-signin-btn" id="sidebarSignInBtn">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4M10 17l5-5-5-5M15 12H3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Sign in</span>
+        </button>
+      </div>
     </aside>
 
     <div class="main" id="main" tabindex="-1">
@@ -2181,11 +2328,18 @@
         </button>
         <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
         <input type="text" id="linkInput" aria-label="Video or article link to check" placeholder="Paste a video or article link…" />
+        <!-- One button, two icons: a mic to start listening, swapped for a checkmark while
+             listening (see setListening/MIC_ICON/MIC_SUBMIT_ICON in app.js) so tapping it
+             again both stops recognition and submits, instead of only stopping and landing
+             back on a composer that still needed a second tap on Check. The aria-label/title
+             swap the same way so a screen reader hears "submit" rather than "speak" for the
+             second tap. -->
         <button type="button" class="icon-btn" id="micBtn" aria-label="Speak instead of typing" title="Speak instead of typing" aria-pressed="false">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 003-3V6a3 3 0 10-6 0v6a3 3 0 003 3z" stroke="currentColor" stroke-width="1.6"/><path d="M19 11a7 7 0 01-14 0M12 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         </button>
-        <!-- Shown instead of the input/mic/check trio while recognizer.listening is true —
-             see setListening in app.js. -->
+        <!-- Shown instead of the input/check pair while recognizer.listening is true — see
+             setListening in app.js. micBtn itself stays on screen and in place throughout
+             (it's what stops and submits), so it isn't part of what this replaces. -->
         <div class="listening-wave" id="listeningWave" hidden aria-hidden="true">
           <span></span><span></span><span></span><span></span><span></span>
         </div>
@@ -2257,6 +2411,15 @@
       </button>
     </form>
     <div class="auth-switch" id="accountSwitch"></div>
+    <!-- Esc already closes any <dialog> opened via showModal() — this and a backdrop click
+         (see the accountDialog click listener in app.js) are the other two ways out that
+         don't require actually signing in, which the dialog had neither of before. Last in
+         the DOM on purpose, styled to the top-right corner by `.auth-close-btn`'s own
+         `position: absolute` regardless of source order: showModal() autofocuses the first
+         focusable descendant, and that needs to stay the email field, not this. -->
+    <button type="button" class="auth-close-btn" id="accountCloseBtn" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
   </dialog>
 
   <!-- Ported from the TRASE Design System's SettingsMenu: a nav rail (Profile/General/
@@ -2430,6 +2593,21 @@
       <div class="actions">
         <button type="button" class="secondary" id="link-confirm-cancel">Cancel</button>
         <button type="submit" id="link-confirm-proceed">Check anyway</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Same shape as link-confirm-dialog above, for the one other place this app asks
+       before doing something it can't undo. `#delete-confirm-body` is filled in per entry
+       (see confirmDeleteEntry in app.js) rather than a fixed string, so a reader deleting
+       the wrong row by name has one more chance to notice. -->
+  <dialog class="passphrase" id="delete-confirm-dialog">
+    <form method="dialog" id="delete-confirm-form">
+      <h2>Delete this check?</h2>
+      <p id="delete-confirm-body"></p>
+      <div class="actions">
+        <button type="button" class="secondary" id="delete-confirm-cancel">Cancel</button>
+        <button type="submit" class="danger" id="delete-confirm-proceed">Delete</button>
       </div>
     </form>
   </dialog>

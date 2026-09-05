@@ -116,3 +116,24 @@ export async function pushLibrary(library) {
   const { error } = await client.from("conversations").upsert(rows);
   if (error) console.warn("Cloud sync failed:", error.message);
 }
+
+/**
+ * Removes one conversation from this account's cloud history.
+ *
+ * `pushLibrary`'s upsert is not enough on its own: dropping a row out of the array it's
+ * given only stops that row from being *re-upserted* going forward, it never deletes what
+ * is already there. Row-level security scopes the delete to rows this user owns, same as
+ * every other query here, but the `user_id` match below is not just defense in depth — it
+ * is what keeps a delete fired the instant after a sign-out (`user` already null) from
+ * silently doing nothing instead of throwing.
+ *
+ * Fire-and-forget like `pushLibrary`: the local delete (`deleteEntry` in app.js) already
+ * happened by the time this is called, and a failed cloud delete just means the row comes
+ * back on this account's next `pullLibrary` — annoying, not data loss, since the entry's
+ * own content is unchanged either way.
+ */
+export async function deleteConversation(id) {
+  if (!client || !user) return;
+  const { error } = await client.from("conversations").delete().eq("id", id).eq("user_id", user.id);
+  if (error) console.warn("Cloud delete failed:", error.message);
+}

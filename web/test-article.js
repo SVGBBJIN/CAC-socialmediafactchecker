@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   findArticleLinks,
   fetchArticle,
+  fetchPageTitle,
   resolveArticles,
   describeArticle,
   trimBoilerplate,
@@ -133,6 +134,49 @@ test("fetchArticle sends no cookies and follows redirects by hand", async () => 
     assert.equal(init.redirect, "manual");
     assert.equal(init.credentials, "omit");
   }
+});
+
+/* ---------------------------------------------------------------- fetchPageTitle */
+
+test("fetchPageTitle reads the same <title> fetchArticle does, off one hop-vetted fetch", async () => {
+  const fetchImpl = stubFetch({ "https://news.test/story": page(ARTICLE_HTML) });
+  const result = await fetchPageTitle("https://news.test/story", { fetchImpl, lookupImpl: publicLookup });
+  assert.deepEqual(result, { title: "Coverage fell in 2023", finalURL: "https://news.test/story" });
+});
+
+test("fetchPageTitle is best-effort — a page fetchArticle would refuse still returns null", async () => {
+  // A front page: fetchArticle throws ArticleError({kind: "index"}) for this exact shape
+  // (see looksLikeIndexPage below), but a title is not a claim to check, so fetchPageTitle
+  // has nothing to refuse it over.
+  const indexHTML = `<html><head><title>News Homepage</title></head><body>` +
+    Array.from({ length: 30 }, (_, i) => `<a href="/story-${i}">Story ${i}</a>`).join("") +
+    `</body></html>`;
+  const fetchImpl = stubFetch({ "https://news.test/": page(indexHTML) });
+  const result = await fetchPageTitle("https://news.test/", { fetchImpl, lookupImpl: publicLookup });
+  assert.equal(result.title, "News Homepage", "a front page still has a title worth reporting");
+});
+
+test("fetchPageTitle swallows a real failure instead of throwing", async () => {
+  const fetchImpl = stubFetch({});
+  assert.equal(
+    await fetchPageTitle("http://169.254.169.254/", { fetchImpl, lookupImpl: publicLookup }),
+    null,
+    "the same link fetchArticle rejects with ProbeRefused just comes back null here",
+  );
+  assert.equal(
+    await fetchPageTitle("https://news.test/missing", {
+      fetchImpl: stubFetch({ "https://news.test/missing": page("", { status: 404 }) }),
+      lookupImpl: publicLookup,
+    }),
+    null,
+  );
+});
+
+test("fetchPageTitle returns null for a page with no <title>", async () => {
+  const fetchImpl = stubFetch({
+    "https://news.test/bare": page("<html><body><p>No title tag here.</p></body></html>"),
+  });
+  assert.equal(await fetchPageTitle("https://news.test/bare", { fetchImpl, lookupImpl: publicLookup }), null);
 });
 
 test("fetchArticle gives up rather than chasing a redirect loop", async () => {

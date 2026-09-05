@@ -80,8 +80,17 @@ Two routes run *before* the check and exist to keep the check from repeating the
   arrives at the paste rather than at the end of a run.
 - **`api/resolve-media.js`** — the library UI's video pane needs a real MP4, because neither
   TikTok nor Instagram has an iframe embed that plays for a logged-out visitor. This exposes
-  the same resolve step the check runs internally. YouTube never calls it: a video ID is
-  enough to build an embed URL client-side.
+  the same resolve step the check runs internally. YouTube never calls it for a *video*: a
+  video ID is enough to build an embed URL client-side. It does call this route once for the
+  post's *title* (`lib/youtube.js`, `kind: "title"` branch) — YouTube's oEmbed has no CORS
+  header, so the browser can't ask it directly, and without this the pane named a YouTube
+  post by its pasted URL forever instead of its real title the way TikTok/Instagram posts do.
+  A generic page/article link gets the same `kind: "title"` treatment off
+  `lib/article.js`'s `fetchPageTitle` — a bare call to the same hop-vetted `readPage`
+  `fetchArticle` wraps, skipping its index-page/paywall/reader-fallback judgment since none
+  of that bears on a title. Client-side, `loadLinkTitle` (public/app.js) is the one function
+  behind both branches — the video pane, the composer's follow-up placeholder, and the
+  sidebar row all read off the same `entry.title` it updates via `applyPostTitle`.
 
 That second resolve would otherwise be paid twice — once at intake, once when the user hits
 Check — and a shared cache **cannot** fix it, because `api/chat.js` and `api/resolve-media.js`
