@@ -232,27 +232,22 @@ export function supportsThinkingBudget(model) {
 }
 
 /**
- * Flash 3.7 preferred, then 3.6, 3.5, 3, 2.5, 2 — full models before any Lite one, newest
- * first within each group. `Sources/SeerCore/Gemini/GeminiModel.swift`'s
- * `GeminiModelChain.flashPreferred` predates this chain's Lite tier and the 3.7 model;
- * per CLAUDE.md's freeze policy this is a `web/`-only change and that gap is expected, not
- * a bug — don't port it there.
+ * `gemini-3.5-flash-lite` leads deliberately — this is a cost/speed choice made ahead of
+ * the rest of the chain, not the "full models first, Lite last" ordering this chain used
+ * to follow. Everything after it stays in its prior relative order purely as a fallback
+ * net for 404/403/429/503 on the lead model (see `isFallbackFailure` below); it is not a
+ * ranking of second-choice quality.
  *
- * The three Lite models sit after every full model, not interleaved with same-generation
- * ones (a `3.5-flash-lite` failure doesn't fall through to `3-flash-preview` before
- * `3.6-flash` or `2.5-flash` have both been tried) — they're the cost/speed tier, reached
- * only once every full model has failed or is cooling down, not a first-choice cheaper
- * sibling of any one of them. `gemini-3.1-flash-lite` has no full, non-Lite `3.1` model
- * anywhere in the chain — Lite-only releases happen, and `supportsThinkingBudget` below
- * doesn't care why an ID exists, only what version number is in it.
+ * `Sources/SeerCore/Gemini/GeminiModel.swift`'s `GeminiModelChain.flashPreferred` predates
+ * this chain's Lite tier and the 3.7 model; per CLAUDE.md's freeze policy this is a
+ * `web/`-only change and that gap is expected, not a bug — don't port it there.
  *
- * 3.7 leads rather than trailing behind 2.0 — it is a newer, full-quality model, not a
- * cost tier, and belongs at the front of the chain for the same reason 3.6 did before it
- * shipped. A separate, independent pass at this same chain landed on `main` while this
- * branch was open and appended 3.7 near the Lite models instead, alongside them rather
- * than ahead of the models it supersedes; that ordering was not kept in the merge.
+ * `gemini-3.1-flash-lite` has no full, non-Lite `3.1` model anywhere in the chain —
+ * Lite-only releases happen, and `supportsThinkingBudget` below doesn't care why an ID
+ * exists, only what version number is in it.
  */
 export const DEFAULT_MODEL_CHAIN = [
+  "gemini-3.5-flash-lite",
   "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
@@ -261,7 +256,6 @@ export const DEFAULT_MODEL_CHAIN = [
   "gemini-2.5-flash",
   // The 2-series ID is `2.0`, not `2`.
   "gemini-2.0-flash",
-  "gemini-3.5-flash-lite",
   "gemini-3.1-flash-lite",
   "gemini-2.5-flash-lite",
 ];
