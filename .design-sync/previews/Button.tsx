@@ -1,4 +1,4 @@
-import { Button } from "@seer/design-system";
+import { Button } from "@trase/design-system";
 
 export const Default = () => <Button>Retry</Button>;
 

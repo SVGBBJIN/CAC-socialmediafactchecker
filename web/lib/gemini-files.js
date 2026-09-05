@@ -1,7 +1,5 @@
 // Gemini Files API — for clips too large to ride inline.
 //
-// Mirrors Sources/SeerCore/Gemini/GeminiFilesClient.swift.
-//
 // ## Why not always inline
 //
 // `generateContent` accepts media inline as base64, which is one request and no state —
@@ -127,7 +125,7 @@ export async function uploadFile(
     apiKey,
     fetchImpl = fetch,
     signal,
-    displayName = "seer-clip",
+    displayName = "trase-clip",
     timeoutMs = UPLOAD_TIMEOUT_MS,
     pollIntervalMs = POLL_INTERVAL_MS,
     maxPollIntervalMs = MAX_POLL_INTERVAL_MS,

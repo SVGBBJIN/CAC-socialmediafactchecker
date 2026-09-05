@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Sidebar, LibraryItem } from "@seer/design-system";
+import { Sidebar, LibraryItem } from "@trase/design-system";
 
 export const Default = () => {
   const [search, setSearch] = useState("");

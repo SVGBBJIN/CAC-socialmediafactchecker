@@ -1828,8 +1828,7 @@ test("content types are served for the assets the app actually ships", () => {
 // The embed payload below is **real**. It was captured from
 // `https://www.tiktok.com/embed/v2/6718335390845095173` with an anonymous request; only
 // the signed query strings on the media and cover URLs are shortened, because they
-// expire. It is the same fixture Tests/SeerCoreTests/TikTokDirectFetchTests.swift uses,
-// so the two parsers are held to the same payload.
+// expire.
 //
 // Testing against what TikTok actually serves rather than against a hand-written idea of
 // it is the point: this is an undocumented internal payload, and a fixture invented from

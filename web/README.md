@@ -1,4 +1,4 @@
-# Seer
+# Trase
 
 A fact-checking library UI over Gemini: paste a video link, get claims checked against
 live sources. Static front end in `public/`, one server route in `api/` that holds the

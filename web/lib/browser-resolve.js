@@ -20,10 +20,9 @@
 //
 // ## What this is not
 //
-// It is not screen recording. That path exists in `Sources/SeerCapture` and is dead: it is
-// real-time by construction (a 60s clip costs 60s), it needs a visible surface to record,
-// and ReplayKit's audio tap comes back silent from a web view — see the header on
-// `ScreenRecorderCaptureSource.swift`. The insight that makes a browser worth running here
+// It is not screen recording. That approach is real-time by construction (a 60s clip
+// costs 60s), it needs a visible surface to record, and there is no reliable way to tap
+// audio out of a web view. The insight that makes a browser worth running here
 // is not that it can be *recorded*, it is that it holds a session: cookies, a `Referer`,
 // and a JS runtime that has already executed. Once it has resolved the post, the CDN URL it
 // found is fetchable by an ordinary anonymous request — that is the same property the whole

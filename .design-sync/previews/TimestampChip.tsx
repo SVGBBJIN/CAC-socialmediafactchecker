@@ -1,4 +1,4 @@
-import { TimestampChip } from "@seer/design-system";
+import { TimestampChip } from "@trase/design-system";
 
 export const Default = () => <TimestampChip label="0:12" />;
 export const Playing = () => <TimestampChip label="0:12-0:18" playing />;
