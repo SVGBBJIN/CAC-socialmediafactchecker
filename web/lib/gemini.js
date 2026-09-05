@@ -249,6 +249,7 @@ export function supportsThinkingBudget(model) {
  * than ahead of the models it supersedes; that ordering was not kept in the merge.
  */
 export const DEFAULT_MODEL_CHAIN = [
+  "gemini-3.5-flash-lite",
   "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
@@ -257,7 +258,6 @@ export const DEFAULT_MODEL_CHAIN = [
   "gemini-2.5-flash",
   // The 2-series ID is `2.0`, not `2`.
   "gemini-2.0-flash",
-  "gemini-3.5-flash-lite",
   "gemini-3.1-flash-lite",
   "gemini-2.5-flash-lite",
 ];

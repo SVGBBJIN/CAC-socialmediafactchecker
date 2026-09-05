@@ -400,10 +400,10 @@ undownloadable clip is, and the turn proceeds from the link and the searches.
 npm test                              # unit tests, no network, no dependencies
 ```
 
-`lib/gemini.js`'s chain — Flash 3.7, then 3.6, 3.5, 3-preview, 2.5, 2.0, then the Lite tier
-(3.5-flash-lite, 3.1-flash-lite, 2.5-flash-lite) once every full model above has failed.
-Model IDs get retired and key tiers differ; pinning one ID breaks in the field. See the
-comments on `DEFAULT_MODEL_CHAIN` for the full reasoning.
+`lib/gemini.js`'s chain — 3.5-flash-lite leads (a deliberate cost/speed choice), then Flash
+3.7, 3.6, 3.5, 3-preview, 2.5, 2.0, then the remaining Lite tier (3.1-flash-lite,
+2.5-flash-lite) as fallback. Model IDs get retired and key tiers differ; pinning one ID
+breaks in the field. See the comments on `DEFAULT_MODEL_CHAIN` for the full reasoning.
 
 ## Graceful degradation
 
