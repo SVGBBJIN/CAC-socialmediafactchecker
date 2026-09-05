@@ -1671,9 +1671,26 @@
   .image-chip button:hover { color: var(--bad); }
 
   /* ---------- Rich markdown ---------- */
-  .claim-text ul, .claim-text ol { margin: 0 0 12px; padding-left: 22px; }
-  .claim-text li { margin: 4px 0; }
-  .claim-text li > p { margin: 0; display: inline; }
+  /* Paragraphs are real `<p>`s now (renderBlocks in app.js) rather than a run of text and
+     `<br>`s, so the gap between two paragraphs is one margin instead of a blank line's
+     worth of leading — and the last one carries no trailing gap into whatever follows. */
+  .claim-text p { margin: 0 0 12px; }
+  .claim-text > :last-child { margin-bottom: 0; }
+
+  /* Every list item gets a row to itself and a marker that lines up with the one above it.
+     `padding-left` in `em` keeps that indent proportional when a reader turns text size up
+     — a fixed 22px indent stops looking like an indent at 19px type. `list-style-position:
+     outside` (the default, stated here so it survives a reset) is what makes a wrapped
+     second line align with the first rather than sliding back under the bullet. */
+  .claim-text ul, .claim-text ol {
+    margin: 0 0 12px; padding-left: 1.4em; list-style-position: outside;
+  }
+  .claim-text li { margin: 5px 0; padding-left: 0.15em; }
+  .claim-text li::marker { color: var(--muted); }
+  /* A sub-list belongs *under* its parent item, tight against it — the parent's own 5px
+     bottom margin would otherwise stack with the list's 12px and open a hole mid-list. */
+  .claim-text li > ul, .claim-text li > ol { margin: 4px 0 0; }
+  .claim-text li > :last-child { margin-bottom: 0; }
   .claim-text em { color: var(--ink-dim); }
   .claim-text h4 { font-family: var(--font-display); font-size: 1.05em; margin: 14px 0 6px; color: var(--ink); }
   .claim-text blockquote {
@@ -1692,8 +1709,9 @@
      than its cell either. `[data-font-size="large"]` still wins over this: it's declared
      later in the file, so a reader who has asked for bigger text gets it here too. */
   .claim-pane .claim-text { font-size: 14.5px; line-height: 1.5; word-break: break-word; }
-  .claim-pane .claim-text ul, .claim-pane .claim-text ol { margin: 0 0 8px; padding-left: 18px; }
-  .claim-pane .claim-text li { margin: 2px 0; }
+  .claim-pane .claim-text p { margin: 0 0 8px; }
+  .claim-pane .claim-text ul, .claim-pane .claim-text ol { margin: 0 0 8px; padding-left: 1.2em; }
+  .claim-pane .claim-text li { margin: 3px 0; }
   .claim-pane .claim-text h4 { font-size: 1em; margin: 10px 0 4px; }
   .claim-pane .claim-text blockquote { margin: 6px 0; padding: 3px 0 3px 10px; }
   .claim-pane .claim-text pre { font-size: 0.75em; padding: 8px; }
@@ -2186,7 +2204,10 @@
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </div>
-      <button type="button" class="new-check" id="newCheckBtn">
+      <!-- `aria-label`/`title` as well as the visible label: `[data-sidebar="collapsed"]`
+           hides `.new-check-label`, and without them the collapsed rail's plus icon
+           announces as an unnamed button — the one control in that rail that did. -->
+      <button type="button" class="new-check" id="newCheckBtn" aria-label="New check" title="New check">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="new-check-label">New check</span>
       </button>
@@ -2357,9 +2378,13 @@
     </div>
   </div>
 
-  <dialog class="passphrase" id="passphrase-dialog">
+  <!-- `aria-labelledby` on each `<dialog>`: `showModal()` handles the modal semantics and
+       Escape natively, but the name is ours to give — without one a screen reader opens
+       these announcing nothing but "dialog". Every one of them already has the heading to
+       point at, except Settings, whose heading lives in its nav rail. -->
+  <dialog class="passphrase" id="passphrase-dialog" aria-labelledby="passphrase-heading">
     <form method="dialog" id="passphrase-form">
-      <h2>Passphrase required</h2>
+      <h2 id="passphrase-heading">Passphrase required</h2>
       <p>This instance is gated so it doesn't burn quota for strangers.</p>
       <input type="password" id="passphrase-input" aria-label="Passphrase" placeholder="Passphrase" autocomplete="current-password" />
       <button type="submit">Unlock</button>
@@ -2375,7 +2400,7 @@
        "Sign in" button. The DS screen's own mode switch is a signin/signup React state
        flag driving its headline, submit label and the link row at the bottom; setAccountMode
        (app.js) is the same idea against this markup, with `accountMode` as that flag. -->
-  <dialog class="passphrase auth-card" id="account-dialog">
+  <dialog class="passphrase auth-card" id="account-dialog" aria-labelledby="accountHeading">
     <span class="auth-mark">
       <svg viewBox="0 0 64 64" fill="none">
         <circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
@@ -2427,7 +2452,7 @@
        single long scrolling page this used to be. Profile is the DS's own first tab — see
        setSettingsTab/renderAccountUI in app.js for the tab-switching and signed-in-state
        wiring, and the account-dialog above for what "Sign in" on this tab opens. -->
-  <dialog class="settings-page" id="settings-dialog">
+  <dialog class="settings-page" id="settings-dialog" aria-label="Settings">
     <form method="dialog" id="settings-form" class="settings-shell">
       <nav class="settings-nav">
         <div class="settings-nav-head">
@@ -2582,7 +2607,7 @@
   }
 </style>
 
-  <dialog class="passphrase" id="link-confirm-dialog">
+  <dialog class="passphrase" id="link-confirm-dialog" aria-labelledby="link-confirm-title">
     <form method="dialog" id="link-confirm-form">
       <h2 id="link-confirm-title">Can't confirm this link</h2>
       <p id="link-confirm-body"></p>
@@ -2601,9 +2626,9 @@
        before doing something it can't undo. `#delete-confirm-body` is filled in per entry
        (see confirmDeleteEntry in app.js) rather than a fixed string, so a reader deleting
        the wrong row by name has one more chance to notice. -->
-  <dialog class="passphrase" id="delete-confirm-dialog">
+  <dialog class="passphrase" id="delete-confirm-dialog" aria-labelledby="delete-confirm-heading">
     <form method="dialog" id="delete-confirm-form">
-      <h2>Delete this check?</h2>
+      <h2 id="delete-confirm-heading">Delete this check?</h2>
       <p id="delete-confirm-body"></p>
       <div class="actions">
         <button type="button" class="secondary" id="delete-confirm-cancel">Cancel</button>

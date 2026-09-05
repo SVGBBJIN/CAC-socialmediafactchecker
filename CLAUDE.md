@@ -30,8 +30,9 @@ Node 20+ stdlib. To run a single test file directly: `node --test test-search.js
 see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
-test-timestamps.js test-claims.js test-corroboration.js test-caption-search.js
-test-page-shapes.js`). As of this writing the whole suite is 574 tests; `worker/`'s is 5.
+test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
+test-caption-search.js test-page-shapes.js test-supabase-config.js test-youtube.js`). As of
+this writing the whole suite is 607 tests; `worker/`'s is 5.
 
 `test-page-shapes.js` is the one suite backed by files rather than inline HTML: `web/fixtures/`
 holds one page per *shape* (front page, story, paywalled, JS shell, AMP copy, link-heavy
@@ -163,6 +164,19 @@ This is **not** the sentence-level claim detection torn out above, and the disti
 the same one the claim-marker section below draws: it reads metadata the platform handed us
 rather than guessing at prose, it never rejects or rewrites an answer, and a bad guess costs
 one query that `cleanCitations` then drops from the source list.
+
+**An answer's block structure is parsed, not guessed at with `<br>`s.** `public/markdown.js`
+(`parseBlocks`) turns the model's text into blocks — paragraph, heading, blockquote, fenced
+code, and lists that nest — and `renderBlocks` in `public/app.js` turns those into HTML,
+because only app.js knows the source ledger and whether the video pane can be seeked. The
+split is what makes the shape half testable in Node with no browser (`test-markdown.js`),
+the same way `claims.js`, `timestamps.js` and `device.js` are pure. What it buys over the
+line-at-a-time renderer it replaced: a `•` bullet is a bullet (the model does not always
+write `- `), indentation nests instead of flattening, a wrapped line under a bullet stays in
+that bullet, and a blank line between two items no longer splits one list into two. Inline
+spans are still app.js's `renderInline`, which lifts code spans out before the bold/italic
+and `[n]`/`[t=…]` passes run — a code span is the one place in a line meant to be read
+literally.
 
 **Timestamps are a separate marker from citations, and they point at the post, not at a
 source.** On a video check the model is asked to write `[t=M:SS]` (or `[t=M:SS-M:SS]`) after

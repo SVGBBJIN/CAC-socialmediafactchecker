@@ -25,6 +25,7 @@ import {
   timeline,
   activeAt,
 } from "./timestamps.js";
+import { parseBlocks } from "./markdown.js";
 import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 
@@ -1051,101 +1052,74 @@ function linkTimestamps(html, seekable) {
  * Order matters — bold is matched before italic so a `**bold**` pair never leaves a stray
  * `*` for the italic pass to misfire on, and the two marker passes run last since `[n]` and
  * `[t=…]` can sit inside any of the above. The marker passes can't collide with each other:
- * one matches digits alone, the other only a `t=` clock. */
+ * one matches digits alone, the other only a `t=` clock.
+ *
+ * Code spans are lifted out before any of that and put back after, because every later pass
+ * used to run straight through them: `` `2 * 3 * 4` `` came back with an `<em>` inside it,
+ * `` `**kwargs` `` came back bold, and a `[3]` in a code sample came back as a link into a
+ * source ledger it had nothing to do with. A code span is the one place in a line whose
+ * content is meant to be taken literally, so it is the one place none of these passes may
+ * reach. The placeholder is a private-use character: it can't appear in escaped HTML, so
+ * nothing else in the line can be mistaken for one. */
+const CODE_SLOT = "\uE000";
 function renderInline(text, sources, seekable) {
-  return linkCitations(
+  const codes = [];
+  const withSlots = escapeHTML(text).replace(/`([^`\n]+)`/g, (_, body) => {
+    codes.push(`<code>${body}</code>`);
+    return `${CODE_SLOT}${codes.length - 1}${CODE_SLOT}`;
+  });
+  const html = linkCitations(
     linkTimestamps(
-      escapeHTML(text)
-        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      withSlots
         .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
         .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>"),
       seekable,
     ),
     sources,
   );
+  return html.replace(new RegExp(`${CODE_SLOT}(\\d+)${CODE_SLOT}`, "g"), (match, i) => codes[Number(i)] ?? match);
 }
 
 /**
- * One non-code segment of an answer, as block-level HTML.
+ * A parsed block (see markdown.js) as HTML.
  *
- * The model is asked (see citations.js's `describe`) to format multi-part claims as
- * bullets with bold labels, but until now nothing on the way to the screen understood a
- * `- ` line as a list item — it became one plain-text line with a literal dash, indistinct
- * from the sentence above and below it. This turns consecutive `-`/`*`/`1.` lines into a
- * real `<ul>`/`<ol>`, `#`-prefixed lines into a small heading, and `> ` lines into a
- * blockquote, while leaving ordinary prose exactly as it rendered before.
+ * markdown.js decides the shape — what is a list, what nests inside what — and this
+ * decides what that shape looks like, because only app.js knows the source ledger and
+ * whether the video pane can be seeked. Lists render as real `<ul>`/`<ol>`, nested lists
+ * as a child of the `<li>` they belong to (never a sibling, which is what made a
+ * sub-bullet line up with its parent instead of under it).
  */
-function renderBlock(text, sources, seekable) {
-  const lines = text.split("\n");
-  const html = [];
-  let list = null; // { tag: "ul" | "ol", items: string[] }
-  let para = [];
-
-  const flushPara = () => {
-    if (para.length === 0) return;
-    html.push(renderInline(para.join("\n"), sources, seekable).replace(/\n/g, "<br>"));
-    para = [];
-  };
-  const flushList = () => {
-    if (!list) return;
-    html.push(
-      `<${list.tag}>${list.items.map((item) => `<li>${renderInline(item, sources, seekable)}</li>`).join("")}</${list.tag}>`,
-    );
-    list = null;
-  };
-
-  for (const line of lines) {
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-    if (bullet || numbered) {
-      flushPara();
-      const tag = bullet ? "ul" : "ol";
-      if (!list || list.tag !== tag) {
-        flushList();
-        list = { tag, items: [] };
+function renderBlocks(blocks, sources, seekable) {
+  return blocks
+    .map((block) => {
+      switch (block.type) {
+        case "code":
+          return `<pre><code>${escapeHTML(block.text)}</code></pre>`;
+        case "heading":
+          return `<h4>${renderInline(block.text, sources, seekable)}</h4>`;
+        case "quote":
+          return `<blockquote>${renderInline(block.text, sources, seekable).replace(/\n/g, "<br>")}</blockquote>`;
+        case "list": {
+          const open =
+            block.tag === "ol" && block.start > 1 ? `<ol start="${block.start}">` : `<${block.tag}>`;
+          const items = block.items
+            .map(
+              (item) =>
+                `<li>${renderInline(item.text, sources, seekable)}` +
+                `${renderBlocks(item.blocks, sources, seekable)}</li>`,
+            )
+            .join("");
+          return `${open}${items}</${block.tag}>`;
+        }
+        default:
+          return `<p>${renderInline(block.text, sources, seekable).replace(/\n/g, "<br>")}</p>`;
       }
-      list.items.push((bullet ?? numbered)[1]);
-      continue;
-    }
-    flushList();
-
-    const header = /^#{1,4}\s+(.*)$/.exec(line);
-    if (header) {
-      flushPara();
-      html.push(`<h4>${renderInline(header[1], sources, seekable)}</h4>`);
-      continue;
-    }
-    const quote = /^>\s?(.*)$/.exec(line);
-    if (quote) {
-      flushPara();
-      html.push(`<blockquote>${renderInline(quote[1], sources, seekable)}</blockquote>`);
-      continue;
-    }
-    if (line.trim() === "") {
-      flushPara();
-      continue;
-    }
-    para.push(line);
-  }
-  flushPara();
-  flushList();
-  return html.join("");
+    })
+    .join("");
 }
 
 function renderMarkdown(text, sources, seekable = false) {
-  const segments = text.split(/```/);
-  return segments
-    .map((segment, index) => {
-      if (index % 2 === 1) {
-        const body = segment.replace(/^[a-zA-Z0-9-]*\n/, "").replace(/\n$/, "");
-        return `<pre><code>${escapeHTML(body)}</code></pre>`;
-      }
-      let plain = segment;
-      if (index > 0) plain = plain.replace(/^\n+/, "");
-      if (index < segments.length - 1) plain = plain.replace(/\n+$/, "");
-      return renderBlock(plain, sources, seekable);
-    })
-    .join("");
+  return renderBlocks(parseBlocks(text), sources, seekable);
 }
 
 /**
@@ -1526,6 +1500,11 @@ function renderLibrary(filter = "") {
     const title = document.createElement("div");
     title.className = "lib-title";
     title.textContent = entry.title;
+    // The row is ~200px wide and the CSS ellipsis takes whatever doesn't fit, so a long
+    // headline arrives on screen as "The chancellor said the…" with no way to read the
+    // rest. The delete button beside it has carried the full title in its `aria-label`
+    // since it was added; this is the same courtesy for a pointer.
+    title.title = entry.title;
     const sub = document.createElement("div");
     sub.className = "lib-sub";
     const dot = document.createElement("span");
@@ -4426,12 +4405,34 @@ el.drawerToggle.addEventListener("click", () => {
 });
 el.drawerScrim.addEventListener("click", () => closeDrawer());
 
+/** Whether a keystroke is already being typed into something, in which case a bare-letter
+ * shortcut must not steal it. `isContentEditable` covers the case a `tagName` check misses. */
+function isTypingTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
 document.addEventListener("keydown", (event) => {
   // Escape closes the drawer, the same way it closes the <dialog>s. Dialogs handle their
   // own Escape natively and stop here only because an open one is not the drawer.
   if (event.key === "Escape" && isDrawerOpen()) {
     event.preventDefault();
     closeDrawer();
+    return;
+  }
+
+  // Everything in this app starts by pasting into one field, and after reading an answer
+  // the reader is nowhere near it: on a long result the composer is a scroll and a click
+  // away, and on a phone the drawer may be over it. `/` is the bare-key shortcut readers
+  // expect for "jump to the input" and ⌘K/Ctrl-K the chorded one; both land on the same
+  // field. Skipped while a dialog is open (its own field owns the keyboard then) and while
+  // anything is already being typed into, so `/` stays a slash inside a URL.
+  const focusKey = event.key === "/" || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k");
+  if (focusKey && !event.altKey && !isTypingTarget(event.target) && !document.querySelector("dialog[open]")) {
+    event.preventDefault();
+    closeDrawer({ restoreFocus: false });
+    el.linkInput.focus();
+    el.linkInput.select();
   }
 });
 
