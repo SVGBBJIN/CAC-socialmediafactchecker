@@ -6,7 +6,7 @@
   "description": "Fact-checking library UI for Seer. Static front end, Gemini called from a server-side route that holds the key.",
   "scripts": {
     "dev": "node server.js",
-    "test": "node --test test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js test-article.js test-browser-resolve.js test-post-preview.js test-device.js test-timestamps.js test-claims.js test-corroboration.js test-caption-search.js test-page-shapes.js test-supabase-config.js",
+    "test": "node --test test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js test-article.js test-browser-resolve.js test-post-preview.js test-device.js test-timestamps.js test-claims.js test-corroboration.js test-caption-search.js test-page-shapes.js test-supabase-config.js test-youtube.js",
     "search": "node bin/search.mjs",
     "find": "node bin/find.mjs"
   },

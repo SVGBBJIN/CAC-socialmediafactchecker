@@ -2223,6 +2223,38 @@ function renderVideoPane(entry) {
     const aspect = youTubeAspectRatio(entry.url);
     mediaCache.set(entry.id, { kind: "youtube", videoID, aspect });
     showYouTubeEmbed(videoID, aspect);
+    loadYouTubeTitle(entry, token);
+  }
+}
+
+/**
+ * YouTube's video needs no round trip (see `renderVideoPane`'s embed branch above), but its
+ * *title* does: the pane otherwise names the post by the pasted URL forever, the one thing
+ * TikTok/Instagram posts don't do once `loadDirectMedia` resolves. One oEmbed request
+ * (`/api/resolve-media`'s `kind: "title"` branch — the browser can't ask YouTube directly,
+ * no CORS header on that endpoint) is all it takes.
+ *
+ * `youtubeTitleFetched` is a fire-once guard, not a cache of the result: unlike
+ * `mediaCache`, there is nothing to show from a cached title on a later render — it's
+ * already been applied to `entry.title` itself (see `applyPostTitle`), so a re-render just
+ * reads that. This only exists to stop a pane the reader flips back to re-requesting a
+ * title it already has.
+ */
+const youtubeTitleFetched = new Set();
+async function loadYouTubeTitle(entry, token) {
+  if (youtubeTitleFetched.has(entry.id)) return;
+  youtubeTitleFetched.add(entry.id);
+  try {
+    const response = await fetch("/api/resolve-media", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ url: entry.url }),
+    });
+    if (!response.ok) return; // Pane keeps showing the pasted URL — not fatal to the check.
+    const { title, authorName } = await response.json();
+    applyPostTitle(entry, title ?? (authorName ? `A video by ${authorName}` : null), token);
+  } catch {
+    // Network hiccup or the passphrase dialog intercepting — same as loadDirectMedia.
   }
 }
 
