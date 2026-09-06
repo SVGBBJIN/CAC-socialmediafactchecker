@@ -70,6 +70,9 @@ function youTubeVideoID(urlString) {
 
 const el = {
   contentGrid: document.getElementById("contentGrid"),
+  shellTopbar: document.getElementById("shellTopbar"),
+  shellTitle: document.getElementById("shellTitle"),
+  shellSub: document.getElementById("shellSub"),
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
   newCheckBtn: document.getElementById("newCheckBtn"),
@@ -1469,6 +1472,9 @@ el.claimsScrollHint.addEventListener("click", () => {
 /* ---------------------------------------------------------------- sidebar */
 
 function renderLibrary(filter = "") {
+  // The open check's own title and status live in the shell title bar too, and both change
+  // under a running check without the selection ever changing — see `updateShellTopbar`.
+  updateShellTopbar();
   el.libList.replaceChildren();
   const needle = filter.trim().toLowerCase();
   const visible = needle ? library.filter((e) => e.title.toLowerCase().includes(needle)) : library;
@@ -1642,6 +1648,53 @@ function statusLabel(entry) {
 function updatePaneMode() {
   const entry = selectedId ? findEntry(selectedId) : null;
   el.contentGrid.classList.toggle("single-pane", !entry || !entry.url);
+  updateShellTopbar(entry);
+}
+
+/**
+ * The desktop shell's title bar — which check is open, on which platform, and how long ago
+ * (see `.shell-topbar` in index.html, ported from the TRASE Design System's "App shell"
+ * screen). Hidden outright when nothing is selected rather than left standing with an empty
+ * title: an empty bar is a layout element that says nothing, and the state it would be
+ * saying it in is the one the design system draws as a single card and no chrome at all.
+ *
+ * Driven off `updatePaneMode`, which every place `selectedId` can change already calls, plus
+ * `renderLibrary` — the entry's own title and status change under a *running* check without
+ * the selection changing at all (`applyPostTitle` naming the post, the verdict landing), and
+ * a library re-render is what every one of those already ends with.
+ */
+function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
+  if (!entry) {
+    el.shellTopbar.hidden = true;
+    el.shellTitle.textContent = "";
+    el.shellSub.textContent = "";
+    return;
+  }
+  el.shellTopbar.hidden = false;
+  el.shellTitle.textContent = entry.title;
+  // The full title as a tooltip, same courtesy `.lib-title` gets: this line ellipsises too.
+  el.shellTitle.title = entry.title;
+  const when = entry.status === "running" ? "checking now" : `checked ${relativeTime(entry.createdAt)}`;
+  // A saved link-less conversation has no platform to name and was never "checked" —
+  // `statusLabel` calls it "3 messages", which is the whole of what there is to say.
+  el.shellSub.textContent = entry.url ? `${entry.platform} · ${when}` : statusLabel(entry);
+}
+
+/**
+ * "2 minutes ago", for the shell title bar's subtitle. Coarse on purpose — the bar says
+ * roughly how stale a verdict is, and a check finished 40 seconds ago and one finished 20
+ * are the same answer to that question. Anything older than a day is given as a date, since
+ * "9 days ago" is harder to place than the day itself.
+ */
+function relativeTime(timestamp) {
+  if (!timestamp) return "earlier";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return `on ${new Date(timestamp).toLocaleDateString()}`;
 }
 
 /**
@@ -1839,7 +1892,12 @@ function renderChatPane({ newest = -1 } = {}) {
 
   setClaimsGridMode(null);
   if (!settled && !pending) {
-    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><p class="claim-empty-text">Paste a link or ask a question to get started.</p></div>`;
+    // The TRASE Design System's "App shell — Analyzing" screen, which is what this app looks
+    // like before anything has been pasted: no video column (see `updatePaneMode`), one card
+    // filling the pane, and in it the settled iris with the invitation over it.
+    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><div class="card-loading"><div class="empty-stack">${irisMarkup(
+      { resolved: true },
+    )}<p class="claim-empty-text">State your claim. We&rsquo;ll verify it.</p></div></div></div>`;
     return;
   }
   el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
@@ -2492,9 +2550,15 @@ function revealPlayer() {
 
 /* ---------------------------------------------------------------- claim card */
 
-function irisMarkup() {
+/**
+ * The busy mark. `resolved: true` hands back the same iris in its settled state — blades
+ * stopped and dimmed, seal check drawn — which is what the empty card holds behind its one
+ * line (see `renderChatPane`'s empty branch) and what `resolveIris` switches the running
+ * card's own iris to when a turn finishes.
+ */
+function irisMarkup({ resolved = false } = {}) {
   return `
-    <div class="iris-wrap" aria-hidden="true">
+    <div class="iris-wrap${resolved ? " resolved" : ""}" aria-hidden="true">
       <svg viewBox="0 0 100 100">
         <g>
           <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
