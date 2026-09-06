@@ -1897,7 +1897,7 @@ function renderChatPane({ newest = -1 } = {}) {
     // filling the pane, and in it the settled iris with the invitation over it.
     el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><div class="card-loading"><div class="empty-stack">${irisMarkup(
       { resolved: true },
-    )}<p class="claim-empty-text">State your claim. We&rsquo;ll verify it.</p></div></div></div>`;
+    )}<p class="claim-empty-text">Paste a link or ask a question to get started.</p></div></div></div>`;
     return;
   }
   el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;

@@ -20,8 +20,9 @@
   --warn: #D6A84A;
   --bad: #C1594F;
 
-  /* One grotesque in both roles, differentiated by weight rather than a serif/sans split. */
-  --font-display: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  /* Body and mono are the design system's own faces; display keeps the product's serif —
+     the deliberate divergence documented in web/public/index.html's token block. */
+  --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
   --font-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
