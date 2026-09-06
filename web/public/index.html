@@ -168,24 +168,26 @@
     .sidebar-collapse-btn { display: none; }
   }
 
+  /* The sidebar's one filled control, matching the composer's submit button — the design
+     system gives both the same accent→violet gradient, so the two ends of "start a check"
+     look like the same action. Everything else in this column stays outlined. */
   .new-check {
     display: flex; align-items: center; gap: 8px;
     width: 100%;
     padding: 10px 12px;
     margin-bottom: 12px;
     border-radius: 9px;
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    color: var(--ink);
+    border: 1px solid transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #06201d;
     font-family: var(--font-body);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
   }
-  .new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
-  .new-check:hover { border-color: var(--accent); color: var(--accent); }
-  .new-check:hover svg { color: var(--accent); }
-  .new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: #06201d; }
+  .new-check:hover { filter: brightness(1.08); }
+  .new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .new-check:disabled { opacity: 0.5; cursor: default; }
 
   .search {
@@ -265,7 +267,15 @@
   }
   [data-motion="reduced"] .lib-item { animation: none; opacity: 1; }
   .lib-item:hover { background: var(--surface-raised); }
-  .lib-item.active { background: var(--surface-raised); }
+  .lib-item:active { background: var(--surface-raised); transform: scale(0.99); }
+  /* The open check, from the DS's Sidebar: an accent wash that fades out across the row
+     plus a solid bar down its leading edge. It used to be the same flat `--surface-raised`
+     as :hover, which meant the row under the pointer and the row actually being read were
+     indistinguishable — the one thing this state exists to say. */
+  .lib-item.active {
+    background: linear-gradient(90deg, color-mix(in oklab, var(--accent) 16%, transparent), color-mix(in oklab, var(--accent) 3%, transparent));
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
   .lib-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* The history row's icon tile. It holds either the site's own favicon or the fallback
@@ -337,11 +347,39 @@
     border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
+  /* Desktop/tablet: the composer is a raised card floating clear of the pane's edges — the
+     TRASE Design System's EntryBar — rather than a bar welded to the bottom of the window
+     by a hairline. The phone breakpoint further down deliberately keeps the welded
+     treatment: there the composer is the bottom edge of a full-bleed sheet drawn over the
+     video, and a card floating clear of the edge would leave a 20px strip of moving video
+     showing under it. */
+  @media (min-width: 701px) {
+    .entry-bar {
+      margin: 0 24px 20px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface-raised);
+      box-shadow: 0 12px 28px rgba(0,0,0,0.22), inset 0 1px 0 rgba(240,237,230,0.04);
+      transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    }
+    /* The whole card takes the focus ring, not just the input inside it: with the input's
+       own border set to transparent below, a focused composer would otherwise be marked
+       only by the browser's outline on a box that no longer has an edge of its own. */
+    .entry-bar:focus-within {
+      border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+      box-shadow: 0 14px 32px rgba(0,0,0,0.26), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
+    }
+  }
   .entry-bar input {
     flex: 1;
+    min-width: 120px;
     padding: 11px 14px;
     border-radius: 9px;
-    border: 1px solid var(--border);
+    /* Transparent rather than `--border`: inside the raised card above, a bordered field on
+       a bordered card reads as two boxes. The field is still separated from the card by its
+       darker `--surface` fill, and `:focus-within` on the card carries the focus state. */
+    border: 1px solid transparent;
     background: var(--surface);
     color: var(--ink);
     font-family: var(--font-body);
@@ -355,22 +393,30 @@
      everywhere. The label moves to `aria-label`/title (kept live by updateComposerMode in
      app.js) so "Ask" vs. "Check" is still announced to screen readers even though it's no
      longer painted on screen. */
-  .entry-bar button {
+  /* `#checkBtn` by id, not `.entry-bar button` as it used to be: the mic and + buttons are
+     inside this same row, and a bare descendant selector outranked `.icon-btn`'s own single
+     class — so the accent fill meant for the one submit button was landing on all three.
+     They now differ in kind as well as degree, the DS's submit button being the only
+     gradient-filled control in the composer, so the collision had to be resolved rather
+     than inherited. */
+  .entry-bar #checkBtn {
     flex: 0 0 auto; width: 42px; padding: 0;
     display: flex; align-items: center; justify-content: center;
     border-radius: 9px;
-    border: 1px solid var(--accent);
-    background: rgba(79,209,197,0.12);
-    color: var(--accent);
+    border: 1px solid transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #06201d;
     font-family: var(--font-body);
     font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
   }
-  .entry-bar button:hover { background: rgba(79,209,197,0.2); }
+  .entry-bar #checkBtn:hover { filter: brightness(1.08); }
   .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .entry-bar button:disabled { opacity: 0.5; cursor: default; }
-  .check-btn-icon { display: block; width: 18px; height: 18px; }
+  /* Dark ink on the gradient, the one place in the app where text sits *on* the accent
+     rather than in it — `currentColor` on the glyph would otherwise inherit teal on teal. */
+  .check-btn-icon { display: block; width: 18px; height: 18px; color: #06201d; }
   .check-btn-label {
     position: absolute; width: 1px; height: 1px;
     overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
@@ -815,9 +861,27 @@
     transition: transform 0.12s ease-out;
     will-change: transform;
   }
+  /* The DS's ClaimCard gives *every* card a `card-in` scale/translate entrance. Here it is
+     scoped to the empty card alone, and that is deliberate: in this app a `.claim-card` is
+     also a `.claim-pane` in the claims grid (see `claimPanesHTML`), and those boxes are torn
+     down and rebuilt on every streamed claim while `flipClaimsPane` animates `transform` on
+     them through the Web Animations API. A CSS entrance on the same property would fight it
+     for the same reason the note on `.claim-grid-loading .claim-pane.in` gives, and would
+     replay from the top on every rebuild — a flicker per claim, not an arrival. The empty
+     card is the one variant that mounts once and then just sits there. */
+  .claim-card.claim-empty {
+    opacity: 0;
+    animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
+  }
+  @keyframes card-in {
+    from { opacity: 0; transform: scale(0.97) translateY(8px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+  }
   @media (prefers-reduced-motion: reduce) {
     .claim-card { transition: none; }
+    .claim-card.claim-empty { animation: none; opacity: 1; }
   }
+  [data-motion="reduced"] .claim-card.claim-empty { animation: none; opacity: 1; }
   /* The soft violet highlight that follows the pointer during the tilt above — positioned
      by `handleCardTilt` setting a `radial-gradient(...)` background inline, centered on the
      cursor. Sits as the card's first child (see `tiltGlare` in app.js) so it paints under
@@ -1081,15 +1145,19 @@
      is a chip with a play triangle in it rather than accent-coloured text. */
   .ts-chip {
     display: inline-flex; align-items: center; gap: 3px; vertical-align: baseline;
-    margin: 0 1px 0 3px; padding: 1px 6px 1px 5px;
-    border: 1px solid rgba(255,255,255,0.14); border-radius: 999px;
-    background: var(--surface-raised); color: var(--ink-dim);
+    margin: 0 1px 0 3px; padding: 1px 7px 1px 5px;
+    /* Accent-tinted at rest, from the DS's TimestampChip. The chip shape and its play
+       triangle are still what keep it from reading as a citation (see the note above);
+       neutral-on-raised had it reading as decoration instead, which is the other way to
+       lose a control. */
+    border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); border-radius: 999px;
+    background: color-mix(in oklab, var(--accent) 10%, transparent); color: var(--accent);
     font-family: var(--font-mono); font-size: 0.72em; line-height: 1.5;
     font-variant-numeric: tabular-nums; white-space: nowrap;
     cursor: pointer; transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
   }
   .ts-chip svg { width: 0.8em; height: 0.8em; flex: none; opacity: 0.75; }
-  .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: rgba(79,209,197,0.12); }
+  .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
   .ts-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* The claim the playhead is inside right now — see `syncPlayhead`. Filled rather than
      outlined so the eye finds it while the video is running and the text is not being read
@@ -1105,8 +1173,13 @@
   .ts-chip.playing svg { opacity: 1; }
   /* Clicked with no player behind it (the CDN link never resolved). Stays legible — the
      timestamp is still true — but stops advertising itself as something that will play. */
-  .ts-chip.dead { cursor: default; opacity: 0.5; }
-  .ts-chip.dead:hover { color: var(--ink-dim); border-color: rgba(255,255,255,0.14); background: var(--surface-raised); }
+  /* Neutral, unlike every other state above: a chip with nothing behind it should stop
+     looking like the accent-tinted control the others are. */
+  .ts-chip.dead {
+    cursor: default; opacity: 0.5;
+    color: var(--ink-dim); border-color: var(--border); background: var(--surface-raised);
+  }
+  .ts-chip.dead:hover { color: var(--ink-dim); border-color: var(--border); background: var(--surface-raised); }
   /* A page or a photo post: rendered by `linkTimestamps` as plain text, never a button. */
   .ts-chip.static { cursor: default; opacity: 0.7; }
 
@@ -1134,7 +1207,10 @@
   .badge {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 6px 12px 6px 9px; border-radius: 100px;
-    font-size: 12px; font-weight: 600;
+    /* Uppercase and tracked, per the DS's VerdictBadge — a verdict is a stamp, and at
+     sentence case in the middle of a card it read as one more label. */
+    font-size: 11.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.03em;
     opacity: 0; transform: scale(0.5) rotate(-6deg);
   }
   .badge-icon {
@@ -1635,10 +1711,15 @@
 
   /* ---------- Entry bar extras: mic, plus, image chip ---------- */
   .entry-bar { flex-wrap: wrap; }
+  /* `padding: 0` is load-bearing now that `#checkBtn` carries the composer's button styling
+     alone (see `.entry-bar #checkBtn`): these used to inherit it from the `.entry-bar button`
+     rule that no longer exists, and without it the UA's own button padding pushes the glyph
+     off-centre in a fixed-width box. */
   .icon-btn {
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    width: 42px; border-radius: 9px; border: 1px solid var(--border);
+    width: 42px; padding: 0; border-radius: 9px; border: 1px solid var(--border);
     background: var(--surface); color: var(--ink-dim); cursor: pointer;
+    font-family: var(--font-body);
   }
   .icon-btn svg { width: 17px; height: 17px; }
   .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -2164,18 +2245,21 @@
      waiting for the click to fully resolve. A system that answers touch immediately reads
      as faster even when the underlying request takes exactly as long. */
   .entry-bar button:active,
+  .entry-bar #checkBtn:active,
   .new-check:active,
   .icon-btn:active,
   .action-btn:active,
   .retry-button:active,
   .settings-btn:active { transform: scale(0.96); }
   .entry-bar button,
+  .entry-bar #checkBtn,
   .new-check,
   .icon-btn,
   .action-btn,
   .retry-button,
-  .settings-btn { transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease; }
+  .settings-btn { transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease, filter 0.15s ease; }
   [data-motion="reduced"] .entry-bar button:active,
+  [data-motion="reduced"] .entry-bar #checkBtn:active,
   [data-motion="reduced"] .new-check:active,
   [data-motion="reduced"] .icon-btn:active,
   [data-motion="reduced"] .action-btn:active,
