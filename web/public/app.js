@@ -4525,7 +4525,11 @@ el.accountForm.addEventListener("submit", async (event) => {
         el.accountPassword.value = "";
         el.accountDialog.close();
       } else {
-        el.accountMessage.textContent = "Check your email to confirm your account, then sign in.";
+        // The link in that email comes back to /auth/confirm.html on this same origin
+        // (see `emailRedirectUrl` in auth-callback.js), which signs them in and returns
+        // them here — so the instruction is "click the link", not "then sign in".
+        el.accountMessage.textContent =
+          "Check your email — the confirmation link brings you back here, signed in.";
       }
     } else {
       await accounts.signIn(email, password);

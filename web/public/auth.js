@@ -7,6 +7,8 @@
 // export here becomes a no-op or an empty result — the library behaves exactly as it did
 // before this file existed: local-only, in this browser's localStorage.
 
+import { emailRedirectUrl, readCallbackParams } from "./auth-callback.js";
+
 let client = null;
 let user = null;
 const listeners = new Set();
@@ -64,9 +66,56 @@ function requireClient() {
  * job, not an error to report as one.
  */
 export async function signUp(email, password) {
-  const { data, error } = await requireClient().auth.signUp({ email, password });
+  // Without `emailRedirectTo`, the confirmation email points at the Supabase project's
+  // Site URL — which is whatever it was set to when the project was created, i.e.
+  // http://localhost:3000 on every project nobody has changed it on. Sending the origin
+  // the person is actually signing up on fixes that per environment, and the page it
+  // names (public/auth/confirm.html) is a real screen rather than the app's 404.
+  const emailRedirectTo = emailRedirectUrl(globalThis.location?.origin ?? "");
+  const { data, error } = await requireClient().auth.signUp({
+    email,
+    password,
+    // Omitted rather than sent as null when the origin isn't http(s): Supabase then falls
+    // back to the project's Site URL, which is the old behaviour, not a new failure.
+    ...(emailRedirectTo ? { options: { emailRedirectTo } } : {}),
+  });
   if (error) throw error;
   return { confirmed: Boolean(data.session) };
+}
+
+/**
+ * Finishes the confirmation link's job on public/auth/confirm.html, and returns whether
+ * the browser ends up with a session.
+ *
+ * Most of the work is supabase-js's: `configure` above creates the client with
+ * `detectSessionInUrl` at its default, so an implicit-flow `#access_token=…` and a PKCE
+ * `?code=…` are both consumed during `createClient` and are already a session by the time
+ * this runs. What's left is the one form it does not consume on its own — a `token_hash`
+ * + `type` pair, which is what a project using the "confirm signup" email template's
+ * `{{ .TokenHash }}` sends — so that is verified here explicitly.
+ *
+ * Never throws: the page's job is to say what happened, and a thrown error there is a
+ * blank screen. A failed verify just means no session, which `describeOutcome` reads the
+ * same way as any other unconfirmed arrival.
+ */
+export async function completeEmailConfirmation(href) {
+  if (!client) return false;
+  const params = readCallbackParams(href);
+  if (params.tokenHash && params.type) {
+    try {
+      const { error } = await client.auth.verifyOtp({
+        token_hash: params.tokenHash,
+        type: params.type,
+      });
+      if (error) console.warn("Confirmation failed:", error.message);
+    } catch (error) {
+      console.warn("Confirmation failed:", error?.message || error);
+    }
+  }
+  const { data } = await client.auth.getSession();
+  user = data?.session?.user ?? null;
+  notify();
+  return Boolean(data?.session);
 }
 
 export async function signIn(email, password) {

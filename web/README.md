@@ -126,6 +126,40 @@ sent to the browser deliberately (see `/api/config`'s `supabase` field and
 `public/auth.js`); it identifies the *project*, the same way it would for any Supabase
 browser client.
 
+### Confirmation emails need one setting in the Supabase dashboard
+
+Sign-up passes `emailRedirectTo` (`emailRedirectUrl` in `public/auth-callback.js`) built
+from the origin the person is signing up on, and points it at `/auth/confirm.html` —
+`public/auth/confirm.html`, a real page that finishes the confirmation, says what
+happened, and drops the person into the app signed in. Without that option Supabase uses
+the project's **Site URL**, which is `http://localhost:3000` on any project where nobody
+changed it: the confirmation email from the deployed app then links a new account holder
+to their own machine, where nothing is listening.
+
+Supabase only honours a redirect it recognises, so add the URL for each environment under
+**Authentication → URL Configuration → Redirect URLs**, or the fallback to Site URL is
+exactly what you get back:
+
+```
+https://your-deployment.example/auth/confirm.html
+https://your-project-*.vercel.app/auth/confirm.html   # preview deploys, if you use them
+http://127.0.0.1:3000/auth/confirm.html               # local dev
+```
+
+Set **Site URL** to the production origin too — it is what Supabase falls back to for any
+link that predates this, and it is the default target of the password-recovery and
+magic-link templates, which don't pass a redirect of their own.
+
+The page handles all three forms Supabase sends back — a session in the fragment
+(`#access_token=…`), a `?code=` from the PKCE flow (both consumed by supabase-js's own
+`detectSessionInUrl`), and a `token_hash` + `type` pair from the `{{ .TokenHash }}` email
+template (verified explicitly in `completeEmailConfirmation`) — plus the error and expiry
+cases, which get their own copy rather than a generic failure. The URL parsing and the
+choice of what to say are pure functions in `public/auth-callback.js`, tested in
+`test-auth-callback.js`; the page itself is only the renderer. `/auth/confirm` without
+the extension is routed to the same page (root `vercel.json`, and `PATH_ALIASES` in
+`server.js`) so an allowlist entry written without `.html` still lands.
+
 `public/auth.js` is the only place that imports `@supabase/supabase-js`, and it does so
 from `esm.sh` at request time rather than as an npm dependency — `web/` ships with no
 bundler and no `node_modules` (see the top of this file), and an account system some
