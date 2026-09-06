@@ -1,0 +1,80 @@
+/* Ported from web/public/index.html — the app's own player chrome. Native `controls` stays
+   off the <video>: a tap-anywhere overlay plus one bar that carries play/pause, the clock,
+   a scrub track with the claim windows marked on it, and the duration. */
+.video-player {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  max-height: 640px;
+  margin: 0 auto;
+  background: linear-gradient(155deg, #2E3646, #14171D 70%);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.video-player video { width: 100%; height: 100%; object-fit: contain; display: block; cursor: pointer; }
+
+/* Tap anywhere to play/pause, rather than relying on the bar's button alone. The mark in
+   the corner is decorative; `pointer-events: none` keeps it out of the way of the tap. */
+.vp-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.vp-mark { position: absolute; top: 12px; left: 12px; width: 18px; height: 18px; opacity: 0.6; pointer-events: none; }
+.vp-play-icon {
+  width: 52px; height: 52px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(10,12,16,0.5);
+  backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  color: var(--ink);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.vp-play-icon svg { width: 20px; height: 20px; margin-left: 2px; }
+.vp-overlay:hover .vp-play-icon { background: rgba(10,12,16,0.68); transform: scale(1.05); }
+
+/* Fades in on interaction (and while paused) and auto-hides while playing — see
+   `wakePlayerChrome` in public/app.js for the timer that drives `.is-active`. */
+.vp-bar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 22px 10px 10px;
+  background: linear-gradient(to top, rgba(0,0,0,0.65), rgba(0,0,0,0));
+  opacity: 0; transform: translateY(4px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+}
+.video-player.is-active .vp-bar { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.vp-btn {
+  flex: none; width: 22px; height: 22px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: none; color: var(--ink); cursor: pointer;
+}
+.vp-btn svg { width: 16px; height: 16px; }
+.vp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vp-time {
+  flex: none; min-width: 28px;
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: rgba(240,237,230,0.85);
+  font-variant-numeric: tabular-nums;
+}
+.vp-duration { text-align: right; }
+.vp-scrub { flex: 1; padding: 8px 0; cursor: pointer; }
+.vp-scrub-track { position: relative; height: 3px; border-radius: 999px; background: rgba(255,255,255,0.25); }
+.vp-scrub-fill { position: absolute; top: 0; left: 0; height: 100%; border-radius: 999px; background: var(--accent); }
+.vp-scrub-thumb {
+  position: absolute; top: 50%;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent);
+}
+/* One tick per claim window, in the secondary accent so a claim mark is never mistaken for
+   the playhead — the same distinction the timestamp chips draw in the analysis text. */
+.vp-marker {
+  position: absolute; top: 50%;
+  width: 2px; height: 9px; padding: 0;
+  transform: translate(-50%, -50%);
+  background: var(--accent-2);
+  border: none; border-radius: 1px;
+  cursor: pointer; opacity: 0.9;
+}
+.vp-marker:hover { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .vp-bar, .vp-play-icon { transition: none; }
+}

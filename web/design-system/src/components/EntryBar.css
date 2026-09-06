@@ -1,15 +1,40 @@
-/* Ported from web/public/index.html — the link-entry composer row. */
+/* Ported from web/public/index.html — the composer at the bottom of the main pane: the
+   link/question field, the mic and attach buttons either side of it, and the one filled
+   submit button. */
 .entry-bar {
-  display: flex; gap: 8px;
+  display: flex; gap: 8px; flex-wrap: wrap;
   padding: 18px 24px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
+/* Desktop/tablet: a raised card floating clear of the pane's edges rather than a bar
+   welded to the bottom of the window. The product keeps the welded treatment below 701px,
+   where the composer is the bottom edge of a sheet drawn over a full-bleed video. */
+@media (min-width: 701px) {
+  .entry-bar {
+    margin: 0 24px 20px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface-raised);
+    box-shadow: 0 12px 28px rgba(0,0,0,0.22), inset 0 1px 0 rgba(240,237,230,0.04);
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  /* The card takes the focus ring, not the field inside it: with the field's own border
+     transparent, a focused composer would otherwise be marked only on a box with no edge. */
+  .entry-bar:focus-within {
+    border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+    box-shadow: 0 14px 32px rgba(0,0,0,0.26), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
+  }
+}
 .entry-bar input {
   flex: 1;
+  min-width: 120px;
   padding: 11px 14px;
   border-radius: 9px;
-  border: 1px solid var(--border);
+  /* Transparent, not `--border`: a bordered field on a bordered card reads as two boxes.
+     The darker `--surface` fill is what separates it. */
+  border: 1px solid transparent;
   background: var(--surface);
   color: var(--ink);
   font-family: var(--font-body);
@@ -17,23 +42,109 @@
 }
 .entry-bar input::placeholder { color: #616977; }
 .entry-bar input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.entry-bar button {
+
+/* The one filled control in the composer. Scoped rather than written as `.entry-bar
+   button`, which would outrank `.icon-btn`'s single class and put the gradient on the mic
+   and attach buttons too — the bug this selector exists to avoid. `#checkBtn` is what the
+   product's own markup uses; the class is here so a consumer needn't mint an id. */
+.entry-bar #checkBtn,
+.entry-bar .check-btn {
   flex: 0 0 auto; width: 42px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   border-radius: 9px;
-  border: 1px solid var(--accent);
-  background: rgba(79,209,197,0.12);
-  color: var(--accent);
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #06201d;
   font-family: var(--font-body);
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
 }
-.entry-bar button:hover { background: rgba(79,209,197,0.2); }
+.entry-bar #checkBtn:hover,
+.entry-bar .check-btn:hover { filter: brightness(1.08); }
+.entry-bar #checkBtn:active:not(:disabled),
+.entry-bar .check-btn:active:not(:disabled) { transform: scale(0.96); }
 .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .entry-bar button:disabled { opacity: 0.5; cursor: default; }
-.check-btn-icon { display: block; width: 18px; height: 18px; }
+/* Dark ink on the gradient — the one place text sits *on* the accent rather than in it. */
+.check-btn-icon { display: block; width: 18px; height: 18px; color: #06201d; }
 .check-btn-label {
   position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
 }
+
+/* ---------- Mic, attach, and what replaces them while listening ---------- */
+/* `padding: 0` is load-bearing: these no longer inherit it from a blanket
+   `.entry-bar button` rule, and the UA's own padding would push the glyph off-centre. */
+.icon-btn {
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 42px; padding: 0; border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--ink-dim); cursor: pointer;
+  font-family: var(--font-body);
+  transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.icon-btn svg { width: 17px; height: 17px; }
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.icon-btn:active { transform: scale(0.96); }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Recording, not "on": red rather than the design system's accent, because what this
+   state means is that a microphone is live. */
+.icon-btn[aria-pressed="true"] { border-color: var(--bad); color: var(--bad); background: rgba(193,89,79,0.1); }
+.icon-btn.listening { animation: mic-pulse 1.1s ease-in-out infinite; }
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(193,89,79,0.35); }
+  50%      { box-shadow: 0 0 0 5px rgba(193,89,79,0); }
+}
+
+/* While the recognizer is listening the field and submit button hide and this takes their
+   place, so the reader can see the app actually hearing something. */
+.listening-wave, .listening-label {
+  opacity: 0; transform: translateY(3px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.listening-wave.in, .listening-label.in { opacity: 1; transform: translateY(0); }
+.listening-wave {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
+  height: 42px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface);
+}
+.listening-wave span {
+  width: 3px; height: 8px; border-radius: 3px; background: var(--accent);
+  animation: wave-bounce 0.9s ease-in-out infinite;
+}
+.listening-wave span:nth-child(1) { animation-delay: -0.6s; }
+.listening-wave span:nth-child(2) { animation-delay: -0.4s; }
+.listening-wave span:nth-child(3) { animation-delay: -0.2s; }
+.listening-wave span:nth-child(4) { animation-delay: -0.5s; }
+.listening-wave span:nth-child(5) { animation-delay: -0.1s; }
+@keyframes wave-bounce {
+  0%, 100% { height: 8px; opacity: 0.6; }
+  50%      { height: 24px; opacity: 1; }
+}
+.listening-label {
+  flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--accent); letter-spacing: 0.02em;
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn.listening, .listening-wave span { animation: none; }
+  .listening-wave, .listening-label { transition: none; opacity: 1; transform: none; }
+}
+
+/* An attached image, on its own row under the field (`order`/`flex-basis` rather than a
+   second container, so it wraps below whatever the row currently holds). */
+.image-chip {
+  display: flex; align-items: center; gap: 8px;
+  flex: 0 0 100%; min-width: 0; order: 5;
+  padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-raised);
+}
+.image-chip img { width: 30px; height: 30px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
+.image-chip span { flex: 1; font-size: 12px; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-chip button {
+  width: 20px; height: 20px; border-radius: 50%; border: 0;
+  background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 14px; line-height: 1;
+  transition: color 0.15s ease;
+}
+.image-chip button:hover { color: var(--bad); }
