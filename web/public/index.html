@@ -16,6 +16,17 @@
   rel="icon"
   href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='none' stroke='%234FD1C5' stroke-width='3' stroke-dasharray='13 3 13 3' stroke-linecap='round'/><circle cx='16' cy='16' r='3.5' fill='%234FD1C5'/><rect x='20.5' y='13.5' width='3' height='5' rx='1' fill='%239C8CF0'/></svg>"
 />
+<!-- Instrument Sans (display + body) and JetBrains Mono (the mono role), from the TRASE
+     Design System's tokens.css. The DS's own note on the pair: "one grotesque family for
+     both display and body, differentiated by weight rather than a serif/sans split" — which
+     is why there is no serif face here any more. Loaded rather than @import-ed inside the
+     stylesheet below so the request starts with the document instead of after the ~100 KB
+     of inline CSS has parsed; `display=swap` and the full local fallback stacks on
+     --font-display/--font-body/--font-mono are what keep an offline `node server.js` (or a
+     blocked font host) rendering in the system faces rather than in nothing. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
   :root {
     --bg: #12151A;
@@ -33,9 +44,12 @@
     --warn: #D6A84A;
     --bad: #C1594F;
 
-    --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
-    --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+    /* One family in both roles (see the <link>s above): the display role is the same face
+       at 600, not a different one. Every fallback is a system face, so a page that never
+       reaches fonts.gstatic.com still renders in the register it was designed for. */
+    --font-display: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   }
 
   /* Light theme — set by applySettings via settings.theme; see the settings dialog's
@@ -95,7 +109,7 @@
     display: flex; align-items: center; gap: 8px;
     margin-bottom: 16px; padding: 0 4px;
   }
-  .sidebar-header .mark { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
+  .sidebar-header .mark { width: 21px; height: 21px; color: var(--accent); flex-shrink: 0; }
   .sidebar-header .mark svg { width: 100%; height: 100%; }
   /* `margin-left: auto` used to live on `.settings-btn` itself so it would push whichever
      button came right after the wordmark to the far edge. With three candidate buttons in
@@ -107,7 +121,14 @@
      the single auto margin on the wordmark instead reserves all the free space right after
      it, so every button downstream of it — however many are actually visible — sits packed
      together at the row's trailing edge, `gap` apart, with nothing to fight over. */
-  .sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); margin-right: auto; }
+  /* Mono, semibold, widely tracked — the TRASE Design System's own wordmark treatment.
+     It was a display-serif word until the DS collapsed display and body onto one grotesque
+     (see the token block at the top of this file); with no serif left in the palette, the
+     name is set apart by letterform and tracking instead of by family. */
+  .sidebar-header .wordmark {
+    font-family: var(--font-mono); font-size: 14.5px; font-weight: 600;
+    letter-spacing: 0.13em; color: var(--ink); margin-right: auto;
+  }
 
   /* ---------- Collapsed rail (desktop/tablet only) ---------- */
   /* `data-sidebar="collapsed"` on <html>, set by applySettings from
@@ -1764,7 +1785,10 @@
   }
   /* Same fix as `.sidebar-header .wordmark` above, for the phone topbar's own
      account/settings pair. */
-  .topbar .wordmark { font-family: var(--font-display); font-size: 16px; color: var(--ink); margin-right: auto; }
+  .topbar .wordmark {
+    font-family: var(--font-mono); font-size: 13.5px; font-weight: 600;
+    letter-spacing: 0.13em; color: var(--ink); margin-right: auto;
+  }
   .topbar .mark { width: 17px; height: 17px; color: var(--accent); display: flex; }
   .topbar .mark svg { width: 100%; height: 100%; }
   .drawer-toggle {

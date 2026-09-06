@@ -1,5 +1,9 @@
 /* Ported verbatim from web/public/index.html's :root block — do not fork these values,
-   this file is meant to stay byte-identical to the product's tokens. */
+   this file is meant to stay byte-identical to the product's tokens. The one thing the
+   product states differently is *how* the two faces below are fetched: index.html uses
+   <link rel="stylesheet"> in its <head>, this file the @import the design system's own
+   tokens.css uses, since a consumer of this package has no head to put a link in. */
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
   --bg: #12151A;
   --surface: #1B1F26;
@@ -16,9 +20,10 @@
   --warn: #D6A84A;
   --bad: #C1594F;
 
-  --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
-  --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* One grotesque in both roles, differentiated by weight rather than a serif/sans split. */
+  --font-display: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 /* Light theme — set data-theme="light" on <html> (or any ancestor) to opt in. Warm
