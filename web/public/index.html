@@ -886,9 +886,23 @@
 
   .claim-grid-status {
     grid-column: 1 / -1;
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
     padding: 4px 0 8px;
   }
+  /* Ported from the design system's ClaimCard: its "claims found" loading state used to
+     drop straight to a bare number with no iris behind it, which read as the search having
+     already stopped a beat before it actually had — the DS's own fix keeps the iris turning
+     through that moment instead of cutting it. This status strip had the identical gap: once
+     the model names its first claim, `renderClaimSkeletons` replaces the single running
+     card's full-size, breathing iris with this strip — text, a counter, a clock, a bar — and
+     none of them move on their own the way the iris did, so a check that runs for the rest of
+     its length with more than one claim spends nearly all of it looking stopped. Scaled down
+     to sit inline with a status line rather than centered alone in an otherwise empty card,
+     the way the single-claim running view uses it. `resolveIris` (app.js) already finds
+     whichever `.iris-wrap` is on screen — this is the only change that was needed for it to
+     also seal *this* one right before the finished card replaces the grid, the same beat a
+     single-claim check already got. */
+  .claim-grid-status .iris-wrap { width: 32px; height: 32px; margin-bottom: 2px; }
 
   .claim-card {
     /* `.claims-pane`'s only child outside grid mode (every render path replaces the pane's

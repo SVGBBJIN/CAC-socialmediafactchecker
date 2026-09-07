@@ -2795,6 +2795,7 @@ function renderLiveSources(sources) {
 function claimGridStatusHTML(stage) {
   return `
     <div class="claim-grid-status">
+      ${irisMarkup()}
       <div class="status-text stage-text" id="runStatus" role="status">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
       <div class="elapsed-time" id="runElapsed">0:00</div>
