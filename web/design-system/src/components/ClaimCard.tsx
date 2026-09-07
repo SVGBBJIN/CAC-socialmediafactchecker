@@ -173,6 +173,12 @@ export function ClaimCard({
     return shell(
       "claim-card",
       <div className="card-loading">
+        {/* Still turning, not resolved: naming a count is not the same as being done — the
+         * check keeps running after this moment, and an iris that stopped here would say
+         * otherwise. This was the design system's own fix (it used to show the bare number
+         * alone), ported into the product as the same gap in its claim-grid status strip:
+         * see `claimGridStatusHTML` in public/app.js. */}
+        <Iris />
         <div className={`found-count${revealed ? " in" : ""}`}>{claimCount ?? 0}</div>
         <div className="status-text">{claimCount === 1 ? "claim found" : "claims found"}</div>
       </div>,
