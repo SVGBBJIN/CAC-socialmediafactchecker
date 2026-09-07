@@ -3,6 +3,8 @@
 @import "./tokens.css";
 @import "./components/Sidebar.css";
 @import "./components/ShellTopBar.css";
+@import "./components/MobileShell.css";
+@import "./components/SummaryCard.css";
 @import "./components/EntryBar.css";
 @import "./components/VerdictBadge.css";
 @import "./components/TimestampChip.css";

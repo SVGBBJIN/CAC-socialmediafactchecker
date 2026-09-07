@@ -26,6 +26,8 @@ export default defineConfig({
       "src/tokens.css",
       "src/components/Sidebar.css",
       "src/components/ShellTopBar.css",
+      "src/components/MobileShell.css",
+      "src/components/SummaryCard.css",
       "src/components/EntryBar.css",
       "src/components/VerdictBadge.css",
       "src/components/TimestampChip.css",

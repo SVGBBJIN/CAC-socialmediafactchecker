@@ -28,6 +28,12 @@ export type { VideoPlayerProps, VideoMarker } from "./components/VideoPlayer";
 export { ShellTopBar } from "./components/ShellTopBar";
 export type { ShellTopBarProps } from "./components/ShellTopBar";
 
+export { MobileShell } from "./components/MobileShell";
+export type { MobileShellProps } from "./components/MobileShell";
+
+export { SummaryCard } from "./components/SummaryCard";
+export type { SummaryCardProps } from "./components/SummaryCard";
+
 export { SettingsMenu, SettingsRow, Switch, SegControl } from "./components/SettingsMenu";
 export type { SettingsMenuProps, SettingsTab, SettingsRowProps, SwitchProps, SegControlProps } from "./components/SettingsMenu";
 
