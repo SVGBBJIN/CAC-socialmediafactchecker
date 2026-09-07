@@ -71,6 +71,9 @@ function youTubeVideoID(urlString) {
 const el = {
   contentGrid: document.getElementById("contentGrid"),
   shellTopbar: document.getElementById("shellTopbar"),
+  topbarTitle: document.getElementById("topbarTitle"),
+  topbarSub: document.getElementById("topbarSub"),
+  mediaExpandBtn: document.getElementById("mediaExpandBtn"),
   shellTitle: document.getElementById("shellTitle"),
   shellSub: document.getElementById("shellSub"),
   linkInput: document.getElementById("linkInput"),
@@ -1668,6 +1671,12 @@ function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
     el.shellTopbar.hidden = true;
     el.shellTitle.textContent = "";
     el.shellSub.textContent = "";
+    // The phone bar is the only one at that width, so it stays on screen with nothing
+    // selected and says what to do instead — the design system's "Chat to shell — Mobile"
+    // screen opens on exactly this line.
+    el.topbarTitle.textContent = "New check";
+    el.topbarTitle.removeAttribute("title");
+    el.topbarSub.textContent = "Paste a link to get started";
     return;
   }
   el.shellTopbar.hidden = false;
@@ -1677,7 +1686,30 @@ function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
   const when = entry.status === "running" ? "checking now" : `checked ${relativeTime(entry.createdAt)}`;
   // A saved link-less conversation has no platform to name and was never "checked" —
   // `statusLabel` calls it "3 messages", which is the whole of what there is to say.
-  el.shellSub.textContent = entry.url ? `${entry.platform} · ${when}` : statusLabel(entry);
+  const subtitle = entry.url ? `${entry.platform} · ${when}` : statusLabel(entry);
+  el.shellSub.textContent = subtitle;
+  el.topbarTitle.textContent = entry.title;
+  el.topbarTitle.title = entry.title;
+  el.topbarSub.textContent = subtitle;
+}
+
+/**
+ * The phone layout's video strip is 24vh by default and 62vh expanded — a reader trading
+ * sheet height for video height, from the design system's "App shell — Mobile" screen. The
+ * state lives on <html> as `data-media` because the CSS that reads it spans three separate
+ * subtrees (the strip, the claim boxes that shrink to titles beside it, and the chevron's
+ * own rotation), and only the document element is an ancestor of all of them.
+ *
+ * Deliberately not persisted in settings: it is a "look at this bit of the clip right now"
+ * gesture, not a preference, and a check opened tomorrow should start on its analysis.
+ */
+function toggleMediaExpanded(force) {
+  const expanded = force ?? document.documentElement.dataset.media !== "expanded";
+  document.documentElement.dataset.media = expanded ? "expanded" : "";
+  el.mediaExpandBtn.setAttribute("aria-expanded", String(expanded));
+  const label = expanded ? "Collapse video" : "Expand video";
+  el.mediaExpandBtn.setAttribute("aria-label", label);
+  el.mediaExpandBtn.title = label;
 }
 
 /**
@@ -3212,7 +3244,19 @@ async function handleClaimsPaneClick(event) {
   }
 
   const btn = event.target.closest(".action-btn");
-  if (!btn) return;
+  if (!btn) {
+    // On the phone layout each claim box is a summary — title, verdict, two lines of the
+    // reasoning (see the phone breakpoint's `.claim-pane` rules). A tap anywhere in the box
+    // that isn't a control drops the clamps and shows the rest, including the sources.
+    // Above 700px the clamps don't exist, so the class is inert there rather than guarded:
+    // one behaviour, one code path, and nothing to keep in sync with a media query.
+    const pane = event.target.closest(".claim-pane");
+    if (pane && !event.target.closest("a, button, .ts-chip, .source-pill")) {
+      pane.classList.toggle("expanded");
+      pane.setAttribute("aria-expanded", String(pane.classList.contains("expanded")));
+    }
+    return;
+  }
   const row = btn.closest(".action-row");
   const entry = row ? findEntry(row.dataset.entryId) : null;
   if (!entry) return;
@@ -3333,8 +3377,13 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       // gap beside it — see `claimGridSpanLast`. It's also, not coincidentally, the one
       // carrying the footer above, so the extra width goes to the box that needs it most.
       const spanFull = isLast && spanLast;
+      // `role="button"`/`tabindex`/`aria-expanded`: on the phone layout this box is a
+      // summary that opens on tap (see `handleClaimsPaneClick`). The attributes are
+      // harmless above 700px, where the box is already showing everything it has and the
+      // toggle changes nothing visible — the alternative was rendering different markup per
+      // breakpoint and re-rendering the pane on every resize.
       return `
-        <div class="claim-card claim-pane"${spanFull ? ' style="grid-column:1/-1"' : ""}>
+        <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false"${spanFull ? ' style="grid-column:1/-1"' : ""}>
           <div class="claim-eyebrow">${escapeHTML(eyebrow)}</div>
           <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
@@ -3345,10 +3394,48 @@ function claimPanesHTML(entry, animate, newestFollowup) {
     .join("");
 }
 
+/**
+ * The check at a glance — how many claims were checked and how they came out — above the
+ * claims themselves. Ported from the TRASE Design System's SummaryCard; the phone sheet is
+ * the only place it is drawn (`.summary-card` is `display: none` at every other width),
+ * because the desktop grid already shows every verdict badge at once and this would be a
+ * second copy of what is on screen.
+ *
+ * The four rows are the closed verdict vocabulary from `VERDICTS`, always all four and in
+ * that order, with a zero row dimmed rather than dropped: a card that changed shape with
+ * each check would have to be re-read every time instead of glanced at. A claim whose
+ * verdict never parsed counts toward the total and toward none of the rows, the same way it
+ * gets no badge.
+ */
+function summaryCardHTML(claims) {
+  const counts = {};
+  for (const claim of claims) {
+    if (claim.verdictKey && VERDICTS[claim.verdictKey]) {
+      counts[claim.verdictKey] = (counts[claim.verdictKey] ?? 0) + 1;
+    }
+  }
+  const stats = Object.entries(VERDICTS)
+    .map(([key, verdict]) => {
+      const count = counts[key] ?? 0;
+      return `
+        <div class="summary-stat" data-count="${count}">
+          <span class="summary-count ${verdict.css}">${count}</span>
+          <span class="summary-label">${escapeHTML(verdict.label)}</span>
+        </div>`;
+    })
+    .join("");
+  return `
+    <div class="summary-card">
+      <h2 class="summary-title">Fact check summary</h2>
+      <div class="summary-sub">${claims.length} claim${claims.length === 1 ? "" : "s"} analysed</div>
+      <div class="summary-stats">${stats}</div>
+    </div>`;
+}
+
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
     setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
-    el.claimsPane.innerHTML = claimPanesHTML(entry, animateAnalysis, newestFollowup);
+    el.claimsPane.innerHTML = summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup);
   } else {
     setClaimsGridMode(null);
     el.claimsPane.innerHTML = `
@@ -4462,6 +4549,37 @@ el.passForm.addEventListener("submit", () => {
 });
 
 el.claimsPane.addEventListener("click", handleClaimsPaneClick);
+// Enter/Space on a focused claim box does what a tap does — the box carries `role="button"`
+// and `tabindex` on the phone layout (see `claimPanesHTML`), and a control that announces
+// itself as a button has to answer a keyboard.
+el.claimsPane.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const pane = event.target.closest?.(".claim-pane");
+  if (!pane || event.target !== pane) return;
+  event.preventDefault();
+  pane.classList.toggle("expanded");
+  pane.setAttribute("aria-expanded", String(pane.classList.contains("expanded")));
+});
+
+el.mediaExpandBtn.addEventListener("click", () => toggleMediaExpanded());
+// Tapping the collapsed strip itself expands it, the way the design system's mobile shell
+// does — a 24vh strip is a big target for "I want to see this", and the chevron alone makes
+// the reader aim. Collapsing stays the chevron's job: a tap on an *expanded* player is
+// play/pause (`.vp-overlay`), which is what a tap on a video should be.
+// Capture, not bubble: `.vp-overlay` inside this box toggles play on click, and on a
+// collapsed strip the tap means "make this bigger", not "start playing something I can
+// barely see". Taking the event on the way down lets this stop it there.
+el.videoThumb.addEventListener(
+  "click",
+  (event) => {
+    if (document.documentElement.dataset.media === "expanded") return;
+    if (!matchMedia("(max-width: 700px)").matches) return;
+    if (event.target.closest("button, a, .vp-bar")) return;
+    event.stopPropagation();
+    toggleMediaExpanded(true);
+  },
+  true,
+);
 
 el.drawerToggle.addEventListener("click", () => {
   if (isDrawerOpen()) closeDrawer();
