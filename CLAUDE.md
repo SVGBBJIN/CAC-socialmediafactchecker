@@ -31,8 +31,9 @@ see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
-test-caption-search.js test-page-shapes.js test-supabase-config.js test-youtube.js`). As of
-this writing the whole suite is 607 tests; `worker/`'s is 5.
+test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
+test-youtube.js`). As of
+this writing the whole suite is 621 tests; `worker/`'s is 5.
 
 `test-page-shapes.js` is the one suite backed by files rather than inline HTML: `web/fixtures/`
 holds one page per *shape* (front page, story, paywalled, JS shell, AMP copy, link-heavy

@@ -46,9 +46,15 @@ function loadEnvFile(path) {
 
 const loadedEnv = [".env.local", ".env"].filter((name) => loadEnvFile(join(ROOT, name)));
 
+/* Extensionless aliases, mirroring the `routes` entries in the root vercel.json. The
+ * email-confirmation page is the one URL here a person may type or paste by hand — it is
+ * what a Supabase Redirect URLs allowlist entry points at (see public/auth-callback.js) —
+ * and an allowlist written without the `.html` should reach the page rather than the 404. */
+const PATH_ALIASES = { "/auth/confirm": "/auth/confirm.html" };
+
 async function serveStatic(req, res) {
   const requested = new URL(req.url, "http://localhost").pathname;
-  const path = resolveStaticPath(requested, PUBLIC_DIR);
+  const path = resolveStaticPath(PATH_ALIASES[requested] ?? requested, PUBLIC_DIR);
 
   if (path === null) {
     res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });

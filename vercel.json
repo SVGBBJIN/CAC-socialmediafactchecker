@@ -19,6 +19,7 @@
   "routes": [
     { "src": "/api/(chat|config|resolve-media|probe-link|page-outline)", "dest": "/web/api/$1.js" },
     { "src": "/", "dest": "/web/public/index.html" },
+    { "src": "/auth/confirm", "dest": "/web/public/auth/confirm.html" },
     { "src": "/(.*)", "dest": "/web/public/$1", "check": true },
     { "src": "/(.*)", "dest": "/web/public/index.html" }
   ]
