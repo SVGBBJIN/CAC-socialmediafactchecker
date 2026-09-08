@@ -2411,7 +2411,13 @@
   [data-font-size="large"] .claim-empty-text { font-size: clamp(19px, 5.9vw, 25.5px); }
   [data-font-size="large"] body, [data-font-size="large"] .entry-bar input, [data-font-size="large"] .lib-title { font-size: 1.1em; }
 
-  [data-contrast="high"] {
+  /* `:not([data-theme="light"])` on every rule in this block: theme and contrast are two
+     independent settings (see applySettings), so light + high-contrast is a reachable
+     combination. These values are light-on-dark, tuned to sit on `--surface`/`--bg`'s dark
+     palette — applied without the guard they would win the cascade over light theme's own
+     (already dark-on-light, already high-contrast) token values, since both are single
+     attribute selectors of equal specificity and this block comes later in the file. */
+  [data-contrast="high"]:not([data-theme="light"]) {
     --ink-dim: #D7DBE3; --muted: #B6BCC9; --border: #454C59; --surface-raised: #2A303B;
   }
   /* The phone layout's text sits over an arbitrary video rather than a fixed dark
@@ -2427,6 +2433,48 @@
     /* The sheet and composer are opaque `--bg` at this width now, so there is nothing left
        for high contrast to firm up there — only the chrome still drawn over the video. */
     [data-contrast="high"] .media-expand-btn { background: rgba(5,6,10,0.85); }
+  }
+
+  /* Every neutral icon/outline button's resting label or glyph color, in high contrast —
+     literal white rather than `--ink`/`--ink-dim`, which even at this mode's own lightened
+     values (see the token block above) still fall short of full contrast against a dark
+     surface. Scoped to dark for the same reason the token block is: `--ink`/`--ink-dim` in
+     light theme are already near-black on near-white, and white text there would be
+     unreadable rather than higher-contrast. The accent-filled buttons (`.new-check`,
+     `#checkBtn`) and every colored semantic state below (accent hover, `--bad` for a
+     destructive action or a live mic) are deliberately left alone — this is a floor under
+     the *neutral* state, not a rule that every control turns white. */
+  [data-contrast="high"]:not([data-theme="light"]) .icon-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .lib-delete,
+  [data-contrast="high"]:not([data-theme="light"]) .retry-button,
+  [data-contrast="high"]:not([data-theme="light"]) .sidebar-signin-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .drawer-toggle,
+  [data-contrast="high"]:not([data-theme="light"]) .media-expand-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .vp-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-close,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-nav-item,
+  [data-contrast="high"]:not([data-theme="light"]) .passphrase button.secondary,
+  [data-contrast="high"]:not([data-theme="light"]) #account-dialog .auth-close-btn {
+    color: #fff;
+  }
+  /* Restated at the same (bumped) specificity the block above now carries, so a state that
+     already means something other than "resting neutral control" — an accent hover, the
+     selected settings tab, a destructive or live-recording red — keeps meaning it instead
+     of being read back as plain white just because it shares a selector with a rule above. */
+  [data-contrast="high"]:not([data-theme="light"]) .icon-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .retry-button:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .sidebar-signin-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .sidebar-signin-btn:hover svg,
+  [data-contrast="high"]:not([data-theme="light"]) .vp-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-close:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-nav-item.active {
+    color: var(--accent);
+  }
+  [data-contrast="high"]:not([data-theme="light"]) .lib-delete:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .icon-btn[aria-pressed="true"] {
+    color: var(--bad);
   }
 
   [data-motion="reduced"] .blade,
