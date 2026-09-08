@@ -2587,18 +2587,27 @@ function revealPlayer() {
  * stopped and dimmed, seal check drawn — which is what the empty card holds behind its one
  * line (see `renderChatPane`'s empty branch) and what `resolveIris` switches the running
  * card's own iris to when a turn finishes.
+ *
+ * Each blade's rotation is a static, per-instance `transform` on its own `<g>` wrapper
+ * rather than a `--rot` custom property read inside the shared `blade-breathe` keyframes.
+ * WebKit resolves a `var()` referenced from `@keyframes` once for the whole animation
+ * rather than per element that runs it, so all six blades animated to the exact same
+ * rotation and the flower collapsed into what looked like one overlapping pill. Rotation
+ * now lives outside the animation entirely — only `scaleY`/`opacity` are keyframed — so
+ * there is no per-instance value for a shared animation to lose.
  */
 function irisMarkup({ resolved = false } = {}) {
+  const blade = `<rect class="blade" x="46" y="10" width="8" height="34" rx="4"/>`;
   return `
     <div class="iris-wrap${resolved ? " resolved" : ""}" aria-hidden="true">
       <svg viewBox="0 0 100 100">
         <g>
-          <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <g class="blade-rot" style="transform:rotate(0deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(60deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(120deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(180deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(240deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(300deg)">${blade}</g>
         </g>
         <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
