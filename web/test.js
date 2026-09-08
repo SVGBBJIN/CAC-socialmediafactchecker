@@ -30,6 +30,9 @@ import {
   DEFAULT_ANSWER_HOLD_MS,
   isUnsupportedMediaResolution,
   mediaResolutionFromEnv,
+  isUnsupportedMediaProcessing,
+  supportsAgenticVideo,
+  videoProcessingFromEnv,
   resetClipCache,
 } from "./lib/gemini.js";
 import {
@@ -689,11 +692,25 @@ test("a YouTube link becomes a file_data part alongside the text", () => {
     {
       role: "user",
       parts: [
-        { file_data: { file_uri: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } },
+        {
+          file_data: { file_uri: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+          // Beside `file_data`, not inside it — see `MEDIA_PROCESSING_AGENTIC`.
+          media_processing: "AGENTIC",
+        },
         { text: "what claims does https://youtu.be/dQw4w9WgXcQ make?" },
       ],
     },
   ]);
+});
+
+test("agentic video can be turned off, and then the part is a plain file_data again", () => {
+  const [turn] = toGeminiContents(
+    [{ role: "user", content: "https://youtu.be/dQw4w9WgXcQ" }],
+    { videoProcessing: null },
+  );
+  assert.deepEqual(turn.parts[0], {
+    file_data: { file_uri: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+  });
 });
 
 test("a reply is capped in tokens by default, under the documented field name", async () => {
@@ -1391,6 +1408,210 @@ test("a clip is sent at the configured resolution; a model that refuses it keeps
     }),
   );
   assert.ok(!("mediaResolution" in second[0].generationConfig));
+});
+
+/* ---------------- agentic video ---------------- */
+
+/** The YouTube link the agentic-video tests below all check. */
+const YOUTUBE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+/** The `media_processing` values on a captured request body, in part order. */
+function processingModes(body) {
+  return body.contents.flatMap((turn) => turn.parts.filter((p) => p.file_data).map((p) => p.media_processing));
+}
+
+test("agentic video is asked for on the models that have it, and only those", () => {
+  // Two version cuts, not one: the Lite tier got it half a release before the full one.
+  assert.equal(supportsAgenticVideo("gemini-3.7-flash"), true);
+  assert.equal(supportsAgenticVideo("gemini-3.6-flash"), true);
+  assert.equal(supportsAgenticVideo("gemini-3.5-flash-lite"), true);
+  assert.equal(supportsAgenticVideo("gemini-3.5-flash"), false, "3.5 is Lite-only for this feature");
+  assert.equal(supportsAgenticVideo("gemini-3.1-flash-lite"), false);
+  assert.equal(supportsAgenticVideo("gemini-3-flash-preview"), false);
+  assert.equal(supportsAgenticVideo("gemini-2.5-flash"), false);
+  assert.equal(supportsAgenticVideo("gemini-2.0-flash"), false);
+  // "and later models" has to keep meaning later. Compared as two integers rather than
+  // one decimal precisely so this one doesn't read as 3.1 and lose the feature.
+  assert.equal(supportsAgenticVideo("gemini-3.10-flash"), true);
+  assert.equal(supportsAgenticVideo("gemini-4-flash"), true);
+});
+
+test("GEMINI_VIDEO_PROCESSING is an off switch, not an on one", () => {
+  assert.equal(videoProcessingFromEnv({}), "AGENTIC");
+  assert.equal(videoProcessingFromEnv({ GEMINI_VIDEO_PROCESSING: "" }), "AGENTIC");
+  assert.equal(videoProcessingFromEnv({ GEMINI_VIDEO_PROCESSING: " Agentic " }), "AGENTIC");
+  assert.equal(videoProcessingFromEnv({ GEMINI_VIDEO_PROCESSING: "static" }), null);
+  // A typo in an optional tuning variable costs the default behaviour, not the deployment.
+  assert.equal(videoProcessingFromEnv({ GEMINI_VIDEO_PROCESSING: "agentix" }), null);
+});
+
+test("a rejected media_processing is recognised however Gemini phrases it", () => {
+  assert.equal(isUnsupportedMediaProcessing(400, 'Unknown name "media_processing"'), true);
+  assert.equal(isUnsupportedMediaProcessing(400, "mediaProcessing is not supported"), true);
+  assert.equal(isUnsupportedMediaProcessing(400, "invalid argument"), false);
+  assert.equal(isUnsupportedMediaProcessing(404, "media_processing"), false);
+  // The two media fields fail independently — one repair must not answer for the other.
+  assert.equal(isUnsupportedMediaProcessing(400, 'Unknown name "mediaResolution"'), false);
+  assert.equal(isUnsupportedMediaResolution(400, 'Unknown name "media_processing"'), false);
+});
+
+test("a model that predates agentic video is sent the video without the field", async () => {
+  resetFieldSupport();
+  let sent;
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${YOUTUBE_URL}` }],
+      models: ["gemini-2.5-flash"],
+      fetchImpl: async (_url, options) => {
+        sent = JSON.parse(options.body);
+        return sseResponse([frame("watched it")]);
+      },
+    }),
+  );
+  assert.deepEqual(processingModes(sent), [undefined], "stripped, not sent to a model that would 400");
+  assert.deepEqual(sent.contents[0].parts[0].file_data, { file_uri: YOUTUBE_URL }, "still a video, just read statically");
+});
+
+test("walking from a model without agentic video to one with it puts the field back", async () => {
+  // The strip happens on the shared `contents` objects, so a naive implementation that
+  // re-read the request body each attempt would erase the intent on the first stripping
+  // model and never restore it. The field is captured once, before the walk, for exactly
+  // this: a chain can go from a model that can't read it to one that can, mid-turn.
+  resetFieldSupport();
+  const bodies = [];
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${YOUTUBE_URL}` }],
+      models: ["gemini-2.5-flash", "gemini-3.7-flash"],
+      health: new ModelHealth(),
+      fetchImpl: async (_url, options) => {
+        bodies.push(JSON.parse(options.body));
+        if (bodies.length === 1) {
+          return { ok: false, status: 503, text: async () => "overloaded" };
+        }
+        return sseResponse([frame("watched it")]);
+      },
+    }),
+  );
+  assert.deepEqual(processingModes(bodies[0]), [undefined], "2.5 can't read it");
+  assert.deepEqual(processingModes(bodies[1]), ["AGENTIC"], "3.7 can, and got it back");
+});
+
+test("a model that refuses media_processing keeps the turn; the refusal is remembered", async () => {
+  // The same repair `mediaResolution` and `thinkingConfig` get, and the one most likely to
+  // fire: `supportsAgenticVideo` is guessing about a feature newer than half the chain.
+  // Falling through would be the wrong move — the next model down is older.
+  resetFieldSupport();
+  const tried = [];
+  const bodies = [];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${YOUTUBE_URL}` }],
+      models: ["gemini-3.7-flash", "gemini-3.6-flash"],
+      health: new ModelHealth(),
+      fetchImpl: async (url, options) => {
+        tried.push(url);
+        bodies.push(JSON.parse(options.body));
+        if (tried.length === 1) {
+          return {
+            ok: false,
+            status: 400,
+            text: async () =>
+              JSON.stringify({ error: { message: 'Invalid JSON payload: Unknown name "media_processing"' } }),
+          };
+        }
+        return sseResponse([frame("watched it")]);
+      },
+    }),
+  );
+
+  assert.deepEqual(processingModes(bodies[0]), ["AGENTIC"]);
+  assert.deepEqual(processingModes(bodies[1]), [undefined], "the retry dropped the field");
+  assert.ok(
+    tried[0].includes("gemini-3.7-flash") && tried[1].includes("gemini-3.7-flash"),
+    "the preferred model was retried, not abandoned",
+  );
+  assert.equal(answerFrames(frames).at(-1).text, "watched it");
+  assert.equal(frames.find((f) => f.type === "model").degraded, false);
+
+  // A fact about that model, not about the request: the next turn goes out without it
+  // rather than buying the same 400 again.
+  const second = [];
+  await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${YOUTUBE_URL}` }],
+      models: ["gemini-3.7-flash"],
+      health: new ModelHealth(),
+      fetchImpl: async (_url, options) => {
+        second.push(JSON.parse(options.body));
+        return sseResponse([frame("fine")]);
+      },
+    }),
+  );
+  assert.deepEqual(processingModes(second[0]), [undefined]);
+  resetFieldSupport();
+});
+
+test("the video navigation trace is replayed to the model, not dropped or shown", async () => {
+  // Agentic video reports itself as `tool_call`/`tool_response` parts carrying thought
+  // signatures. They are the model's record of which stretches of the clip it has already
+  // loaded: dropped from the history, the next round is asked to keep navigating a video
+  // it can no longer remember looking at. They are also not something a reader of a
+  // fact-check should ever see.
+  resetFieldSupport();
+  const tools = [
+    { function_declarations: [{ name: "web_search", parameters: { type: "OBJECT", properties: {} } }] },
+  ];
+  const bodies = [];
+  const navigation = [
+    { thought_signature: "sig_A", tool_call: { tool_type: "MEDIA_PROCESSING" } },
+    { thought_signature: "sig_B", tool_response: { tool_type: "MEDIA_PROCESSING" } },
+  ];
+  const frames = await collect(
+    streamChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: `check ${YOUTUBE_URL}` }],
+      models: ["gemini-3.7-flash"],
+      health: new ModelHealth(),
+      tools,
+      toolRunner: async () => ({ response: { result: "ok" } }),
+      fetchImpl: async (_url, options) => {
+        bodies.push(JSON.parse(options.body));
+        if (bodies.length === 1) {
+          return sseResponse([
+            `data: ${JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      ...navigation,
+                      { functionCall: { name: "web_search", args: { query: "q" } }, thoughtSignature: "sig_C" },
+                    ],
+                  },
+                },
+              ],
+            })}\n\n`,
+          ]);
+        }
+        return sseResponse([frame("watched the relevant minute")]);
+      },
+    }),
+  );
+
+  const replayed = bodies[1].contents.find((turn) => turn.role === "model").parts;
+  assert.deepEqual(replayed.slice(0, 2), navigation, "verbatim, signatures on the parts they arrived on");
+  assert.ok(replayed.some((p) => p.functionCall), "and the call the round actually made");
+  assert.equal(
+    answerFrames(frames).filter((f) => f.type === "delta").map((f) => f.text).join(""),
+    "watched the relevant minute",
+    "the trace is never yielded to the reader",
+  );
+  // The video part itself is attached once, at first mention — not re-sent on round two.
+  assert.equal(bodies[1].contents.flatMap((t) => t.parts.filter((p) => p.file_data)).length, 1);
 });
 
 test("a rejected mediaResolution is recognised however Gemini phrases it", () => {

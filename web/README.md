@@ -265,6 +265,27 @@ Only YouTube is fetched by Gemini itself. The rest arrive as bytes: inline base6
 to ~14 MB, and through the Files API past that (`lib/gemini-files.js`), which is also why
 they are the slowest requests the app makes and why the cap is two posts per message.
 
+**A long YouTube video is watched agentically.** The `file_data` part carries
+`media_processing: "AGENTIC"`, which hands the timeline to the model: it reads the
+transcript, works out which stretches the question turns on, and loads only those frames
+and that audio. The alternative — and the old behaviour — is a static read, every frame at
+one a second, the whole clip in context before the model can say anything. At roughly 100
+tokens per second of video that is ~180k tokens for half an hour, paid on every round of
+the turn, before the first search is dispatched; a 45-second TikTok never notices it and a
+lecture cannot afford it. Google publishes up to 88% fewer tokens and slightly better
+answers on long-form content.
+
+Three things to know about it. It is **YouTube only** — downloaded clips are capped at
+48 MB and short by construction, and Google's own guidance is that a static read wins under
+about five minutes. It is **per model**: the field goes only to models that have the
+feature (3.6 Flash and up, or 3.5 Flash-Lite and up), it is stripped for the rest as the
+chain is walked, and a model that refuses it anyway gets asked again without it rather than
+costing the turn — the same repair `mediaResolution` and `thinkingConfig` already get. And
+it **can be turned off**: `GEMINI_VIDEO_PROCESSING=static` puts every frame back, which is
+what to reach for if a verdict looks like it missed something the clip plainly shows, or if
+`[t=M:SS]` timestamps need to be frame-exact across the whole video rather than across the
+parts the model chose to watch.
+
 **Photo posts and carousels.** A TikTok `/photo/` link used to not register as a link at
 all, and an Instagram carousel of stills was declined by name. That threw away the most
 claim-dense format either platform has: a screenshot dump or a text-card slideshow puts its

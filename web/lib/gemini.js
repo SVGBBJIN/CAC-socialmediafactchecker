@@ -176,6 +176,59 @@ export function mediaResolutionFromEnv(env = process.env) {
 }
 
 /**
+ * Agentic video understanding: the model watches the clip on its own terms.
+ *
+ * By default Gemini reads a video *statically* — frames pulled at one a second, the whole
+ * lot placed in context in a single pass before it can say anything. That is ~100 tokens
+ * per second of video at low media resolution, which a 45-second TikTok pays without
+ * noticing and a 30-minute YouTube video does not: half an hour is ~180k tokens of pure
+ * ingestion, on every round of the turn, before a single search has been dispatched.
+ *
+ * `media_processing: "AGENTIC"` (a **per-part** field, sitting beside `file_data` rather
+ * than in `generationConfig`) hands the timeline to the model instead: it reads the
+ * transcript, decides which stretches matter for the prompt it was given, and loads only
+ * those frames and that audio, adjusting frame rate and resolution as it goes. Google
+ * publishes up to 88% fewer tokens and ~7% higher quality on long-form content for it.
+ *
+ * Attached to **YouTube parts only**, and that is not an oversight. TikTok and Instagram
+ * clips are capped at `MAX_MEDIA_BYTES` (48 MB) and are short-form by construction, and
+ * agentic navigation is tool round-trips *before* the first token — Google's own guidance
+ * is that static wins under about five minutes, which is every clip this app downloads.
+ * Long video here means a YouTube link, which costs us nothing to hand over and therefore
+ * everything to ingest.
+ */
+export const MEDIA_PROCESSING_AGENTIC = "AGENTIC";
+
+/**
+ * Read `GEMINI_VIDEO_PROCESSING` into the value a YouTube part should carry.
+ *
+ * On by default, which is the opposite of `mediaResolutionFromEnv`'s stance and for the
+ * opposite reason: `mediaResolution` trades away detail the fact-check is often reading
+ * the claim out of, while agentic mode trades away *nothing* the model didn't decide to
+ * skip itself — it is the same clip, read on demand instead of all at once. The escape
+ * hatch is there because "the model chose what to look at" is exactly what you want to be
+ * able to turn off when a verdict looks like it missed something: set
+ * `GEMINI_VIDEO_PROCESSING=static` and the next run reads every frame again.
+ *
+ * Anything other than `agentic` means static, the same way an unrecognised media
+ * resolution means "don't send the field" — a typo in an optional tuning variable should
+ * cost the default behaviour, not the deployment.
+ */
+export function videoProcessingFromEnv(env = process.env) {
+  const raw = String(env.GEMINI_VIDEO_PROCESSING ?? "").trim().toLowerCase();
+  if (!raw) return MEDIA_PROCESSING_AGENTIC;
+  return raw === "agentic" ? MEDIA_PROCESSING_AGENTIC : null;
+}
+
+/**
+ * Models that answered a `media_processing` with "no such field".
+ *
+ * The third memo of this shape, for the third guess of this shape — see
+ * `mediaResolutionRefused` below for the pattern and `supportsAgenticVideo` for the guess.
+ */
+const mediaProcessingRefused = new Set();
+
+/**
  * Models that answered a `mediaResolution` with "no such field".
  *
  * Support for the field is guessed at from the version number, the same way
@@ -207,7 +260,8 @@ const mediaResolutionRefused = new Set();
 const thinkingConfigRefused = new Set();
 
 /**
- * Forget which models have refused `mediaResolution` or `thinkingConfig`.
+ * Forget which models have refused `mediaResolution`, `thinkingConfig` or
+ * `media_processing`.
  *
  * A test seam, like `resetClipCache`. Both memos are module state that outlives a single
  * `streamChat`, which is exactly what they are for — and exactly what makes one test's
@@ -216,6 +270,7 @@ const thinkingConfigRefused = new Set();
 export function resetFieldSupport() {
   mediaResolutionRefused.clear();
   thinkingConfigRefused.clear();
+  mediaProcessingRefused.clear();
 }
 
 /**
@@ -228,6 +283,35 @@ export function resetFieldSupport() {
  */
 export function supportsThinkingBudget(model) {
   return !/(?:^|[^0-9])2\.0(?:[^0-9]|$)/.test(String(model));
+}
+
+/**
+ * Whether `model` is expected to accept `media_processing: "AGENTIC"` on a video part.
+ *
+ * Agentic video shipped on Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash and 3.5 Flash-Lite,
+ * "and later models" — which is not one clean version cut but two, because the Lite tier
+ * got it half a release earlier than the full one. So: 3.6 and up for a full model, 3.5
+ * and up for a Lite one. In this chain that means `3.7-flash`, `3.6-flash` and
+ * `3.5-flash-lite` yes; `3.5-flash`, `3-flash-preview`, `3.1-flash-lite`, `2.5-flash` and
+ * `2.0-flash` no.
+ *
+ * Matched on the version number rather than listed by name, for the reason
+ * `supportsThinkingBudget` gives: a new ID should slot in without a code change. Major and
+ * minor are compared as separate integers on purpose — read as a decimal, a future 3.10
+ * would sort *below* 3.6 and silently lose the feature.
+ *
+ * A wrong guess costs one 400 on one model, once — see `isUnsupportedMediaProcessing` and
+ * `mediaProcessingRefused`.
+ */
+export function supportsAgenticVideo(model) {
+  const name = String(model);
+  const match = /(\d+)(?:\.(\d+))?/.exec(name);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2] ?? 0);
+  const [floorMajor, floorMinor] = /-lite\b/.test(name) ? [3, 5] : [3, 6];
+  if (major !== floorMajor) return major > floorMajor;
+  return minor >= floorMinor;
 }
 
 /**
@@ -388,6 +472,23 @@ export function isUnsupportedThinkingConfig(status, message = "") {
 export function isUnsupportedMediaResolution(status, message = "") {
   if (status !== 400) return false;
   return /media[_ ]?resolution/i.test(message);
+}
+
+/**
+ * Whether a 400 is Gemini refusing `media_processing` as a field it doesn't recognise.
+ *
+ * The third safety net of this shape, and the one most likely to actually fire: agentic
+ * video is the newest of the three fields, so the models that don't know it are the ones
+ * still in the chain rather than a hypothetical old preview. Paired with
+ * `mediaProcessingRefused`, which stops the next request re-buying the same 400.
+ *
+ * Distinct from `isUnsupportedMediaResolution` by more than a word: `media_resolution`
+ * lives in `generationConfig` and `media_processing` on the part, so they fail
+ * independently and are repaired independently.
+ */
+export function isUnsupportedMediaProcessing(status, message = "") {
+  if (status !== 400) return false;
+  return /media[_ ]?processing/i.test(message);
 }
 
 /**
@@ -1343,7 +1444,13 @@ function describeOEmbedFallback(meta, platform, link, reason) {
  */
 export function toGeminiContents(
   messages,
-  { clips, articles, attachVideos = true, extraNotes = [] } = {},
+  {
+    clips,
+    articles,
+    attachVideos = true,
+    extraNotes = [],
+    videoProcessing = MEDIA_PROCESSING_AGENTIC,
+  } = {},
 ) {
   const attachedVideos = new Set();
   const attachedClips = new Set();
@@ -1401,7 +1508,14 @@ export function toGeminiContents(
           );
           continue;
         }
-        parts.push({ file_data: { file_uri: canonicalYouTubeURL(id) } });
+        const video = { file_data: { file_uri: canonicalYouTubeURL(id) } };
+        // Beside `file_data`, not inside it: `media_processing` is a sibling field on the
+        // part. Whether the model about to be called can actually read it is not decided
+        // here — `streamRound` sets or strips it per attempt, since the chain may walk
+        // from a model that supports agentic video to one that doesn't mid-turn. See
+        // `MEDIA_PROCESSING_AGENTIC`.
+        if (videoProcessing) video.media_processing = videoProcessing;
+        parts.push(video);
       }
 
       // The same provider list the links were resolved with, so a caller that narrowed or
@@ -1565,6 +1679,23 @@ function* framesFromLine(line) {
 
     const hasText = typeof part.text === "string" && part.text.length > 0;
     const call = part.functionCall ?? part.function_call;
+
+    // Agentic video navigation (see `MEDIA_PROCESSING_AGENTIC`) reports itself as the
+    // model's own server-side tool parts — `tool_call`/`tool_response` with
+    // `tool_type: "MEDIA_PROCESSING"`, one pair per stretch of video it decided to load.
+    // They are not `functionCall`s: nothing is being asked of us, there is nothing to run,
+    // and the matching response is already in the stream beside the call.
+    //
+    // What they must *not* do is fall into the delta branch below. Each one carries a
+    // thought signature, and that branch would file it on an empty text part — the exact
+    // "rebuilt from scratch, signature quietly relocated" failure `ModelTurn`'s own note
+    // warns about. So they are yielded whole and replayed whole. Both spellings, because
+    // which one arrives is the wire format's business.
+    const navigation = part.tool_call ?? part.toolCall ?? part.tool_response ?? part.toolResponse;
+    if (navigation && !hasText && !call?.name) {
+      yield { type: "media_processing", part };
+      continue;
+    }
 
     // `signature` and `thought` are attached only when present, so the common frame — a
     // plain token from a model that isn't thinking — keeps the shape every consumer of
@@ -1780,9 +1911,33 @@ class ModelTurn {
     this._parts.push(part);
   }
 
+  /**
+   * A part echoed back exactly as it arrived, for the ones this app has no opinion about.
+   *
+   * Today that means agentic video's `tool_call`/`tool_response` pairs. Gemini's guidance
+   * is to pass the full response back as history and let it handle them; they carry the
+   * thread of which parts of the video have already been loaded, so a turn that drops
+   * them asks the model to keep navigating a clip it can no longer remember looking at.
+   * Never merged into a neighbouring part and never rewritten — verbatim is the only
+   * thing that is safe to do with a part whose contents are opaque.
+   */
+  addRaw(part) {
+    if (part) this._parts.push(part);
+  }
+
   /** The parts, minus any that ended up empty and unsigned. */
   parts() {
-    return this._parts.filter((part) => part.functionCall || part.text || part.thoughtSignature);
+    return this._parts.filter(
+      (part) =>
+        part.functionCall ||
+        part.text ||
+        part.thoughtSignature ||
+        part.thought_signature ||
+        part.tool_call ||
+        part.toolCall ||
+        part.tool_response ||
+        part.toolResponse,
+    );
   }
 
   /**
@@ -1828,6 +1983,10 @@ export async function* streamChat({
   thinkingBudgetTokens = DEFAULT_THINKING_BUDGET_TOKENS,
   toolRoundThinkingBudgetTokens = DEFAULT_TOOL_ROUND_THINKING_BUDGET_TOKENS,
   mediaResolution = null,
+  // Agentic video is on by default, unlike `mediaResolution` — see `MEDIA_PROCESSING_AGENTIC`
+  // for why, and `videoProcessingFromEnv` for the operator's off switch. Pass `null` for
+  // the old behaviour: every frame of the clip, once a second, in one pass.
+  videoProcessing = MEDIA_PROCESSING_AGENTIC,
   signal,
   fetchImpl = fetch,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
@@ -1921,7 +2080,19 @@ export async function* streamChat({
       articles,
       attachVideos: attachMedia,
       extraNotes,
+      videoProcessing,
     });
+
+    // Which parts asked for agentic video, captured **once**, here, rather than re-read
+    // from the request body on each round. `streamRound` strips the field from these very
+    // objects when the model it lands on can't read it, and `contents` is the same array
+    // for every round of the turn — so a round that walked to an older model would
+    // otherwise erase the intent for every round after it, and the feature would silently
+    // switch itself off partway through a turn. Nothing appended later (a model turn, a
+    // functionResponse) can carry the field, so one pass is a complete list.
+    const agenticParts = contents.flatMap((turn) =>
+      turn.parts.filter((part) => part.media_processing).map((part) => [part, part.media_processing]),
+    );
     // Whether the model has a video to watch. It changes what the wait *is* — Gemini
     // fetching and watching a clip before its first token is a different thing to report
     // than a model composing a sentence — and the reader is owed the difference.
@@ -1980,6 +2151,7 @@ export async function* streamChat({
         media,
         thinkingBudgetTokens: roundThinkingBudget,
         mediaResolution: media ? mediaResolution : null,
+        agenticParts,
         overloadSweeps,
         // Only the round that has no more tools to call is writing the verdict — see
         // `DEFAULT_ANSWER_HOLD_MS`. A tool round's own frames are never held: there is
@@ -1993,6 +2165,14 @@ export async function* streamChat({
         if (frame.type === "function_call") {
           calls.push(frame.call);
           turn.addCall(frame.call, frame.signature);
+          continue;
+        }
+        // Recorded into the turn, not forwarded: the navigation trace belongs in the
+        // history Gemini gets back, and means nothing to a reader watching a fact-check.
+        // The wait it represents is already reported — that is what the `waiting` and
+        // `thinking` stages are for.
+        if (frame.type === "media_processing") {
+          turn.addRaw(frame.part);
           continue;
         }
         // Stamped with the round here rather than reported bare, because the number only
@@ -2134,6 +2314,7 @@ async function* streamRound({
   media = false,
   thinkingBudgetTokens = 0,
   mediaResolution = null,
+  agenticParts = [],
   overloadSweeps = OVERLOAD_SWEEPS,
   answerHoldMs = 0,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -2225,6 +2406,16 @@ async function* streamRound({
       requestBody.generationConfig.mediaResolution = mediaResolution;
     } else {
       delete requestBody.generationConfig.mediaResolution;
+    }
+
+    // And once more for the one field of the three that lives on a part rather than in
+    // `generationConfig`. Same shape, same reason: only some of the chain understands
+    // agentic video, so a turn that starts on `3.7-flash` and falls through to
+    // `2.5-flash` has to arrive there as an ordinary video part rather than a 400.
+    const agentic = supportsAgenticVideo(model) && !mediaProcessingRefused.has(model);
+    for (const [part, mode] of agenticParts) {
+      if (agentic) part.media_processing = mode;
+      else delete part.media_processing;
     }
 
     let response;
@@ -2321,6 +2512,26 @@ async function* streamRound({
       if (isUnsupportedMediaResolution(response.status, message)) {
         const firstRefusal = !mediaResolutionRefused.has(model);
         mediaResolutionRefused.add(model);
+        if (firstRefusal) {
+          lastError = describeFailure(response.status, message, model);
+          index -= 1;
+          continue;
+        }
+      }
+
+      // The same repair for `media_processing`, and the one most likely to be needed:
+      // `supportsAgenticVideo` is guessing about a feature that shipped after several of
+      // the models in this chain, so a model that turns out not to know the field is an
+      // expected outcome rather than a surprise. Falling through would be the wrong move
+      // for the usual reason — the next model down is *older*, so it is if anything more
+      // likely to refuse — and the user asked about a video, so failing the turn over how
+      // that video is read is the one outcome worth spending a retry to avoid.
+      //
+      // Terminating for the same reason the two repairs around it do: the memo means the
+      // retry cannot carry the field, so it cannot be refused for this reason twice.
+      if (isUnsupportedMediaProcessing(response.status, message)) {
+        const firstRefusal = !mediaProcessingRefused.has(model);
+        mediaProcessingRefused.add(model);
         if (firstRefusal) {
           lastError = describeFailure(response.status, message, model);
           index -= 1;

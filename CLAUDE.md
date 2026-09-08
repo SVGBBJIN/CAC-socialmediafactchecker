@@ -33,7 +33,7 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 621 tests; `worker/`'s is 5.
+this writing the whole suite is 629 tests; `worker/`'s is 5.
 
 `test-page-shapes.js` is the one suite backed by files rather than inline HTML: `web/fixtures/`
 holds one page per *shape* (front page, story, paywalled, JS shell, AMP copy, link-heavy
@@ -104,7 +104,7 @@ resolved the usual way. The hint is never truth — the download re-validates th
 regardless — so a stale or hostile hint costs a wasted attempt and never a wrong answer.
 
 **Getting media to Gemini** — four shapes, cheapest first, decided per platform:
-1. **YouTube** — handed to Gemini as a `file_data` URL part; Gemini fetches and watches it itself. No bytes touch this app.
+1. **YouTube** — handed to Gemini as a `file_data` URL part; Gemini fetches and watches it itself. No bytes touch this app. The part carries `media_processing: "AGENTIC"` (`MEDIA_PROCESSING_AGENTIC` in `lib/gemini.js`), so the model navigates the timeline and loads only the stretches the prompt needs instead of ingesting every frame at 1 FPS — the difference between free and ~180k tokens per round on a half-hour video. Only models that have the feature get the field; `streamRound` strips it per attempt as the chain is walked, and a refusal is repaired the same way `mediaResolution` is. YouTube only: downloaded clips are short enough that a static read is the better one. `GEMINI_VIDEO_PROCESSING=static` turns it off.
 2. **TikTok** — `lib/tiktok.js`: embed page → `__FRONTITY_CONNECT_STATE__` blob → CDN URL (video or, for photo posts, `imagePostInfo.displayImages[]`) → bytes downloaded and attached (inline or via `lib/gemini-files.js`'s resumable upload past ~14 MB).
 3. **Instagram** — `lib/instagram.js`: same shape via `/graphql/query` (`doc_id` + shortcode + CSRF) → `video_url` or each `XDTGraphImage.display_url` for carousels.
 4. **Any other link** — treated as a "page", not a video: `lib/article.js` fetches and extracts text, quoted into the prompt as the subject under examination (never cited as a source). A homepage or section front is refused rather than read (`looksLikeIndexPage` — shallow path + a wall of anchors + almost no prose that isn't link text): there is no single claim on one, and the failure it prevents is the model checking whichever headline it happened to see. Two other shapes are handled rather than mis-read: a page whose text extracts to nothing is retried once against its own AMP/print copy (`readerVariants`, same-origin only, half the deadline), and a metered page is flagged `partial` (`looksPaywalled` — the site's own `isAccessibleForFree`, or a meter phrase in a short body) so the model is told the rest is unread rather than absent.
