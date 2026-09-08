@@ -24,6 +24,11 @@ const BADGE_ICONS: Record<"bad" | "warn" | "good" | "muted", JSX.Element> = {
 export interface VerdictBadgeProps {
   /** Which of the four closed verdicts to render. */
   verdict: VerdictKey;
+  /** The stamp-in animation. On by default: the badge and its icon are both at opacity 0
+   * until `.in` is present (the class the product adds a frame after mount, `revealIn` in
+   * public/app.js), so a badge rendered without it would simply be invisible. Pass false
+   * only where something else adds the class. */
+  animate?: boolean;
 }
 
 /**
@@ -31,11 +36,11 @@ export interface VerdictBadgeProps {
  * Corroborated, or Insufficient evidence. Renders both the whole-answer badge
  * (`verdictHTML`) and each claim's own badge in the split-panes layout use.
  */
-export function VerdictBadge({ verdict }: VerdictBadgeProps) {
+export function VerdictBadge({ verdict, animate = true }: VerdictBadgeProps) {
   const v = VERDICTS[verdict];
   return (
     <div className="badges">
-      <span className={`badge verdict ${v.css}`}>
+      <span className={`badge verdict ${v.css}${animate ? " in" : ""}`}>
         <svg className="badge-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">{BADGE_ICONS[v.css]}</svg>
         {v.label}
       </span>

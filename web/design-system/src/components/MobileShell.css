@@ -1,0 +1,190 @@
+/* Ported from web/public/index.html's phone breakpoint — the design system's stacked mobile
+   shell. Four bands, each with an edge of its own: title bar, video strip, claim sheet,
+   composer. What the app replaced with this was a full-bleed video plane with translucent
+   chrome floating over it and the answer capped at 55vh; the sheet here is opaque and takes
+   everything the strip leaves.
+
+   These classes are the shell's own scaffolding. The pieces inside it — Sidebar (as the
+   drawer), VideoPlayer, ClaimCard, SummaryCard, EntryBar — are the same components every
+   other screen uses, at the sizes set at the bottom of this file. */
+.mshell {
+  position: relative;
+  display: flex; flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* One row, spent on the check rather than on the app's own name: which post, on which
+   platform, how long ago. Under the same accent hairline the claim cards wear. */
+.mshell-topbar {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+}
+.mshell-topbar::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+.hamburger-btn {
+  width: 34px; height: 34px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--ink-dim);
+  cursor: pointer;
+}
+.hamburger-btn svg { width: 17px; height: 17px; }
+.hamburger-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mshell-title-wrap { flex: 1; min-width: 0; }
+.mshell-title {
+  margin: 0;
+  font-family: var(--font-display); font-size: 13.5px; font-weight: 600; line-height: 1.25;
+  background: linear-gradient(120deg, var(--ink) 30%, var(--accent) 85%);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mshell-sub {
+  margin-top: 1px;
+  font-size: 10.5px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Height the reader can trade: a strip by default, most of the screen when they ask for it
+   (a tap on the strip, or the chevron). */
+.mshell-media {
+  position: relative;
+  flex: 0 0 auto;
+  height: 24vh;
+  overflow: hidden;
+  background: #000;
+  cursor: pointer;
+  transition: height 0.3s cubic-bezier(.2,.8,.3,1);
+}
+.mshell-media.expanded { height: 62vh; cursor: default; }
+.mshell-media .video-player {
+  width: 100%; height: 100%; max-height: none;
+  aspect-ratio: auto; border-radius: 0; margin: 0;
+}
+.expand-btn {
+  position: absolute; top: 10px; right: 10px; z-index: 2;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(10,12,16,0.55);
+  backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  color: var(--ink);
+  cursor: pointer;
+}
+.expand-btn svg { width: 15px; height: 15px; transition: transform 0.25s ease; }
+.mshell-media.expanded .expand-btn svg { transform: rotate(180deg); }
+.expand-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The reading surface, pulled up over the strip's bottom edge by its own corner radius. */
+.mshell-sheet {
+  position: relative; z-index: 1;
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+  margin-top: -18px;
+  padding: 8px 14px 12px;
+  border-radius: 18px 18px 0 0;
+  background: var(--bg);
+  box-shadow: 0 -10px 24px rgba(0,0,0,0.28);
+}
+/* Decorative: the sheet is not draggable. It marks where the reading surface starts. */
+.sheet-handle {
+  width: 36px; height: 4px; flex: 0 0 auto;
+  margin: 0 auto 6px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.mshell-sheet > .summary-card { flex: 0 0 auto; margin-bottom: 8px; }
+.mshell-claims { display: flex; flex-direction: column; gap: 8px; }
+
+/* Each claim is a summary: title, verdict, two lines of the reasoning, the last line
+   fading out. `max-height` rather than `-webkit-line-clamp` on the analysis — it is a
+   wrapper around rendered markdown blocks, and a line clamp counts inline lines, so on
+   nested blocks it cuts mid-line. `.expanded` (the product toggles it on tap) drops both
+   clamps and brings back the sources: a summary that can't be opened would hide the
+   analysis the check exists to produce. */
+.mshell-claims .claim-card {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.mshell-claims .claim-eyebrow { font-size: 9.5px; padding: 1px 7px; margin-bottom: 6px; }
+.mshell-claims .claim-title {
+  font-size: 13px; line-height: 1.4; margin-bottom: 4px;
+  max-height: 2.8em; overflow: hidden;
+}
+.mshell-claims .claim-text {
+  position: relative;
+  font-size: 12.5px; line-height: 1.55; margin-bottom: 8px;
+  max-height: 3.1em; overflow: hidden;
+}
+.mshell-claims .claim-card:not(.expanded) .claim-text::after {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0;
+  height: 1.2em;
+  background: linear-gradient(to bottom, transparent, var(--surface));
+  pointer-events: none;
+}
+.mshell-claims .badges { margin-bottom: 0; }
+.mshell-claims .source-pills { display: none; }
+.mshell-claims .claim-card.expanded { cursor: default; }
+.mshell-claims .claim-card.expanded .claim-title,
+.mshell-claims .claim-card.expanded .claim-text { max-height: none; overflow: visible; }
+.mshell-claims .claim-card.expanded .claim-text { font-size: 15px; }
+.mshell-claims .claim-card.expanded .source-pills { display: flex; }
+
+/* With the video expanded there is only a sliver of sheet left, so a claim shrinks to the
+   line that identifies it and its verdict — the design system's minimal card. One the
+   reader has explicitly opened keeps its text. */
+.mshell.media-expanded .mshell-claims .claim-card:not(.expanded) .claim-text,
+.mshell.media-expanded .mshell-claims .claim-card:not(.expanded) .claim-eyebrow { display: none; }
+.mshell.media-expanded .mshell-claims .claim-card:not(.expanded) .claim-title { max-height: 1.4em; margin-bottom: 6px; }
+
+/* The empty state fills the sheet rather than sitting at the top of it. */
+.mshell-empty { flex: 1; min-height: 0; display: flex; padding: 8px 2px 16px; }
+
+.mshell-entrybar {
+  flex: 0 0 auto;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+/* The composer's floating-card treatment is for the desktop pane; here it is the bottom
+   band of the stack and the band itself carries the edge. */
+.mshell-entrybar .entry-bar { margin: 0; padding: 0; border: 0; background: none; box-shadow: none; flex-wrap: nowrap; }
+.mshell-entrybar .entry-bar input { min-width: 0; }
+
+/* The library is the app's navigation and a phone still needs it — it just cannot afford
+   270px of permanent gutter out of 390. */
+.mshell-scrim {
+  position: absolute; inset: 0; z-index: 5;
+  background: rgba(0,0,0,0.5);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.mshell-scrim.open { opacity: 1; pointer-events: auto; }
+.mshell-drawer {
+  position: absolute; top: 0; bottom: 0; left: 0; z-index: 6;
+  width: 270px; max-width: 82%;
+  transform: translateX(-100%);
+  transition: transform 0.22s ease;
+  box-shadow: 12px 0 32px rgba(0,0,0,0.35);
+}
+.mshell-drawer.open { transform: translateX(0); }
+.mshell-drawer .sidebar { width: 100%; height: 100%; }
+@media (prefers-reduced-motion: reduce) {
+  .mshell-media, .mshell-drawer, .mshell-scrim, .expand-btn svg { transition: none; }
+}

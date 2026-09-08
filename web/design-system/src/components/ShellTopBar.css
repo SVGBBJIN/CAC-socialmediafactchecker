@@ -1,0 +1,38 @@
+/* Ported from web/public/index.html — the title bar above the panes on desktop/tablet:
+   which check is open, on which platform, and how long ago it was checked. The accent
+   hairline across its top edge is the same gradient the claim card wears, so the pane reads
+   as one surface with the cards inside it rather than a header bolted above them. */
+.shell-topbar {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 16px 28px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+/* Nothing selected: the bar is hidden outright rather than left standing with an empty
+   title — an empty bar is a layout element that says nothing. */
+.shell-topbar[hidden] { display: none; }
+.shell-topbar::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+.shell-topbar-meta { min-width: 0; }
+.shell-title {
+  margin: 0;
+  font-family: var(--font-display); font-size: 17px; font-weight: 600;
+  /* Ink fading into accent across the line — the same gradient-text treatment the empty
+     claim card's invitation uses. */
+  background: linear-gradient(120deg, var(--ink) 30%, var(--accent) 85%);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.shell-sub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+/* The phone layout has its own top bar (the drawer handle and the wordmark) and puts the
+   check's title over the video, so this one never appears there. */
+@media (max-width: 700px) {
+  .shell-topbar { display: none; }
+}

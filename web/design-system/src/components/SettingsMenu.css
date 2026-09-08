@@ -1,0 +1,161 @@
+/* Ported from web/public/index.html — the fullscreen settings dialog: a nav rail down the
+   left (Profile / General / Search / Instructions) and one section shown at a time beside
+   it, rather than the single long scrolling page this used to be. */
+.settings-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px;
+  border-radius: 7px; border: 1px solid transparent;
+  background: transparent; color: var(--ink-dim); cursor: pointer;
+  transition: transform 0.1s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.settings-btn svg { width: 15px; height: 15px; }
+.settings-btn:hover { color: var(--accent); border-color: var(--border); background: var(--surface-raised); }
+.settings-btn:active { transform: scale(0.96); }
+.settings-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.settings-page {
+  position: fixed; inset: 0;
+  width: 100vw; height: 100vh;
+  max-width: 100vw; max-height: 100vh;
+  margin: 0; padding: 0;
+  border: none; border-radius: 0;
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body);
+}
+.settings-page::backdrop { background: var(--bg); }
+
+.settings-shell { display: flex; width: 100%; height: 100%; }
+
+.settings-nav {
+  width: 220px; flex-shrink: 0; box-sizing: border-box;
+  display: flex; flex-direction: column;
+  padding: 22px 14px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+.settings-nav-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 0 8px; margin-bottom: 20px;
+  font-family: var(--font-mono); font-size: 14px; font-weight: 600; letter-spacing: 0.04em;
+  color: var(--ink);
+}
+.settings-nav-mark { width: 17px; height: 17px; flex-shrink: 0; }
+.settings-nav-mark svg { width: 100%; height: 100%; }
+.settings-nav-list { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.settings-nav-item {
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: 8px; border: none; background: none;
+  color: var(--ink-dim);
+  font-family: var(--font-body); font-size: 13.5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.settings-nav-item:hover { background: var(--surface-raised); color: var(--ink); }
+/* The same accent wash and leading edge the open library row wears — one selected-state
+   language across both of the app's lists. */
+.settings-nav-item.active {
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent) 16%, transparent), color-mix(in oklab, var(--accent) 3%, transparent));
+  color: var(--accent); font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.settings-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-nav-foot { margin-top: auto; }
+.settings-close {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-raised); color: var(--ink);
+  font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.settings-close:hover { border-color: var(--accent); color: var(--accent); }
+
+.settings-content { flex: 1; overflow-y: auto; padding: 40px 56px; }
+.settings-section { max-width: 560px; margin: 0 auto; }
+.settings-section h2 {
+  font-family: var(--font-display); font-size: 22px;
+  margin: 0 0 22px; padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row-label { font-size: 13.5px; color: var(--ink); }
+.settings-row-sub { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+
+.switch { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+.switch input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch .track {
+  position: absolute; inset: 0; border-radius: 100px;
+  background: var(--surface-raised); border: 1px solid var(--border);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.switch .thumb {
+  position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--ink-dim);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.switch input:checked ~ .track { background: color-mix(in oklab, var(--accent) 25%, transparent); border-color: var(--accent); }
+.switch input:checked ~ .thumb { transform: translateX(16px); background: var(--accent); }
+.switch input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.seg-control {
+  display: flex; gap: 4px; padding: 3px;
+  background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px;
+}
+.seg-control button {
+  flex: 1; padding: 5px 8px;
+  border-radius: 6px; border: 0; background: transparent;
+  color: var(--ink-dim); font-family: var(--font-body); font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.seg-control button.active { background: var(--surface); color: var(--accent); font-weight: 600; }
+.seg-control button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.settings-content textarea {
+  width: 100%; min-height: 140px; resize: vertical;
+  padding: 11px 13px;
+  border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface-raised); color: var(--ink);
+  font-family: var(--font-body); font-size: 13px; line-height: 1.55;
+}
+.settings-content textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Profile tab — account state lives here rather than on a second icon beside the gear. */
+.profile-head {
+  display: flex; align-items: center; gap: 14px;
+  padding-bottom: 18px; margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.profile-avatar {
+  width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border: 1px solid transparent;
+  color: #06201d; font-family: var(--font-mono); font-size: 15px; font-weight: 600;
+}
+.settings-text-input {
+  width: 100%; box-sizing: border-box;
+  padding: 9px 12px;
+  border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface-raised); color: var(--ink);
+  font-family: var(--font-body); font-size: 13.5px;
+}
+.settings-text-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.search-status { display: flex; align-items: center; gap: 7px; flex-shrink: 0; font-size: 12.5px; color: var(--ink-dim); }
+.search-status .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+@media (max-width: 700px) {
+  .settings-shell { flex-direction: column; }
+  .settings-nav { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+  .settings-content { padding: 24px 18px; }
+}

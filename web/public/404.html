@@ -10,6 +10,12 @@
      for a page that's moved lands on, from server.js's 404 branch in serveStatic. TRASE
      is the design system's own showcase brand, not this product's — the copy below says
      Trase, same as everywhere else in the app. -->
+<!-- The same body and mono faces the app itself loads (see public/index.html); display
+     stays on the app's serif there and here. The fallback stacks below are what this page
+     renders in when the font host is unreachable. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
   :root {
     --bg: #12151A;
@@ -20,8 +26,8 @@
     --muted: #8A93A3;
     --accent: #4FD1C5;
     --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
-    --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --font-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   }
   html, body { height: 100%; margin: 0; }
   body {

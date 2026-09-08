@@ -1,5 +1,6 @@
 /* Ported from web/public/index.html — the split-pane claim card: eyebrow, title, analysis
-   text, verdict badge, sources. */
+   text, verdict badge, sources, and every state the card passes through while a check
+   runs (spinner, skeleton, empty). */
 .claim-card {
   flex: 1 1 auto;
   display: flex; flex-direction: column;
@@ -9,6 +10,25 @@
   border-radius: 14px;
   padding: 20px;
   overflow: hidden;
+  /* Pointer-driven 3D tilt (see `useTilt` below / handleCardTilt in public/app.js).
+     `transform-style: preserve-3d` is what makes the `perspective()` those set read as
+     depth rather than a flat skew. */
+  transform-style: preserve-3d;
+  transition: transform 0.12s ease-out;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .claim-card { transition: none; }
+}
+/* The soft violet highlight that follows the pointer during the tilt — positioned by an
+   inline `radial-gradient(...)` centred on the cursor, and `pointer-events: none` so it
+   can't steal the mousemove it exists to react to. */
+.tilt-glare {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
 }
 /* Top-edge accent bar — teal into the secondary violet accent, the one place accent-2
    appears outside the loading iris. */
@@ -20,6 +40,10 @@
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
+/* The per-claim position label ("Claim 2 of 4") — a pill, matching the chip language
+   `.badge`/`.source-pill` already use. `--ink-dim` at 11px semibold rather than the design
+   system's accent-tinted mono: in the stacked layout this pill is the only thing separating
+   one claim from the next, so it has to survive being skimmed. */
 .claim-eyebrow {
   display: inline-flex; align-items: center;
   align-self: flex-start;
@@ -28,21 +52,160 @@
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface-raised);
-  color: var(--muted);
-  font-family: var(--font-mono); font-size: 10.5px;
-  letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--ink-dim);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
 }
+/* Still being checked — accent-tinted, so a reader scanning the grid can tell a box apart
+   from an already-settled one without reading its text. */
 .claim-eyebrow.pending { color: var(--accent); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
 
+/* `.in` is added a frame after mount (`revealIn` in public/app.js); without it both of
+   these sit at opacity 0, which is the point — they fade in as the analysis lands. */
 .claim-title {
   font-family: var(--font-display); font-size: 15.5px; font-weight: 600; color: var(--ink);
   line-height: 1.4; margin: 0 0 10px; word-break: break-word;
+  opacity: 0; transform: translateY(6px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
 }
+.claim-title.in { opacity: 1; transform: translateY(0); }
 
 .claim-text {
   font-family: var(--font-display); font-size: 16.5px; line-height: 1.55; color: var(--ink);
   margin: 0 0 16px;
+  opacity: 0; transform: translateY(6px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
 }
+.claim-text.in { opacity: 1; transform: translateY(0); }
 .claim-text code { font-family: var(--font-mono); font-size: 0.85em; background: var(--surface-raised); padding: 0.1em 0.35em; border-radius: 4px; }
+.claim-text pre { font-family: var(--font-mono); font-size: 0.8em; background: var(--surface-raised); padding: 10px; border-radius: 8px; overflow-x: auto; }
 .claim-text a.citation { color: var(--accent); text-decoration: none; }
 .claim-text a.citation:hover { text-decoration: underline; }
+
+/* ---------- Running: the iris, the stage line, the clock ---------- */
+/* `flex: 1` lets this claim the card's whole height and centre in it, rather than sitting
+   pinned near the top of a tall, otherwise empty card. */
+.card-loading {
+  flex: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  padding: 22px 0;
+}
+.iris-wrap { position: relative; width: 84px; height: 84px; }
+.iris-wrap svg { width: 100%; height: 100%; }
+.blade {
+  transform-origin: 50px 50px;
+  fill: var(--accent);
+  opacity: 0.85;
+  animation: blade-breathe 2.6s ease-in-out infinite;
+}
+.blade:nth-child(even) { fill: var(--accent-2); }
+.blade:nth-child(1) { animation-delay: 0s; }
+.blade:nth-child(2) { animation-delay: -0.43s; }
+.blade:nth-child(3) { animation-delay: -0.86s; }
+.blade:nth-child(4) { animation-delay: -1.3s; }
+.blade:nth-child(5) { animation-delay: -1.73s; }
+.blade:nth-child(6) { animation-delay: -2.16s; }
+@keyframes blade-breathe {
+  0%, 100% { transform: rotate(var(--rot)) scaleY(0.62); opacity: 0.55; }
+  50%      { transform: rotate(var(--rot)) scaleY(1);    opacity: 0.95; }
+}
+/* Settled: blades stopped and dimmed, seal drawn. The empty card holds this state too. */
+.seal-check { opacity: 0; transform: scale(0.5); transition: opacity 0.25s ease, transform 0.25s ease; }
+.iris-wrap.resolved .blade { animation: none; transform: rotate(var(--rot)) scaleY(0.9); opacity: 0.35; }
+.iris-wrap.resolved .seal-check { opacity: 1; transform: scale(1); }
+@media (prefers-reduced-motion: reduce) {
+  .blade, .seal-check { animation: none; transition: none; }
+}
+
+.status-text { font-size: 13px; color: var(--ink-dim); text-align: center; min-height: 18px; transition: opacity 0.35s ease; }
+.source-counter { font-family: var(--font-mono); font-size: 11px; color: var(--accent); min-height: 14px; }
+/* The live elapsed readout. Deliberately plain: the progress bar below is eased *because*
+   a raw clock reads as slower, so this sits beside it rather than replacing it. */
+.elapsed-time { font-family: var(--font-mono); font-size: 11px; color: var(--muted); min-height: 14px; }
+/* Every status label a stream updates in place fades out before the swap and back in
+   after (`setStatusText`), so a stage change reads as motion rather than a jump cut. */
+.stage-text { opacity: 1; transition: opacity 0.3s ease; }
+
+/* A raw clock is honest about how long a check takes and reads as *slower* than a bar that
+   keeps creeping forward. `createProgressTicker` eases this toward — never quite to — 92%,
+   and only real completion takes it to 100%. */
+.mini-progress {
+  width: 100%; max-width: 200px;
+  height: 3px; border-radius: 999px; overflow: hidden;
+  background: var(--surface-raised);
+}
+.mini-progress.wide { max-width: 220px; margin-top: 2px; }
+.mini-progress-bar {
+  height: 100%; width: 0%; border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.4s cubic-bezier(.4,0,.2,1);
+}
+
+/* The claim-count reveal between "found them" and "checking them". */
+.found-count {
+  font-family: var(--font-display); font-size: 44px; font-weight: 600; line-height: 1;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  opacity: 0; transform: translateY(6px) scale(0.9);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+.found-count.in { opacity: 1; transform: translateY(0) scale(1); }
+
+/* ---------- Skeleton: a claim named but not yet checked ---------- */
+.skeleton-body { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.skeleton-line {
+  display: block; height: 10px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-raised) 25%, var(--border) 37%, var(--surface-raised) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+.skeleton-line.short { width: 55%; }
+@keyframes skeleton-shimmer {
+  0%   { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+/* A box that has just stopped shimmering. Claims settle one at a time and seconds apart,
+   anywhere in the grid — the border lights up once and fades back rather than the box
+   silently swapping its contents. */
+.claim-pane.just-settled { animation: claim-settle 1.1s ease-out 1; }
+@keyframes claim-settle {
+  0%   { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(79,209,197,0.35); }
+  100% { border-color: var(--border); box-shadow: none; }
+}
+
+/* ---------- Empty: before any check has run ---------- */
+/* The invitation sits over a large, settled iris — the design system's "App shell —
+   Analyzing" screen. The entrance is scoped to this variant alone: every other card is
+   also a `.claim-pane` whose `transform` ClaimGridSplit animates, and a CSS entrance on
+   the same property would fight it and replay on every rebuild. */
+.claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
+.claim-card.claim-empty {
+  opacity: 0;
+  animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
+}
+@keyframes card-in {
+  from { opacity: 0; transform: scale(0.97) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .claim-card.claim-empty { animation: none; opacity: 1; }
+}
+.empty-stack { position: relative; display: flex; align-items: center; justify-content: center; }
+.empty-stack .iris-wrap { width: 150px; height: 150px; opacity: 0.5; }
+.claim-empty-text {
+  position: absolute;
+  /* A measure rather than the design system's single `nowrap` line: this app's invitation
+     is a sentence naming both things a reader can do here, and at `nowrap` it would run
+     out past the card's edges and be clipped by its `overflow: hidden`. */
+  width: 24ch;
+  font-family: var(--font-display);
+  font-size: clamp(17px, 5.1vw, 22px); font-weight: 600; line-height: 1.4;
+  margin: 0;
+  background: linear-gradient(135deg, var(--ink), var(--accent) 130%);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+@media (max-width: 520px) {
+  .claim-empty-text { width: 17ch; }
+}

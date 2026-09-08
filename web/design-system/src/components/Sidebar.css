@@ -1,12 +1,14 @@
-/* Ported from web/public/index.html — sidebar, collapsed rail, new-check button, search. */
+/* Ported from web/public/index.html — the library column: wordmark, "New check", search,
+   the check-history list, and the sign-in row pinned to its bottom edge. */
 .sidebar {
   width: 270px;
+  height: 100%;
   flex-shrink: 0;
+  box-sizing: border-box;
+  display: flex; flex-direction: column;
+  padding: 18px 14px;
   background: var(--surface);
   border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  padding: 18px 14px;
   transition: width 0.18s ease, padding 0.18s ease;
 }
 
@@ -14,44 +16,37 @@
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 16px; padding: 0 4px;
 }
-.sidebar-header .mark { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
+.sidebar-header .mark { width: 21px; height: 21px; color: var(--accent); flex-shrink: 0; }
 .sidebar-header .mark svg { width: 100%; height: 100%; }
-.sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); }
+/* The single auto margin sits on the wordmark rather than on the first button after it:
+   flexbox splits free space across *every* auto margin present, so a margin on each
+   visible button spaced them apart from each other instead of packing them right. */
+.sidebar-header .wordmark {
+  font-family: var(--font-mono); font-size: 14.5px; font-weight: 600;
+  letter-spacing: 0.13em; color: var(--ink); margin-right: auto;
+}
 
-.sidebar[data-collapsed="true"] {
-  width: 60px;
-  padding: 18px 9px;
-}
-.sidebar[data-collapsed="true"] .sidebar-header {
-  flex-direction: column;
-  gap: 10px;
-}
-.sidebar[data-collapsed="true"] .wordmark,
-.sidebar[data-collapsed="true"] .new-check-label,
-.sidebar[data-collapsed="true"] .search,
-.sidebar[data-collapsed="true"] .lib-list {
-  display: none;
-}
-.sidebar[data-collapsed="true"] .new-check { justify-content: center; padding: 10px; }
-
+/* The one filled control in this column, matching the composer's submit button — both ends
+   of "start a check" look like the same action. */
 .new-check {
   display: flex; align-items: center; gap: 8px;
   width: 100%;
   padding: 10px 12px;
   margin-bottom: 12px;
   border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--surface-raised);
-  color: var(--ink);
+  border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #06201d;
   font-family: var(--font-body);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
 }
-.new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
-.new-check:hover { border-color: var(--accent); color: var(--accent); }
-.new-check:hover svg { color: var(--accent); }
-.new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: #06201d; }
+.new-check:hover { filter: brightness(1.08); }
+.new-check:active:not(:disabled) { transform: scale(0.96); }
+.new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .new-check:disabled { opacity: 0.5; cursor: default; }
 
 .search {
@@ -68,5 +63,128 @@
 .search::placeholder { color: #616977; }
 .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
+.lib-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  flex: 1; min-height: 0; overflow-y: auto;
+}
 .lib-empty { font-size: 12px; color: var(--muted); padding: 10px; }
+
+/* Pinned to the bottom edge however tall the list is — `margin-top: auto` claims whatever
+   the list didn't, the row-axis trick `.wordmark`'s own auto margin uses above. */
+.sidebar-footer { margin-top: auto; padding-top: 12px; flex-shrink: 0; }
+.sidebar-signin-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-family: var(--font-body); font-size: 13px; font-weight: 600;
+  cursor: pointer;
+}
+.sidebar-signin-btn svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
+.sidebar-signin-btn:hover { border-color: var(--accent); color: var(--accent); }
+.sidebar-signin-btn:hover svg { color: var(--accent); }
+.sidebar-signin-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------- Collapsed rail ---------- */
+/* Down to the header icons and the new-check button: the search box and the list have
+   nowhere useful to go at 60px, so they're hidden until the column is expanded again — the
+   rail is a "get it out of the way", not a second way to browse. */
+.sidebar[data-collapsed="true"] { width: 60px; padding: 18px 9px; }
+.sidebar[data-collapsed="true"] .sidebar-header { flex-direction: column; gap: 10px; }
+.sidebar[data-collapsed="true"] .wordmark,
+.sidebar[data-collapsed="true"] .new-check-label,
+.sidebar[data-collapsed="true"] .search,
+.sidebar[data-collapsed="true"] .lib-list { display: none; }
+.sidebar[data-collapsed="true"] .new-check { justify-content: center; padding: 10px; }
+.sidebar[data-collapsed="true"] .sidebar-signin-btn { padding: 10px; }
+.sidebar[data-collapsed="true"] .sidebar-signin-btn span { display: none; }
+
+/* ---------- History rows ---------- */
+.lib-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  /* The list is rebuilt whole on every change, so each row re-plays this stagger on every
+     render rather than only on first load. */
+  opacity: 0;
+  animation: lib-item-in 0.3s ease forwards;
+}
+.lib-item:nth-of-type(n+9) { animation-delay: 0s; }
+.lib-item:nth-of-type(1) { animation-delay: 0.02s; }
+.lib-item:nth-of-type(2) { animation-delay: 0.05s; }
+.lib-item:nth-of-type(3) { animation-delay: 0.08s; }
+.lib-item:nth-of-type(4) { animation-delay: 0.11s; }
+.lib-item:nth-of-type(5) { animation-delay: 0.14s; }
+.lib-item:nth-of-type(6) { animation-delay: 0.17s; }
+.lib-item:nth-of-type(7) { animation-delay: 0.2s; }
+.lib-item:nth-of-type(8) { animation-delay: 0.23s; }
+@keyframes lib-item-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lib-item { animation: none; opacity: 1; }
+}
+.lib-item:hover { background: var(--surface-raised); }
+.lib-item:active { background: var(--surface-raised); transform: scale(0.99); }
+/* The open check: an accent wash fading out across the row plus a solid leading edge. Flat
+   `--surface-raised` would make the row under the pointer and the row being read look the
+   same, which is the one thing this state exists to say. */
+.lib-item.active {
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent) 16%, transparent), color-mix(in oklab, var(--accent) 3%, transparent));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.lib-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The row's icon tile: the site's own favicon, or the fallback glyph — never nothing,
+   which is what an empty tile on every row used to read as. */
+.lib-thumb {
+  width: 34px; height: 34px; border-radius: 7px; flex-shrink: 0;
+  background: linear-gradient(135deg, #2A3140, #1A1E27);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.lib-thumb svg { width: 17px; height: 17px; color: var(--ink-dim); }
+/* Favicons come at every size and quality; a fixed box with `contain` keeps a 16px .ico
+   and a 512px .png the same size in the row. */
+.lib-favicon { width: 18px; height: 18px; object-fit: contain; border-radius: 3px; }
+
+.lib-meta { min-width: 0; }
+.lib-title {
+  font-size: 12.5px; color: var(--ink); line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+
+/* Revealed on intent, so a dozen saved checks don't carry a dozen visible trash icons at
+   rest. Kept in the layout at `opacity: 0` rather than `hidden`: still reachable by Tab,
+   and it never shifts the title's width when it appears. */
+.lib-delete {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-dim);
+  opacity: 0;
+  cursor: pointer;
+}
+.lib-delete svg { width: 14px; height: 14px; }
+.lib-item:hover .lib-delete,
+.lib-item:focus-within .lib-delete,
+.lib-delete:focus-visible { opacity: 1; }
+.lib-delete:hover { border-color: var(--bad); color: var(--bad); background: color-mix(in oklab, var(--bad) 10%, transparent); }
+.lib-delete:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot.bad { background: var(--bad); }
+.dot.warn { background: var(--warn); }
+.dot.good { background: var(--good); }
+.dot.muted { background: var(--muted); }

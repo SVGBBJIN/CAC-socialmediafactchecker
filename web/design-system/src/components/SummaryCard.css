@@ -1,0 +1,38 @@
+/* Ported from web/public/index.html — the check at a glance, above the claims: how many
+   were checked and how they came out. The product draws it in the phone sheet only, where
+   the claims are summary boxes; on a desktop grid every verdict badge is already on screen
+   and this would be a second copy of it. */
+.summary-card {
+  padding: 18px 20px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: inset 0 1px 0 rgba(240,237,230,0.04);
+}
+.summary-title { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--ink); margin: 0; }
+.summary-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.summary-stats { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 14px; }
+.summary-stat { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.summary-count {
+  flex-shrink: 0;
+  width: 26px; height: 26px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+}
+.summary-count.bad   { background: color-mix(in oklab, var(--bad) 20%, transparent);   color: var(--bad); }
+.summary-count.warn  { background: color-mix(in oklab, var(--warn) 20%, transparent);  color: var(--warn); }
+.summary-count.good  { background: color-mix(in oklab, var(--good) 20%, transparent);  color: var(--good); }
+.summary-count.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); }
+/* Dimmed rather than dropped: the four verdicts are a fixed set, and a card that changed
+   shape with each check would have to be read again instead of glanced at. */
+.summary-stat[data-count="0"] { opacity: 0.45; }
+.summary-label { font-size: 12.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The size the phone sheet actually uses — the full card is for a wider surface. */
+.summary-card.compact { padding: 11px 13px; }
+.summary-card.compact .summary-title { font-size: 12.5px; }
+.summary-card.compact .summary-sub { font-size: 10.5px; margin-top: 1px; }
+.summary-card.compact .summary-stats { gap: 6px 12px; margin-top: 8px; }
+.summary-card.compact .summary-stat { gap: 5px; }
+.summary-card.compact .summary-count { width: 18px; height: 18px; font-size: 9.5px; }
+.summary-card.compact .summary-label { font-size: 10.5px; }

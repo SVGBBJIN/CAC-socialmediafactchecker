@@ -16,6 +16,17 @@
   rel="icon"
   href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='none' stroke='%234FD1C5' stroke-width='3' stroke-dasharray='13 3 13 3' stroke-linecap='round'/><circle cx='16' cy='16' r='3.5' fill='%234FD1C5'/><rect x='20.5' y='13.5' width='3' height='5' rx='1' fill='%239C8CF0'/></svg>"
 />
+<!-- Instrument Sans (body) and JetBrains Mono (the mono role), from the TRASE Design
+     System's tokens.css. The DS collapses display onto the same grotesque as body; this app
+     deliberately keeps its own serif in the display role (see --font-display below), so the
+     pair loaded here is the sans and the mono only. Loaded rather than @import-ed inside the
+     stylesheet below so the request starts with the document instead of after the ~100 KB
+     of inline CSS has parsed; `display=swap` and the full local fallback stacks on
+     --font-body/--font-mono are what keep an offline `node server.js` (or a blocked font
+     host) rendering in the system faces rather than in nothing. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
   :root {
     --bg: #12151A;
@@ -33,9 +44,15 @@
     --warn: #D6A84A;
     --bad: #C1594F;
 
+    /* The one place this app diverges from the design system's tokens on purpose: the DS
+       sets display to the same grotesque as body ("differentiated by weight rather than a
+       serif/sans split"), and this keeps the serif. What a claim card holds is prose to be
+       read, not UI copy, and the serif is what says so. Body and mono are the DS's own
+       faces (see the <link>s above); every fallback is a system face, so a page that never
+       reaches fonts.gstatic.com still renders in the register it was designed for. */
     --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
-    --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --font-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   }
 
   /* Light theme — set by applySettings via settings.theme; see the settings dialog's
@@ -95,7 +112,7 @@
     display: flex; align-items: center; gap: 8px;
     margin-bottom: 16px; padding: 0 4px;
   }
-  .sidebar-header .mark { width: 18px; height: 18px; color: var(--accent); flex-shrink: 0; }
+  .sidebar-header .mark { width: 21px; height: 21px; color: var(--accent); flex-shrink: 0; }
   .sidebar-header .mark svg { width: 100%; height: 100%; }
   /* `margin-left: auto` used to live on `.settings-btn` itself so it would push whichever
      button came right after the wordmark to the far edge. With three candidate buttons in
@@ -107,7 +124,14 @@
      the single auto margin on the wordmark instead reserves all the free space right after
      it, so every button downstream of it — however many are actually visible — sits packed
      together at the row's trailing edge, `gap` apart, with nothing to fight over. */
-  .sidebar-header .wordmark { font-family: var(--font-display); font-size: 16.5px; color: var(--ink); margin-right: auto; }
+  /* Mono, semibold, widely tracked — the TRASE Design System's own wordmark treatment,
+     which is mono there regardless of what the display role holds. The name is a mark
+     rather than a heading, so it is set apart by letterform and tracking rather than by
+     sharing the serif every claim title uses. */
+  .sidebar-header .wordmark {
+    font-family: var(--font-mono); font-size: 14.5px; font-weight: 600;
+    letter-spacing: 0.13em; color: var(--ink); margin-right: auto;
+  }
 
   /* ---------- Collapsed rail (desktop/tablet only) ---------- */
   /* `data-sidebar="collapsed"` on <html>, set by applySettings from
@@ -147,24 +171,26 @@
     .sidebar-collapse-btn { display: none; }
   }
 
+  /* The sidebar's one filled control, matching the composer's submit button — the design
+     system gives both the same accent→violet gradient, so the two ends of "start a check"
+     look like the same action. Everything else in this column stays outlined. */
   .new-check {
     display: flex; align-items: center; gap: 8px;
     width: 100%;
     padding: 10px 12px;
     margin-bottom: 12px;
     border-radius: 9px;
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    color: var(--ink);
+    border: 1px solid transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #06201d;
     font-family: var(--font-body);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
   }
-  .new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--accent); }
-  .new-check:hover { border-color: var(--accent); color: var(--accent); }
-  .new-check:hover svg { color: var(--accent); }
-  .new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .new-check svg { width: 15px; height: 15px; flex-shrink: 0; color: #06201d; }
+  .new-check:hover { filter: brightness(1.08); }
+  .new-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .new-check:disabled { opacity: 0.5; cursor: default; }
 
   .search {
@@ -244,7 +270,15 @@
   }
   [data-motion="reduced"] .lib-item { animation: none; opacity: 1; }
   .lib-item:hover { background: var(--surface-raised); }
-  .lib-item.active { background: var(--surface-raised); }
+  .lib-item:active { background: var(--surface-raised); transform: scale(0.99); }
+  /* The open check, from the DS's Sidebar: an accent wash that fades out across the row
+     plus a solid bar down its leading edge. It used to be the same flat `--surface-raised`
+     as :hover, which meant the row under the pointer and the row actually being read were
+     indistinguishable — the one thing this state exists to say. */
+  .lib-item.active {
+    background: linear-gradient(90deg, color-mix(in oklab, var(--accent) 16%, transparent), color-mix(in oklab, var(--accent) 3%, transparent));
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
   .lib-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   /* The history row's icon tile. It holds either the site's own favicon or the fallback
@@ -310,17 +344,94 @@
   /* ---------- Main pane ---------- */
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
+  /* Three pieces of the phone shell, off at every other width (see the phone breakpoint,
+     where each is turned on): the sheet's grab handle, the video strip's expand control,
+     and the per-check summary card the mobile sheet opens with. */
+  .sheet-handle,
+  .media-expand-btn,
+  .summary-card { display: none; }
+
+  /* ---------- Shell title bar (desktop/tablet) ---------- */
+  /* From the TRASE Design System's "App shell" screen. The accent hairline across its top
+     edge is the same gradient the claim card wears, so the pane reads as one surface with
+     the cards inside it rather than as a header bolted above them. Phone keeps its own
+     `.topbar` (the drawer handle and the wordmark) and never shows this one — there the
+     check's title is already the first line of the claim sheet. */
+  .shell-topbar {
+    display: none;
+    position: relative;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  @media (min-width: 701px) {
+    .shell-topbar { display: flex; }
+  }
+  /* `[hidden]` has to beat the `display: flex` above, which is a plain class rule and would
+     otherwise win on source order alone. */
+  .shell-topbar[hidden] { display: none; }
+  .shell-topbar::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }
+  .shell-topbar-meta { min-width: 0; }
+  .shell-title {
+    margin: 0;
+    font-family: var(--font-display); font-size: 17px; font-weight: 600;
+    /* Ink fading into accent across the line — the same gradient-text treatment the empty
+       card's invitation uses. */
+    background: linear-gradient(120deg, var(--ink) 30%, var(--accent) 85%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .shell-sub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+
   .entry-bar {
     display: flex; gap: 8px;
     padding: 18px 24px;
     border-top: 1px solid var(--border);
     flex-shrink: 0;
   }
+  /* Desktop/tablet: the composer is a raised card floating clear of the pane's edges — the
+     TRASE Design System's EntryBar — rather than a bar welded to the bottom of the window
+     by a hairline. The phone breakpoint further down deliberately keeps the welded
+     treatment: there the composer is the bottom edge of a full-bleed sheet drawn over the
+     video, and a card floating clear of the edge would leave a 20px strip of moving video
+     showing under it. */
+  @media (min-width: 701px) {
+    .entry-bar {
+      margin: 0 24px 20px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface-raised);
+      box-shadow: 0 12px 28px rgba(0,0,0,0.22), inset 0 1px 0 rgba(240,237,230,0.04);
+      transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    }
+    /* The whole card takes the focus ring, not just the input inside it: with the input's
+       own border set to transparent below, a focused composer would otherwise be marked
+       only by the browser's outline on a box that no longer has an edge of its own. */
+    .entry-bar:focus-within {
+      border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+      box-shadow: 0 14px 32px rgba(0,0,0,0.26), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
+    }
+  }
   .entry-bar input {
     flex: 1;
+    min-width: 120px;
     padding: 11px 14px;
     border-radius: 9px;
-    border: 1px solid var(--border);
+    /* Transparent rather than `--border`: inside the raised card above, a bordered field on
+       a bordered card reads as two boxes. The field is still separated from the card by its
+       darker `--surface` fill, and `:focus-within` on the card carries the focus state. */
+    border: 1px solid transparent;
     background: var(--surface);
     color: var(--ink);
     font-family: var(--font-body);
@@ -334,22 +445,30 @@
      everywhere. The label moves to `aria-label`/title (kept live by updateComposerMode in
      app.js) so "Ask" vs. "Check" is still announced to screen readers even though it's no
      longer painted on screen. */
-  .entry-bar button {
+  /* `#checkBtn` by id, not `.entry-bar button` as it used to be: the mic and + buttons are
+     inside this same row, and a bare descendant selector outranked `.icon-btn`'s own single
+     class — so the accent fill meant for the one submit button was landing on all three.
+     They now differ in kind as well as degree, the DS's submit button being the only
+     gradient-filled control in the composer, so the collision had to be resolved rather
+     than inherited. */
+  .entry-bar #checkBtn {
     flex: 0 0 auto; width: 42px; padding: 0;
     display: flex; align-items: center; justify-content: center;
     border-radius: 9px;
-    border: 1px solid var(--accent);
-    background: rgba(79,209,197,0.12);
-    color: var(--accent);
+    border: 1px solid transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #06201d;
     font-family: var(--font-body);
     font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
   }
-  .entry-bar button:hover { background: rgba(79,209,197,0.2); }
+  .entry-bar #checkBtn:hover { filter: brightness(1.08); }
   .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .entry-bar button:disabled { opacity: 0.5; cursor: default; }
-  .check-btn-icon { display: block; width: 18px; height: 18px; }
+  /* Dark ink on the gradient, the one place in the app where text sits *on* the accent
+     rather than in it — `currentColor` on the glyph would otherwise inherit teal on teal. */
+  .check-btn-icon { display: block; width: 18px; height: 18px; color: #06201d; }
   .check-btn-label {
     position: absolute; width: 1px; height: 1px;
     overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
@@ -642,6 +761,15 @@
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; min-height: calc(1.4em * 2);
   }
+  /* Desktop/tablet only: the shell title bar above the panes now names the check (see
+     `.shell-topbar`), so this box would be the same words a second time, one column over.
+     Hiding it also hands its two fixed lines back to `.video-thumb`, which derives its
+     height from whatever the pane's other children leave — the clip simply gets taller.
+     Below 701px there is no shell title bar and this stays exactly as it was: the title
+     floating over the top of the full-bleed video. */
+  @media (min-width: 701px) {
+    .video-title { display: none; }
+  }
   /* Same reasoning, one line instead of two — and kept in the flow even with nothing in
      it (`.video-link.empty`, toggled in app.js) rather than `hidden`, which would remove
      its box from layout and be one more way the space around the video changes size. */
@@ -758,9 +886,23 @@
 
   .claim-grid-status {
     grid-column: 1 / -1;
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
     padding: 4px 0 8px;
   }
+  /* Ported from the design system's ClaimCard: its "claims found" loading state used to
+     drop straight to a bare number with no iris behind it, which read as the search having
+     already stopped a beat before it actually had — the DS's own fix keeps the iris turning
+     through that moment instead of cutting it. This status strip had the identical gap: once
+     the model names its first claim, `renderClaimSkeletons` replaces the single running
+     card's full-size, breathing iris with this strip — text, a counter, a clock, a bar — and
+     none of them move on their own the way the iris did, so a check that runs for the rest of
+     its length with more than one claim spends nearly all of it looking stopped. Scaled down
+     to sit inline with a status line rather than centered alone in an otherwise empty card,
+     the way the single-claim running view uses it. `resolveIris` (app.js) already finds
+     whichever `.iris-wrap` is on screen — this is the only change that was needed for it to
+     also seal *this* one right before the finished card replaces the grid, the same beat a
+     single-claim check already got. */
+  .claim-grid-status .iris-wrap { width: 32px; height: 32px; margin-bottom: 2px; }
 
   .claim-card {
     /* `.claims-pane`'s only child outside grid mode (every render path replaces the pane's
@@ -794,9 +936,27 @@
     transition: transform 0.12s ease-out;
     will-change: transform;
   }
+  /* The DS's ClaimCard gives *every* card a `card-in` scale/translate entrance. Here it is
+     scoped to the empty card alone, and that is deliberate: in this app a `.claim-card` is
+     also a `.claim-pane` in the claims grid (see `claimPanesHTML`), and those boxes are torn
+     down and rebuilt on every streamed claim while `flipClaimsPane` animates `transform` on
+     them through the Web Animations API. A CSS entrance on the same property would fight it
+     for the same reason the note on `.claim-grid-loading .claim-pane.in` gives, and would
+     replay from the top on every rebuild — a flicker per claim, not an arrival. The empty
+     card is the one variant that mounts once and then just sits there. */
+  .claim-card.claim-empty {
+    opacity: 0;
+    animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
+  }
+  @keyframes card-in {
+    from { opacity: 0; transform: scale(0.97) translateY(8px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+  }
   @media (prefers-reduced-motion: reduce) {
     .claim-card { transition: none; }
+    .claim-card.claim-empty { animation: none; opacity: 1; }
   }
+  [data-motion="reduced"] .claim-card.claim-empty { animation: none; opacity: 1; }
   /* The soft violet highlight that follows the pointer during the tilt above — positioned
      by `handleCardTilt` setting a `radial-gradient(...)` background inline, centered on the
      cursor. Sits as the card's first child (see `tiltGlare` in app.js) so it paints under
@@ -852,6 +1012,39 @@
     clip-path: inset(50%);
     white-space: nowrap;
   }
+
+  /* ---------- Summary card (phone sheet) ---------- */
+  /* The check at a glance, above the claims: how many were checked and how they came out.
+     Ported from the TRASE Design System's SummaryCard, in its `compact` size, and rendered
+     only on the phone layout — the desktop grid already shows every verdict badge at once,
+     where this would be a second copy of what is on screen. Its counts read the same closed
+     four-verdict vocabulary everything else does (`VERDICTS` in public/claims.js). */
+  .summary-card {
+    grid-column: 1 / -1;
+    padding: 11px 13px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: inset 0 1px 0 rgba(240,237,230,0.04);
+  }
+  .summary-title { font-family: var(--font-display); font-size: 12.5px; font-weight: 600; color: var(--ink); margin: 0; }
+  .summary-sub { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
+  .summary-stats { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+  .summary-stat { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .summary-count {
+    flex-shrink: 0;
+    width: 18px; height: 18px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  }
+  .summary-count.bad   { background: color-mix(in oklab, var(--bad) 20%, transparent);   color: var(--bad); }
+  .summary-count.warn  { background: color-mix(in oklab, var(--warn) 20%, transparent);  color: var(--warn); }
+  .summary-count.good  { background: color-mix(in oklab, var(--good) 20%, transparent);  color: var(--good); }
+  .summary-count.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); }
+  /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
+     and disappears as counts change would make the card a different shape on every check. */
+  .summary-stat[data-count="0"] { opacity: 0.45; }
+  .summary-label { font-size: 10.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* ---------- Claim skeleton (loading grid) ---------- */
   /* `renderClaimSkeletons` (app.js) — a placeholder box for a claim the model has named but
@@ -1043,15 +1236,38 @@
      the app, and this message isn't a claim's analysis, it's an instruction. Centered both
      ways (the flex rules) because there's nothing else in the card yet for the eye to land
      on top-left of; `.claim-card`'s own `display: flex; flex-direction: column` is what
-     gives this something to center within. */
+     gives this something to center within.
+
+     The line now sits *over* a large, settled iris rather than alone in the middle of an
+     empty card — the TRASE Design System's "App shell — Analyzing" screen, whose claim card
+     is this same `loading="empty"` variant. The iris is the app's own busy mark held still
+     (`.resolved`: blades stopped and dimmed, seal drawn), which is why it can carry the
+     card while nothing is running without reading as something in progress. */
   .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
+  .empty-stack { position: relative; display: flex; align-items: center; justify-content: center; }
+  .empty-stack .iris-wrap { width: 150px; height: 150px; opacity: 0.5; }
   .claim-empty-text {
-    /* Back on the app's own display serif (`var(--font-display)`, the same face
-       `.claim-title`/`.wordmark` use) rather than the plain body sans — bigger and in a
-       serif, this reads as a considered opening line instead of a system message, which is
-       the whole of what an empty state has to do. */
-    font-family: var(--font-display); font-size: 20px; line-height: 1.5; color: var(--ink-dim);
-    max-width: 30ch; margin: 0;
+    /* Absolutely positioned over the iris, so the two are one mark rather than a stack of
+       two things. `clamp` instead of the DS's flat 22px because the DS's `white-space:
+       nowrap` is kept — the line has to break nowhere and still fit a 320px phone. */
+    position: absolute;
+    /* Centred over the iris. The DS's own line is short enough to set `white-space: nowrap`
+       on; this app's is a sentence naming both things a reader can do here, so it wraps
+       inside a measure instead — at `nowrap` it would run out past the card's edges and be
+       clipped by its `overflow: hidden`. */
+    width: 24ch;
+    font-family: var(--font-display);
+    font-size: clamp(17px, 5.1vw, 22px); font-weight: 600; line-height: 1.4;
+    margin: 0;
+    /* Ink into accent, the same gradient-text treatment the shell's own title uses. */
+    background: linear-gradient(135deg, var(--ink), var(--accent) 130%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+  }
+  /* A narrower measure where the card itself is narrow — 24ch of 17px serif is wider than
+     a 320px phone's card, once the card's own padding is taken off it. */
+  @media (max-width: 520px) {
+    .claim-empty-text { width: 17ch; }
   }
 
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
@@ -1060,15 +1276,19 @@
      is a chip with a play triangle in it rather than accent-coloured text. */
   .ts-chip {
     display: inline-flex; align-items: center; gap: 3px; vertical-align: baseline;
-    margin: 0 1px 0 3px; padding: 1px 6px 1px 5px;
-    border: 1px solid rgba(255,255,255,0.14); border-radius: 999px;
-    background: var(--surface-raised); color: var(--ink-dim);
+    margin: 0 1px 0 3px; padding: 1px 7px 1px 5px;
+    /* Accent-tinted at rest, from the DS's TimestampChip. The chip shape and its play
+       triangle are still what keep it from reading as a citation (see the note above);
+       neutral-on-raised had it reading as decoration instead, which is the other way to
+       lose a control. */
+    border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); border-radius: 999px;
+    background: color-mix(in oklab, var(--accent) 10%, transparent); color: var(--accent);
     font-family: var(--font-mono); font-size: 0.72em; line-height: 1.5;
     font-variant-numeric: tabular-nums; white-space: nowrap;
     cursor: pointer; transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
   }
   .ts-chip svg { width: 0.8em; height: 0.8em; flex: none; opacity: 0.75; }
-  .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: rgba(79,209,197,0.12); }
+  .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
   .ts-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* The claim the playhead is inside right now — see `syncPlayhead`. Filled rather than
      outlined so the eye finds it while the video is running and the text is not being read
@@ -1084,8 +1304,13 @@
   .ts-chip.playing svg { opacity: 1; }
   /* Clicked with no player behind it (the CDN link never resolved). Stays legible — the
      timestamp is still true — but stops advertising itself as something that will play. */
-  .ts-chip.dead { cursor: default; opacity: 0.5; }
-  .ts-chip.dead:hover { color: var(--ink-dim); border-color: rgba(255,255,255,0.14); background: var(--surface-raised); }
+  /* Neutral, unlike every other state above: a chip with nothing behind it should stop
+     looking like the accent-tinted control the others are. */
+  .ts-chip.dead {
+    cursor: default; opacity: 0.5;
+    color: var(--ink-dim); border-color: var(--border); background: var(--surface-raised);
+  }
+  .ts-chip.dead:hover { color: var(--ink-dim); border-color: var(--border); background: var(--surface-raised); }
   /* A page or a photo post: rendered by `linkTimestamps` as plain text, never a button. */
   .ts-chip.static { cursor: default; opacity: 0.7; }
 
@@ -1113,7 +1338,10 @@
   .badge {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 6px 12px 6px 9px; border-radius: 100px;
-    font-size: 12px; font-weight: 600;
+    /* Uppercase and tracked, per the DS's VerdictBadge — a verdict is a stamp, and at
+     sentence case in the middle of a card it read as one more label. */
+    font-size: 11.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.03em;
     opacity: 0; transform: scale(0.5) rotate(-6deg);
   }
   .badge-icon {
@@ -1614,10 +1842,15 @@
 
   /* ---------- Entry bar extras: mic, plus, image chip ---------- */
   .entry-bar { flex-wrap: wrap; }
+  /* `padding: 0` is load-bearing now that `#checkBtn` carries the composer's button styling
+     alone (see `.entry-bar #checkBtn`): these used to inherit it from the `.entry-bar button`
+     rule that no longer exists, and without it the UA's own button padding pushes the glyph
+     off-centre in a fixed-width box. */
   .icon-btn {
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    width: 42px; border-radius: 9px; border: 1px solid var(--border);
+    width: 42px; padding: 0; border-radius: 9px; border: 1px solid var(--border);
     background: var(--surface); color: var(--ink-dim); cursor: pointer;
+    font-family: var(--font-body);
   }
   .icon-btn svg { width: 17px; height: 17px; }
   .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -1762,11 +1995,23 @@
     background: var(--surface);
     flex-shrink: 0;
   }
-  /* Same fix as `.sidebar-header .wordmark` above, for the phone topbar's own
-     account/settings pair. */
-  .topbar .wordmark { font-family: var(--font-display); font-size: 16px; color: var(--ink); margin-right: auto; }
-  .topbar .mark { width: 17px; height: 17px; color: var(--accent); display: flex; }
-  .topbar .mark svg { width: 100%; height: 100%; }
+  /* The check's title and status, in the row the wordmark used to have to itself. Same
+     gradient-text treatment as the desktop `.shell-title`, at the size one phone-width row
+     can carry; `margin-right: auto` is on this block for the same reason it was on the
+     wordmark — it reserves the row's free space so the settings button downstream of it
+     stays packed against the trailing edge. */
+  .topbar-meta { min-width: 0; margin-right: auto; }
+  .topbar-title {
+    font-family: var(--font-display); font-size: 13.5px; font-weight: 600; line-height: 1.25;
+    background: linear-gradient(120deg, var(--ink) 30%, var(--accent) 85%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .topbar-sub {
+    font-size: 10.5px; color: var(--muted); margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .drawer-toggle {
     display: flex; align-items: center; justify-content: center;
     width: 38px; height: 38px; flex-shrink: 0;
@@ -1786,37 +2031,35 @@
     transition: opacity 0.22s ease;
   }
 
-  /* ---------- Phone: video as a full-bleed backdrop, everything else floats over it ---------- */
+  /* ---------- Phone: the design system's stacked mobile shell ---------- */
+  /* Rewritten from the full-bleed-backdrop layout this used to be — the video is no longer
+     an ambient plane behind translucent chrome, it is a short strip at the top of a stack:
+     title bar, video, claim sheet, composer, each with an edge of its own. What that buys
+     is that the reading surface is opaque and as tall as the screen allows (the sheet used
+     to be capped at 55vh so the backdrop could show through), and that the video is a thing
+     the reader can trade height for rather than a fixed decoration — see `.media-expand-btn`
+     and `[data-media="expanded"]` below. From the design system's "App shell — Mobile" and
+     "Chat to shell — Mobile" screens. */
   @media (max-width: 700px) {
-    /* `.main` becomes the positioning root for the video layer below, instead of the
-       viewport — bounded to the app's own box so the backdrop can never slide under the
-       disclaimer paragraph, which sits outside `.app` in the DOM. */
+    /* Still the positioning root for the drawer scrim, though no longer for a video plane. */
     .main { position: relative; }
 
-    /* The bar floats over the video rather than sitting on its own solid strip above it,
-       so its own background is just a scrim gradient, and each icon carries its own pill
-       so it stays legible over arbitrary video content. */
+    /* Its own strip now, under the same accent hairline the claim cards and the desktop
+       shell bar wear, rather than a scrim floating over the clip. Nothing sits behind it
+       any more, so it needs neither the blur nor the per-icon pills it used to carry. */
     .topbar {
       display: flex;
       position: relative; z-index: 3;
-      /* Used to fade to fully transparent, which meant the bit of video peeking through
-         directly behind the wordmark/settings icon was whatever raw frame the clip
-         happened to be on — with the sheet below capped to a fixed proportion (see
-         `.claims-pane` below) that strip reads as a leftover scrap, not a deliberate
-         reveal, since the real "look at the video" moment is the gap between this bar and
-         the sheet. A frosted floor under the gradient keeps the bar itself legible chrome
-         in every case, matching the sheet's own treatment, and pushes the one deliberate
-         peek of unobstructed video into that gap. */
-      background: linear-gradient(to bottom, rgba(10,12,16,0.55), rgba(10,12,16,0.2));
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      border-bottom: 0;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      overflow: hidden;
     }
-    .topbar .drawer-toggle, .topbar .settings-btn {
-      background: rgba(10,12,16,0.55);
-      backdrop-filter: blur(8px);
+    .topbar::before {
+      content: "";
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
     }
-    .topbar .wordmark, .topbar .mark { filter: drop-shadow(0 1px 5px rgba(0,0,0,0.7)); }
 
     /* Off-canvas rather than hidden: the library is the app's navigation, and a phone
        still needs it — it just cannot afford 270px of permanent gutter out of 390px. */
@@ -1843,137 +2086,224 @@
     }
     [data-drawer="open"] .scrim { opacity: 1; pointer-events: auto; }
 
-    /* The single biggest change from the desktop/tablet layout: the video stops being a
-       card that sits above the answer and becomes the backdrop the answer floats over —
-       full-bleed behind the topbar, the claim sheet and the composer, the way a
-       short-form video app's own player sits behind its own UI chrome. */
+    /* The video is a strip at the top of the stack — full width, no card of its own, a
+       fixed slice of the viewport's height rather than all of it. Tapping it (or the
+       chevron) trades sheet height for video height; `toggleMediaExpanded` in app.js sets
+       `data-media="expanded"` on <html>, and the transition here is what animates it. */
     .video-pane {
-      position: absolute; z-index: 0;
-      /* `top: 0` + explicit `width`/`height: 100%`, not `inset: 0`. `.video-pane`'s
-         direct parent (`.content-grid`) is a flex container, and Chromium — even though
-         `.content-grid` is `position: static` and correctly skipped as the containing
-         block — falls back to content-based auto-sizing instead of solving `top: 0;
-         bottom: 0; height: auto` against `.main`'s stretched flex height, collapsing
-         this to the height of its in-flow caption children instead of the full box.
-         Percentage sizing against that same height is unaffected by the bug, so it's
-         used instead of relying on the `bottom` offset at all. */
-      top: 0; left: 0; right: 0;
-      width: 100%; height: 100%;
+      /* The containing block for the expand button and the link pill below, both of which
+         are lifted out of the flow so the strip is nothing but media. */
+      position: relative;
+      flex: 0 0 auto;
+      height: 24vh;
       padding: 0; margin: 0; border: 0; border-radius: 0;
       background: #000;
+      overflow: hidden;
+      transition: height 0.3s cubic-bezier(.2,.8,.3,1);
     }
+    [data-media="expanded"] .video-pane { height: 62vh; }
+    /* Nothing selected, or a link-less conversation: no post, so no strip. (This is the
+       phone's half of `.content-grid.single-pane`, whose desktop half animates the video
+       column's width to zero — there is no width to animate here, the strip is full-bleed
+       and it is its height that would have to go.) */
+    .content-grid.single-pane .video-pane { display: none; }
     .video-thumb {
-      position: absolute; inset: 0;
       width: 100%; height: 100%; max-height: none;
-      /* The base rule's `aspect-ratio: 9/16` is what shapes the card everywhere else;
-         here `inset: 0` against a full-height containing block should already win, but
-         an explicit `auto` removes any doubt rather than leaning on that precedence. */
+      /* The base rule's `aspect-ratio: 9/16` shapes the card at every other width; here the
+         strip's own height is the constraint and the media letterboxes inside it. */
       aspect-ratio: auto;
       margin: 0; border-radius: 0;
     }
-    /* `cover`, not the `contain` every other breakpoint uses — deliberately. `contain`
-       exists elsewhere so a carousel's on-image text is never cropped, because the
-       thumbnail *is* the evidence being read there. Here the video is ambient backdrop
-       behind the actual reading surface (the sheet below), so filling the screen matters
-       more than preserving its exact framing. */
-    .video-thumb .video-media { object-fit: cover; }
-    .video-thumb .image-strip img { object-fit: cover; }
+    /* `contain`, like every other breakpoint: the strip is short enough that `cover` would
+       crop a vertical clip to a letterbox of its middle, and on a photo post the image
+       *is* the evidence being read. */
+    .video-thumb .video-media { object-fit: contain; }
 
-    /* A scrim so the caption and the topbar's icons stay legible over arbitrary video
-       content, not just whichever frame the placeholder or a given clip happens to open
-       on. */
-    .video-pane::after {
-      content: "";
-      position: absolute; inset: 0 0 auto 0; height: 170px;
-      background: linear-gradient(to bottom, rgba(5,6,10,0.75), transparent);
-      pointer-events: none;
-    }
-
-    /* `.vp-bar` lives inside `.video-thumb`, which is full-bleed here (see above) — its
-       base rule's `bottom: 0` would land it directly under the claims sheet anchored to
-       `.video-thumb`'s own bottom edge (`.content-grid` below), never actually visible.
-       Floats near the top instead, in the same "reveal gap" between the topbar and the
-       sheet the old `.video-timeline` strip used to occupy — pushed down by a flat
-       topbar-height estimate (safe-area inset + its own ~38px content) rather than
-       reading it from the DOM, same as `.video-title` below shares this constant with.
-       Always visible rather than fade/auto-hide (its base rule): a tap toggling play on
-       `.vp-overlay` doesn't "wake" it the way a `mousemove` does on a pointing device, and
-       an auto-hiding control bar over an ambient full-bleed backdrop is a worse trade here
-       than it is over a boxed player elsewhere. */
-    .vp-bar {
-      position: absolute; z-index: 1;
-      top: calc(env(safe-area-inset-top, 0px) + 54px); left: 14px; right: 14px; bottom: auto;
-      padding: 8px 10px;
-      border-radius: 10px;
+    /* Trades sheet height for video height. Sits over the media rather than in the flow —
+       the strip is 24vh and has no room for a control row of its own. */
+    .media-expand-btn {
+      position: absolute; top: 10px; right: 10px; z-index: 2;
+      width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.15);
       background: rgba(10,12,16,0.55);
-      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    .media-expand-btn svg { width: 15px; height: 15px; transition: transform 0.25s ease; }
+    [data-media="expanded"] .media-expand-btn svg { transform: rotate(180deg); }
+    .media-expand-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* Back at the bottom of the strip, where the base rule puts it: with the video no
+       longer running the full height of the screen there is nothing for it to be buried
+       under. Kept always-visible rather than fade-and-auto-hide — a tap that toggles play
+       doesn't "wake" the chrome the way a pointer's mousemove does. */
+    .vp-bar {
+      padding: 6px 8px;
       opacity: 1; transform: none; pointer-events: auto;
     }
-
-    /* What used to be the card's chip/title/link, now floating over the top of the video
-       instead of stacked in a box below it. `.vp-bar` above no longer occupies flow space
-       to push these down the way the old in-flow `.video-timeline` did — it's an overlay
-       inside `.video-thumb`, not a sibling — so the offset here is a flat estimate of
-       topbar height *plus* the bar's own height, not shared with app.js: if either one's
-       height changes, this constant has to move with it. */
-    .video-title {
-      position: relative; z-index: 1;
-      margin: calc(env(safe-area-inset-top, 0px) + 100px) 14px 4px 14px;
-      text-shadow: 0 1px 6px rgba(0,0,0,0.75);
-    }
+    /* The title is in the top bar now (see `.topbar-title`), so what's left of the old
+       floating caption is the link out to the original post, over the strip's bottom-left
+       corner and clear of the control bar's own row. */
+    .video-title { display: none; }
     .video-link {
-      position: relative; z-index: 1;
+      position: absolute; z-index: 2;
+      left: 10px; bottom: 46px;
       display: inline-block;
-      max-width: calc(100% - 28px); /* the base rule's ellipsis needs a bound to clip against */
-      margin: 0 14px;
+      max-width: calc(100% - 20px); /* the base rule's ellipsis needs a bound to clip against */
+      margin: 0;
       padding: 3px 10px;
       border-radius: 100px;
       background: rgba(10,12,16,0.55);
       backdrop-filter: blur(8px);
     }
 
-    /* The claims pane stops being a column beside/below the video and becomes a sheet
-       anchored to the bottom of it, transparent above so the video shows through in the
-       gap — a bottom sheet over a full-bleed player, not a page with a card on it. */
+    /* The stack itself: video strip, then sheet. No `justify-content: flex-end` any more —
+       the sheet is meant to take everything the strip leaves rather than being pinned to
+       the bottom with video showing above it. */
     .content-grid {
-      display: flex; flex-direction: column; justify-content: flex-end;
-      /* No `position` here on purpose — `.video-pane`'s `inset: 0` needs `.main` as its
-         containing block, not this element, or the backdrop only fills the gap between
-         the topbar and the composer instead of running the full height behind both of
-         them. `z-index` still applies without it: this is a flex item of `.main`, and
-         z-index applies to flex items even at `position: static`. */
+      display: flex; flex-direction: column;
       z-index: 2;
-      overflow: visible; /* only the sheet scrolls internally, not this whole layer */
       gap: 0; padding: 0;
+      min-height: 0;
       background: transparent;
     }
-    /* Unlike the base rule, the wrap must NOT grow to fill `.content-grid`'s column here:
-       `.claims-pane` below caps itself at `max-height: 55vh` so the sheet stays anchored to
-       the bottom with video showing through above it (`justify-content: flex-end` on
-       `.content-grid` needs the leftover space that a growing wrap would otherwise eat). */
-    .claims-pane-wrap { flex: 0 1 auto; }
-    .claims-pane {
-      /* Capped a bit below the old 62vh: at 62vh, a long answer's sheet and this bar's
-         own frosted floor together could leave almost nothing of the video actually
-         visible in between — the "reveal" collapsing to a strip too thin to read as
-         intentional. 55vh keeps a consistent, legible band of video showing above the
-         sheet on every phone size, long answer or short. */
-      max-height: 55vh;
-      overflow-y: auto;
-      padding: 18px 16px 14px;
-      border-radius: 20px 20px 0 0;
-      /* Not fully transparent even at the top edge — `backdrop-filter` blurs whatever's
-         behind it regardless of this gradient's local alpha, but a blur alone is a thin
-         guarantee of contrast against video content that could be anything. The gradient
-         is there so the sheet reads as a sheet from its very first pixel. */
-      background: linear-gradient(to bottom, rgba(15,18,23,0.55) 0%, rgba(15,18,23,0.92) 22%, rgba(15,18,23,0.97) 45%);
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
+
+    /* The reading surface. Pulled up over the strip's bottom edge by its own corner radius
+       so the two overlap the way a sheet dragged up over a player does, and opaque rather
+       than frosted: with the video above it instead of behind it, there is nothing left for
+       a blur to reveal, and prose reads better on a flat ground. */
+    .claims-pane-wrap {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex; flex-direction: column;
+      position: relative; z-index: 1;
+      margin-top: -18px;
+      padding: 8px 0 0;
+      border-radius: 18px 18px 0 0;
+      background: var(--bg);
+      box-shadow: 0 -10px 24px rgba(0,0,0,0.28);
     }
-    /* The sheet itself is now the surface — a card floating inside a sheet would double
-       the chrome. */
-    .claim-card { background: transparent; border: 0; padding: 0; border-radius: 0; }
+    /* With no video strip above it (`.single-pane` — nothing selected, or a link-less
+       conversation) there is nothing to overlap: the sheet would ride up over the title bar
+       instead, and a grab handle would mark the top of a surface that starts at the top of
+       the screen anyway. */
+    .content-grid.single-pane .claims-pane-wrap {
+      margin-top: 0;
+      border-radius: 0;
+      box-shadow: none;
+    }
+    .content-grid.single-pane .sheet-handle { display: none; }
+    .sheet-handle {
+      display: block;
+      width: 36px; height: 4px;
+      flex: 0 0 auto;
+      margin: 0 auto 6px;
+      border-radius: 2px;
+      background: var(--border);
+    }
+    .claims-pane {
+      flex: 1 1 auto;
+      min-height: 0;
+      max-height: none;
+      overflow-y: auto;
+      padding: 4px 14px 12px;
+      border-radius: 0;
+      background: transparent;
+    }
+    /* The whole-answer card and the chat thread stay seamless — a bordered card inside a
+       sheet doubles the chrome. The per-claim boxes below deliberately don't: several of
+       them in a column need edges to be several of anything. */
+    .claim-card:not(.claim-pane) { background: transparent; border: 0; padding: 0; border-radius: 0; }
+    /* …and with no card edge for it to sit on, its top-edge accent bar is a line ruled
+       across the sheet for no reason. The per-claim boxes keep theirs. */
+    .claim-card:not(.claim-pane)::before { content: none; }
     .claim-text { font-size: 16.5px; }
+
+    /* One claim per row, compact — the design system's mobile sheet shows each claim as a
+       summary (its title, its verdict, a couple of lines of the reasoning) rather than the
+       full analysis, so several are legible at once on a screen this size. Nothing is
+       actually lost: a tap expands a box to everything it holds, sources included, and
+       `claim-pane` boxes carry `role="button"` and a key handler in app.js for that. */
+    /* A column, not the desktop grid — that grid only exists above 701px (see its own rule
+       and the note there about box size on a phone). What this adds is the gap between
+       boxes: they used to stack seamlessly because a phone `.claim-card` had no border,
+       padding or background at all, and they have all three again below. */
+    .claims-pane.claim-grid { display: flex; flex-direction: column; gap: 8px; }
+    .claims-pane.claim-grid .claim-pane {
+      /* `flex: 0 0 auto`, against `.claim-card`'s own `flex: 1 1 auto`: in this column the
+         boxes must keep their content's height and let the sheet scroll, not divide the
+         sheet's height between them. With the video expanded there is barely any sheet
+         left, and a shrinking box collapses to a sliver of gradient with its badge cut in
+         half. */
+      flex: 0 0 auto;
+      padding: 10px 12px;
+      overflow: hidden;
+      cursor: pointer;
+    }
+    /* The desktop grid fades an overflowing box's last line into the card background to say
+       "there's more, scroll for it". Here the clamp below already says it, and the fade over
+       a two-line clamp reads as a rendering fault. */
+    .claims-pane.claim-grid .claim-pane::after { content: none; }
+    .claim-pane .claim-eyebrow { font-size: 9.5px; padding: 1px 7px; margin-bottom: 6px; }
+    /* Two lines each, clamped by height rather than by `-webkit-line-clamp`. The title
+       could use the line clamp — it is one text node — but the analysis cannot: it is a
+       wrapper around whatever blocks `renderMarkdown` produced (paragraphs, lists), and a
+       line clamp counts lines of inline content, so on nested blocks it clips mid-line
+       instead. A `max-height` in `em` clamps both the same way, and both get the same
+       fade-out below rather than a hard cut. */
+    .claim-pane .claim-title {
+      font-size: 13px; line-height: 1.4; margin-bottom: 4px;
+      max-height: 2.8em; overflow: hidden;
+    }
+    .claim-pane .claim-text {
+      position: relative;
+      font-size: 12.5px; line-height: 1.55; margin-bottom: 8px;
+      max-height: 3.1em; overflow: hidden;
+    }
+    /* Says "there is more of this" without a row of dots pretending to be text — the last
+       visible line fades into the card rather than being sliced flat by its own clamp. */
+    .claim-pane:not(.expanded) .claim-text::after {
+      content: "";
+      position: absolute; left: 0; right: 0; bottom: 0;
+      height: 1.2em;
+      background: linear-gradient(to bottom, transparent, var(--surface));
+      pointer-events: none;
+    }
+    .claim-pane .badges { margin-bottom: 0; }
+    /* Everything that belongs to the whole check rather than to this claim — the sources
+       ledger, the action row, the follow-up thread, the duration — is appended to the last
+       claim's box (see `claimPanesHTML`). In a summary row it is noise; it comes back with
+       the box when the box is expanded. */
+    .claim-pane .source-pills,
+    .claim-pane .action-row,
+    .claim-pane .thread,
+    .claim-pane .check-duration { display: none; }
+
+    /* Tapped open: the box drops every clamp and shows what it was summarising. */
+    .claims-pane.claim-grid .claim-pane.expanded { cursor: default; }
+    .claim-pane.expanded .claim-title,
+    .claim-pane.expanded .claim-text { max-height: none; overflow: visible; }
+    .claim-pane.expanded .claim-text { font-size: 15px; }
+    .claim-pane.expanded .source-pills,
+    .claim-pane.expanded .action-row,
+    .claim-pane.expanded .thread,
+    .claim-pane.expanded .check-duration { display: block; }
+    .claim-pane.expanded .action-row { display: flex; }
+
+    /* With the video expanded there is only a sliver of sheet left, so each claim shrinks to
+       the one line that identifies it and its verdict — the design system's "minimal" claim
+       card. A box the reader has explicitly tapped open keeps its text. */
+    [data-media="expanded"] .claim-pane:not(.expanded) .claim-text,
+    [data-media="expanded"] .claim-pane:not(.expanded) .claim-eyebrow,
+    [data-media="expanded"] .claim-pane:not(.expanded) .skeleton-body { display: none; }
+    [data-media="expanded"] .claim-pane:not(.expanded) .claim-title { max-height: 1.4em; margin-bottom: 6px; }
+
+    /* The check's shape at a glance, above the claims — how many were checked and how they
+       came out. Mobile only: the desktop grid shows every verdict badge at once already. */
+    .summary-card { display: block; }
 
     /* The loading iris sits inside the same bottom sheet as everything else here, but it
        can still afford to be a bigger, more centered moment than the desktop card uses —
@@ -1993,12 +2323,11 @@
     .entry-bar {
       position: relative; z-index: 2;
       gap: 6px;
-      padding: 10px 12px;
-      padding-bottom: max(10px, env(safe-area-inset-bottom));
-      background: rgba(15,18,23,0.97);
-      backdrop-filter: blur(18px);
-      -webkit-backdrop-filter: blur(18px);
-      border-top: 1px solid rgba(255,255,255,0.07);
+      flex-wrap: nowrap;
+      padding: 8px 12px;
+      padding-bottom: max(8px, env(safe-area-inset-bottom));
+      background: var(--bg);
+      border-top: 1px solid var(--border);
     }
     /* 16px exactly. Mobile Safari force-zooms the page on focusing any input whose text
        is smaller than that, and never zooms back out — the layout is then wrong for the
@@ -2079,10 +2408,16 @@
   [data-font-size="large"] .claim-text { font-size: calc(16.5px * 1.16); }
   [data-font-size="large"] .claim-title { font-size: calc(15.5px * 1.16); }
   [data-font-size="large"] .thread-a.claim-text { font-size: calc(14.5px * 1.16); }
-  [data-font-size="large"] .claim-empty-text { font-size: calc(20px * 1.16); }
+  [data-font-size="large"] .claim-empty-text { font-size: clamp(19px, 5.9vw, 25.5px); }
   [data-font-size="large"] body, [data-font-size="large"] .entry-bar input, [data-font-size="large"] .lib-title { font-size: 1.1em; }
 
-  [data-contrast="high"] {
+  /* `:not([data-theme="light"])` on every rule in this block: theme and contrast are two
+     independent settings (see applySettings), so light + high-contrast is a reachable
+     combination. These values are light-on-dark, tuned to sit on `--surface`/`--bg`'s dark
+     palette — applied without the guard they would win the cascade over light theme's own
+     (already dark-on-light, already high-contrast) token values, since both are single
+     attribute selectors of equal specificity and this block comes later in the file. */
+  [data-contrast="high"]:not([data-theme="light"]) {
     --ink-dim: #D7DBE3; --muted: #B6BCC9; --border: #454C59; --surface-raised: #2A303B;
   }
   /* The phone layout's text sits over an arbitrary video rather than a fixed dark
@@ -2095,8 +2430,51 @@
     }
     [data-contrast="high"] .vp-bar,
     [data-contrast="high"] .video-link { background: rgba(5,6,10,0.85); }
-    [data-contrast="high"] .claims-pane { background: rgba(10,12,16,0.98); }
-    [data-contrast="high"] .entry-bar { background: rgba(10,12,16,0.98); }
+    /* The sheet and composer are opaque `--bg` at this width now, so there is nothing left
+       for high contrast to firm up there — only the chrome still drawn over the video. */
+    [data-contrast="high"] .media-expand-btn { background: rgba(5,6,10,0.85); }
+  }
+
+  /* Every neutral icon/outline button's resting label or glyph color, in high contrast —
+     literal white rather than `--ink`/`--ink-dim`, which even at this mode's own lightened
+     values (see the token block above) still fall short of full contrast against a dark
+     surface. Scoped to dark for the same reason the token block is: `--ink`/`--ink-dim` in
+     light theme are already near-black on near-white, and white text there would be
+     unreadable rather than higher-contrast. The accent-filled buttons (`.new-check`,
+     `#checkBtn`) and every colored semantic state below (accent hover, `--bad` for a
+     destructive action or a live mic) are deliberately left alone — this is a floor under
+     the *neutral* state, not a rule that every control turns white. */
+  [data-contrast="high"]:not([data-theme="light"]) .icon-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .lib-delete,
+  [data-contrast="high"]:not([data-theme="light"]) .retry-button,
+  [data-contrast="high"]:not([data-theme="light"]) .sidebar-signin-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .drawer-toggle,
+  [data-contrast="high"]:not([data-theme="light"]) .media-expand-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .vp-btn,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-close,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-nav-item,
+  [data-contrast="high"]:not([data-theme="light"]) .passphrase button.secondary,
+  [data-contrast="high"]:not([data-theme="light"]) #account-dialog .auth-close-btn {
+    color: #fff;
+  }
+  /* Restated at the same (bumped) specificity the block above now carries, so a state that
+     already means something other than "resting neutral control" — an accent hover, the
+     selected settings tab, a destructive or live-recording red — keeps meaning it instead
+     of being read back as plain white just because it shares a selector with a rule above. */
+  [data-contrast="high"]:not([data-theme="light"]) .icon-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .retry-button:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .sidebar-signin-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .sidebar-signin-btn:hover svg,
+  [data-contrast="high"]:not([data-theme="light"]) .vp-btn:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-close:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .settings-nav-item.active {
+    color: var(--accent);
+  }
+  [data-contrast="high"]:not([data-theme="light"]) .lib-delete:hover,
+  [data-contrast="high"]:not([data-theme="light"]) .icon-btn[aria-pressed="true"] {
+    color: var(--bad);
   }
 
   [data-motion="reduced"] .blade,
@@ -2140,18 +2518,21 @@
      waiting for the click to fully resolve. A system that answers touch immediately reads
      as faster even when the underlying request takes exactly as long. */
   .entry-bar button:active,
+  .entry-bar #checkBtn:active,
   .new-check:active,
   .icon-btn:active,
   .action-btn:active,
   .retry-button:active,
   .settings-btn:active { transform: scale(0.96); }
   .entry-bar button,
+  .entry-bar #checkBtn,
   .new-check,
   .icon-btn,
   .action-btn,
   .retry-button,
-  .settings-btn { transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease; }
+  .settings-btn { transition: transform 0.1s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease, filter 0.15s ease; }
   [data-motion="reduced"] .entry-bar button:active,
+  [data-motion="reduced"] .entry-bar #checkBtn:active,
   [data-motion="reduced"] .new-check:active,
   [data-motion="reduced"] .icon-btn:active,
   [data-motion="reduced"] .action-btn:active,
@@ -2236,24 +2617,33 @@
                 aria-label="Open library" aria-expanded="false" aria-controls="sidebar">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
-        <div class="mark">
-          <svg viewBox="0 0 64 64" fill="none">
-            <g stroke="currentColor" stroke-width="2.25">
-              <circle cx="32" cy="32" r="21" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
-              <line x1="32" y1="4" x2="32" y2="10"/>
-              <line x1="32" y1="54" x2="32" y2="60"/>
-              <line x1="4" y1="32" x2="10" y2="32"/>
-              <line x1="54" y1="32" x2="60" y2="32"/>
-            </g>
-            <line x1="14" y1="32" x2="50" y2="32" stroke="currentColor" stroke-width="1.25" opacity="0.55"/>
-            <circle cx="32" cy="32" r="5.5" fill="currentColor"/>
-            <rect x="40" y="29" width="4" height="6" rx="1" fill="var(--accent-2)"/>
-          </svg>
+        <!-- What the wordmark and brand mark used to occupy. The design system's mobile
+             shell spends this row on the check instead — the phone has one bar, and a
+             reader who is looking at an analysis needs to know which post it belongs to
+             more than they need to be told which app they are in. `updateShellTopbar` in
+             app.js fills both this and the desktop `.shell-topbar` from the same entry,
+             and falls back to "New check" here when nothing is selected. -->
+        <div class="topbar-meta">
+          <div class="topbar-title" id="topbarTitle">New check</div>
+          <div class="topbar-sub" id="topbarSub">Paste a link to get started</div>
         </div>
-        <div class="wordmark">Trase</div>
         <button type="button" class="settings-btn account-btn" id="topbarSettingsBtn" aria-label="Settings" title="Settings">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="1.6"/><path d="M19.4 13a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V19a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H4a2 2 0 110-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H10a1.65 1.65 0 001-1.51V4a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V10a1.65 1.65 0 001.51 1H20a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="1.4"/></svg>
         </button>
+      </div>
+
+      <!-- Desktop/tablet only (hidden below 701px, where the phone topbar above already
+           names the app and the claim sheet carries the check's own title): the shell's
+           title bar from the TRASE Design System's "App shell" screen — which check is
+           open, on which platform, and how long ago it was checked. Until this existed the
+           only place the current check was named on desktop was its highlighted row in the
+           sidebar. Empty and hidden when nothing is selected (see `updateShellTopbar` in
+           app.js), which is the state the design system's Analyzing screen is in. -->
+      <div class="shell-topbar" id="shellTopbar" hidden>
+        <div class="shell-topbar-meta">
+          <h2 class="shell-title" id="shellTitle"></h2>
+          <div class="shell-sub" id="shellSub"></div>
+        </div>
       </div>
 
       <div class="content-grid single-pane" id="contentGrid">
@@ -2269,6 +2659,16 @@
             <!-- Photo-mode TikToks and Instagram carousels: a horizontal strip of stills in
                  slide order, swipeable on touch and scrollable with a trackpad. -->
             <div class="video-media image-strip" id="videoImages" hidden></div>
+
+            <!-- Phone only. The design system's mobile shell shows the clip as a short
+                 strip above the claim sheet and lets a reader trade sheet height for video
+                 height, rather than the fixed full-bleed backdrop this used to be. Lives
+                 inside `.video-thumb` so it sits over the media itself; `toggleMediaExpanded`
+                 in app.js owns the state (`data-media` on <html>). -->
+            <button type="button" class="media-expand-btn" id="mediaExpandBtn"
+                    aria-label="Expand video" aria-expanded="false" title="Expand video">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
 
             <!-- Ported from the TRASE Design System's VideoPlayer: a tap-anywhere overlay
                  (center play icon, hidden while playing — see the `play`/`pause` listeners
@@ -2336,6 +2736,10 @@
         <!-- `position: relative` anchor for `#claimsScrollHint` below — see its own
              comment for why it needs one. -->
         <div class="claims-pane-wrap">
+          <!-- Phone only, and decorative: the sheet is not draggable. It marks the top edge
+               of the reading surface where it overlaps the video strip, the way the design
+               system's mobile sheet does. -->
+          <div class="sheet-handle" aria-hidden="true"></div>
           <div class="claims-pane" id="claimsPane"></div>
           <button type="button" class="claims-scroll-hint" id="claimsScrollHint" aria-label="Scroll down for more claims" title="More claims below" hidden>
             <svg viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>

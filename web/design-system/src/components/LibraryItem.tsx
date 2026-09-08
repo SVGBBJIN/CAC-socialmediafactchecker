@@ -1,4 +1,7 @@
-import "./LibraryItem.css";
+/* The row's own styles live in Sidebar.css — `.lib-item` and its parts are only ever drawn
+   inside the library column, and a second file for them meant two copies of
+   `.lib-thumb`/`.dot` that could drift apart. */
+import "./Sidebar.css";
 import type { VerdictKey } from "./VerdictBadge";
 
 const DOT: Record<VerdictKey | "running" | "error", "bad" | "warn" | "good" | "muted"> = {
