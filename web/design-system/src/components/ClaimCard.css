@@ -104,15 +104,17 @@
   transform-origin: 50px 50px;
   fill: var(--accent);
   opacity: 0.85;
-  animation: blade-breathe 2.6s ease-in-out infinite;
+  /* 3.2s rather than the original 2.6s — a calmer, less flickery breathe, since this mark
+     now sits on screen for an entire multi-claim check rather than a single quick fetch. */
+  animation: blade-breathe 3.2s ease-in-out infinite;
 }
 .blade-rot:nth-child(even) .blade { fill: var(--accent-2); }
 .blade-rot:nth-child(1) .blade { animation-delay: 0s; }
-.blade-rot:nth-child(2) .blade { animation-delay: -0.43s; }
-.blade-rot:nth-child(3) .blade { animation-delay: -0.86s; }
-.blade-rot:nth-child(4) .blade { animation-delay: -1.3s; }
-.blade-rot:nth-child(5) .blade { animation-delay: -1.73s; }
-.blade-rot:nth-child(6) .blade { animation-delay: -2.16s; }
+.blade-rot:nth-child(2) .blade { animation-delay: -0.53s; }
+.blade-rot:nth-child(3) .blade { animation-delay: -1.07s; }
+.blade-rot:nth-child(4) .blade { animation-delay: -1.6s; }
+.blade-rot:nth-child(5) .blade { animation-delay: -2.13s; }
+.blade-rot:nth-child(6) .blade { animation-delay: -2.67s; }
 @keyframes blade-breathe {
   0%, 100% { transform: scaleY(0.62); opacity: 0.55; }
   50%      { transform: scaleY(1);    opacity: 0.95; }

@@ -2750,8 +2750,11 @@ function flipClaimsPane(render) {
       // sees the card visibly become the grid, so it should read as a deliberate motion
       // rather than a snap. The easing is a pure ease-out (fast start, long gentle settle)
       // rather than the old ease-in-out S-curve, which had a harsh accelerating start that
-      // read as a jump-cut before the eye had registered the box moving at all.
-      { duration: 800, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+      // read as a jump-cut before the eye had registered the box moving at all. 1100ms
+      // rather than the original 800ms — a check with several claims can fire this every
+      // few seconds as markers stream in, and at 800ms the next split could start before a
+      // reader had finished following the last one, which read as hectic rather than lively.
+      { duration: 1100, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
     );
   });
 }
@@ -2860,7 +2863,7 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
   // status strip is another <div> ahead of these, so nth-of-type would be off by one.
   // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
   // box has visibly finished sliding into place, instead of outrunning it.
-  const style = `--split-delay: ${Math.min(index * 0.07, 0.42)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
+  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
   return `
     <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       <div class="claim-eyebrow${done ? "" : " pending"}">${
@@ -2892,7 +2895,11 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
   const cols = claimGridColumns(count);
   const spanLast = claimGridSpanLast(count, cols);
   setClaimsGridMode("grid-loading", cols);
+  // Prepended the same way renderResultCard prepends it to the finished grid — see
+  // summaryCardHTML's own comment for why this now runs through every stage rather than
+  // only the settled one, matching the DS's "Chat to shell" screen.
   el.claimsPane.innerHTML =
+    summaryCardHTML(claims) +
     claimGridStatusHTML(stage) +
     claims
       .map((claim, i) =>
@@ -3406,16 +3413,18 @@ function claimPanesHTML(entry, animate, newestFollowup) {
 
 /**
  * The check at a glance — how many claims were checked and how they came out — above the
- * claims themselves. Ported from the TRASE Design System's SummaryCard; the phone sheet is
- * the only place it is drawn (`.summary-card` is `display: none` at every other width),
- * because the desktop grid already shows every verdict badge at once and this would be a
- * second copy of what is on screen.
+ * claims themselves. Ported from the TRASE Design System's SummaryCard, and shown at every
+ * width (see the note by `.sheet-handle` in index.html for why this used to be phone-only)
+ * and in both the loading grid (`renderClaimSkeletons`) and the finished one
+ * (`renderResultCard`) — matching the DS's own "Chat to shell" screen, where it sits above
+ * `ClaimGridSplit` through every stage rather than appearing only once the check settles.
  *
  * The four rows are the closed verdict vocabulary from `VERDICTS`, always all four and in
  * that order, with a zero row dimmed rather than dropped: a card that changed shape with
  * each check would have to be re-read every time instead of glanced at. A claim whose
  * verdict never parsed counts toward the total and toward none of the rows, the same way it
- * gets no badge.
+ * gets no badge. Each row carries `data-verdict` so `updateSummaryCard` can find and update
+ * it in place as claims settle, without re-rendering (and re-animating) the whole card.
  */
 function summaryCardHTML(claims) {
   const counts = {};
@@ -3428,7 +3437,7 @@ function summaryCardHTML(claims) {
     .map(([key, verdict]) => {
       const count = counts[key] ?? 0;
       return `
-        <div class="summary-stat" data-count="${count}">
+        <div class="summary-stat" data-verdict="${key}" data-count="${count}">
           <span class="summary-count ${verdict.css}">${count}</span>
           <span class="summary-label">${escapeHTML(verdict.label)}</span>
         </div>`;
@@ -3440,6 +3449,36 @@ function summaryCardHTML(claims) {
       <div class="summary-sub">${claims.length} claim${claims.length === 1 ? "" : "s"} analysed</div>
       <div class="summary-stats">${stats}</div>
     </div>`;
+}
+
+/**
+ * Keeps the loading grid's summary card in step as claims settle one at a time — the same
+ * "surgical, not a re-render" approach `settleClaimPane` uses, and for the same reason: a
+ * fresh `summaryCardHTML` swap would be harmless in itself, but it is simpler to just patch
+ * the two things that actually changed (the counts and the analysed-so-far line) than to
+ * reason about whether replacing the node could ever fight some future animation on it.
+ * A no-op if the card isn't there — `renderClaimSkeletons` hasn't run yet, or the finished
+ * card has already replaced the loading view.
+ */
+function updateSummaryCard(claims) {
+  const card = el.claimsPane.querySelector(".summary-card");
+  if (!card) return;
+  const counts = {};
+  for (const claim of claims) {
+    if (claim.verdictKey && VERDICTS[claim.verdictKey]) {
+      counts[claim.verdictKey] = (counts[claim.verdictKey] ?? 0) + 1;
+    }
+  }
+  const sub = card.querySelector(".summary-sub");
+  if (sub) sub.textContent = `${claims.length} claim${claims.length === 1 ? "" : "s"} analysed`;
+  for (const key of Object.keys(VERDICTS)) {
+    const stat = card.querySelector(`.summary-stat[data-verdict="${key}"]`);
+    if (!stat) continue;
+    const count = counts[key] ?? 0;
+    stat.dataset.count = String(count);
+    const countEl = stat.querySelector(".summary-count");
+    if (countEl) countEl.textContent = String(count);
+  }
 }
 
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
@@ -3800,11 +3839,16 @@ async function runCheck(url, existingId, hint) {
         if (!rebuild && settled.length === 0) return;
         drawn = claims;
         if (rebuild) {
+          // renderClaimSkeletons prepends a fresh summaryCardHTML(claims) of its own, so
+          // the counts are already current the moment this lands — nothing more to patch.
           flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
           }
+          // The surgical path above never touches the summary card, unlike the rebuild path
+          // above it — so it's the one place that has to patch it itself.
+          updateSummaryCard(claims);
         }
         // Claims finishing is the most concrete progress this turn produces. The elapsed-time
         // curve knows nothing about it, so the settled fraction pulls the bar along itself.
