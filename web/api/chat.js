@@ -7,6 +7,7 @@
 import {
   modelChainFromEnv,
   mediaResolutionFromEnv,
+  videoProcessingFromEnv,
   findClipLinks,
   GeminiError,
 } from "../lib/gemini.js";
@@ -163,6 +164,12 @@ export default async function handler(req, res) {
       // Off unless the operator opted in — it trades the frame detail that on-screen text
       // is read from for a much smaller video prefill. See `MEDIA_RESOLUTIONS`.
       mediaResolution: mediaResolutionFromEnv(),
+      // On unless the operator opted *out*, which is the opposite default to the line
+      // above and deliberately so: a long video read frame-by-frame is the single largest
+      // token bill this app can run up, and agentic mode is the model reading the same
+      // clip on demand rather than a worse read of it. `GEMINI_VIDEO_PROCESSING=static`
+      // puts every frame back. See `MEDIA_PROCESSING_AGENTIC` in lib/gemini.js.
+      videoProcessing: videoProcessingFromEnv(),
       // How close this client is to its daily cap. Near it, the chain starts one model
       // lower — see `planChain`. Zero when no limit is in force, which leaves the chain
       // exactly as it was.
