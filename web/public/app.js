@@ -1665,32 +1665,39 @@ function updatePaneMode() {
  * `renderLibrary` — the entry's own title and status change under a *running* check without
  * the selection changing at all (`applyPostTitle` naming the post, the verdict landing), and
  * a library re-render is what every one of those already ends with.
+ *
+ * The title and subtitle swap through `setStatusText` rather than a bare `textContent =`,
+ * the same fade-out/fade-in beat `#runStatus` already gets — "New check" replacing itself
+ * with the real title used to be an instant snap, jarring at the top of the shell where the
+ * reader's eye already is. `setStatusText` is also what makes the frequent, mostly-unchanged
+ * calls from `renderLibrary` cheap: it no-ops (no fade, no reflow) whenever the text it's
+ * asked to set is already on screen.
  */
 function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
   if (!entry) {
     el.shellTopbar.hidden = true;
-    el.shellTitle.textContent = "";
-    el.shellSub.textContent = "";
+    setStatusText("shellTitle", "");
+    setStatusText("shellSub", "");
     // The phone bar is the only one at that width, so it stays on screen with nothing
     // selected and says what to do instead — the design system's "Chat to shell — Mobile"
     // screen opens on exactly this line.
-    el.topbarTitle.textContent = "New check";
     el.topbarTitle.removeAttribute("title");
-    el.topbarSub.textContent = "Paste a link to get started";
+    setStatusText("topbarTitle", "New check");
+    setStatusText("topbarSub", "Paste a link to get started");
     return;
   }
   el.shellTopbar.hidden = false;
-  el.shellTitle.textContent = entry.title;
+  setStatusText("shellTitle", entry.title);
   // The full title as a tooltip, same courtesy `.lib-title` gets: this line ellipsises too.
   el.shellTitle.title = entry.title;
   const when = entry.status === "running" ? "checking now" : `checked ${relativeTime(entry.createdAt)}`;
   // A saved link-less conversation has no platform to name and was never "checked" —
   // `statusLabel` calls it "3 messages", which is the whole of what there is to say.
   const subtitle = entry.url ? `${entry.platform} · ${when}` : statusLabel(entry);
-  el.shellSub.textContent = subtitle;
-  el.topbarTitle.textContent = entry.title;
+  setStatusText("shellSub", subtitle);
+  setStatusText("topbarTitle", entry.title);
   el.topbarTitle.title = entry.title;
-  el.topbarSub.textContent = subtitle;
+  setStatusText("topbarSub", subtitle);
 }
 
 /**

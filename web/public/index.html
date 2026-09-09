@@ -393,8 +393,13 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* "New check" swapping for the real title used to be an instant snap — jarring on a
+       line this prominent, right at the top of the shell. `setStatusText` (app.js) fades it
+       out and back in around the swap, the same beat `.stage-text` already gets. */
+    opacity: 1;
+    transition: opacity 0.3s ease;
   }
-  .shell-sub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+  .shell-sub { margin-top: 2px; font-size: 12px; color: var(--muted); opacity: 1; transition: opacity 0.3s ease; }
 
   .entry-bar {
     display: flex; gap: 8px;
@@ -2028,10 +2033,15 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* Same fade-around-the-swap treatment as `.shell-title` — see its own comment. */
+    opacity: 1;
+    transition: opacity 0.3s ease;
   }
   .topbar-sub {
     font-size: 10.5px; color: var(--muted); margin-top: 1px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    opacity: 1;
+    transition: opacity 0.3s ease;
   }
   .drawer-toggle {
     display: flex; align-items: center; justify-content: center;
@@ -2505,6 +2515,10 @@
   [data-motion="reduced"] .seal-check,
   [data-motion="reduced"] .thread-spinner,
   [data-motion="reduced"] .stage-text,
+  [data-motion="reduced"] .shell-title,
+  [data-motion="reduced"] .shell-sub,
+  [data-motion="reduced"] .topbar-title,
+  [data-motion="reduced"] .topbar-sub,
   [data-motion="reduced"] .skeleton-line,
   [data-motion="reduced"] .claim-pane.just-settled,
   [data-motion="reduced"] .claim-grid-loading .claim-pane,
@@ -2524,7 +2538,7 @@
   [data-motion="reduced"] .badge.in .badge-icon { opacity: 1; transform: none; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item { animation: none !important; transition: none !important; }
+    .blade, .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item { animation: none !important; transition: none !important; }
     .badge.in { opacity: 1; transform: none; }
     .badge.in .badge-icon { opacity: 1; transform: none; }
   }
