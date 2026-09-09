@@ -9,6 +9,14 @@ const BLADE_ROTATIONS = [0, 60, 120, 180, 240, 300];
  * The busy mark. `resolved` is the settled state — blades stopped and dimmed, seal drawn —
  * which is what the empty card holds behind its line and what the running card switches to
  * when a turn finishes. Mirrors `irisMarkup` in public/app.js.
+ *
+ * Each blade's rotation is a static, per-instance `transform` on its own `<g>` wrapper
+ * rather than a `--rot` custom property read inside the shared `blade-breathe` keyframes.
+ * WebKit resolves a `var()` referenced from `@keyframes` once for the whole animation
+ * rather than per element that runs it, so all six blades animated to the exact same
+ * rotation and the flower collapsed into what looked like one overlapping pill. Rotation
+ * now lives outside the animation entirely — only `scaleY`/`opacity` are keyframed — so
+ * there is no per-instance value for a shared animation to lose.
  */
 export function Iris({ resolved }: { resolved?: boolean }) {
   return (
@@ -16,16 +24,9 @@ export function Iris({ resolved }: { resolved?: boolean }) {
       <svg viewBox="0 0 100 100">
         <g>
           {BLADE_ROTATIONS.map((rot) => (
-            <rect
-              key={rot}
-              className="blade"
-              style={{ "--rot": `${rot}deg` } as CSSProperties}
-              x="46"
-              y="10"
-              width="8"
-              height="34"
-              rx="4"
-            />
+            <g key={rot} className="blade-rot" style={{ transform: `rotate(${rot}deg)` } as CSSProperties}>
+              <rect className="blade" x="46" y="10" width="8" height="34" rx="4" />
+            </g>
           ))}
         </g>
         <path

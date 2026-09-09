@@ -132,8 +132,10 @@ const el = {
   imageChipRemove: document.getElementById("imageChipRemove"),
   micBtn: document.getElementById("micBtn"),
   listeningWave: document.getElementById("listeningWave"),
-  listeningLabel: document.getElementById("listeningLabel"),
   listeningSubmitBtn: document.getElementById("listeningSubmitBtn"),
+  quotaBar: document.getElementById("quotaBar"),
+  quotaLabel: document.getElementById("quotaLabel"),
+  quotaFill: document.getElementById("quotaFill"),
   sidebar: document.getElementById("sidebar"),
   sidebarCollapseBtn: document.getElementById("sidebarCollapseBtn"),
   drawerToggle: document.getElementById("drawerToggle"),
@@ -243,6 +245,58 @@ function applySettings() {
 function setAttrIf(node, name, condition, value) {
   if (condition) node.setAttribute(name, value);
   else node.removeAttribute(name);
+}
+
+/* ---------------------------------------------------------------- daily quota bar */
+
+// The last quota this browser has actually been told, so the sidebar isn't blank on every
+// reload — it corrects itself the moment the next check answers with a fresh number (see
+// `updateQuotaBar`), so this is a best-effort snapshot, never a source of truth in its own
+// right. No client-side guess ever substitutes for a number the server hasn't reported: the
+// bar simply stays hidden until then, the same posture `updateShellTopbar` takes toward an
+// empty title rather than showing one that says nothing.
+const QUOTA_KEY = "trase.quota.v1";
+
+function loadQuota() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(QUOTA_KEY) ?? "null");
+    if (parsed && Number.isFinite(parsed.remainingToday) && Number.isFinite(parsed.perDay) && parsed.perDay > 0) {
+      return parsed;
+    }
+  } catch {
+    // Best-effort, same as the settings/library/feedback stores.
+  }
+  return null;
+}
+
+function persistQuota(remainingToday, perDay) {
+  try {
+    localStorage.setItem(QUOTA_KEY, JSON.stringify({ remainingToday, perDay }));
+  } catch {
+    // Best-effort, same as the settings/library/feedback stores.
+  }
+}
+
+/**
+ * Renders the row above the sidebar's sign-in button showing how much of today's
+ * `RATE_LIMIT_PER_DAY` (lib/guard.js) this client has left, off the `quotaStatus` frame
+ * every `/api/chat` response sends (see streamChat). `perDay <= 0` means the operator
+ * hasn't set a limit at all (or set an invalid one) — the guard falls back to a real cap
+ * either way, but a bar claiming a "limit" of 0 or a negative number would be nonsense, so
+ * nothing is shown.
+ */
+function updateQuotaBar(remainingToday, perDay) {
+  if (!el.quotaBar || !Number.isFinite(remainingToday) || !Number.isFinite(perDay) || perDay <= 0) return;
+  persistQuota(remainingToday, perDay);
+  const used = Math.max(0, perDay - remainingToday);
+  el.quotaBar.hidden = false;
+  el.quotaLabel.textContent = `${used} of ${perDay} checks used today`;
+  el.quotaFill.style.width = `${Math.min(100, Math.round((used / perDay) * 100))}%`;
+  // Matches the pressure thresholds `planChain` (lib/gemini.js) reads off the same
+  // fraction server-side, so "the bar turns amber" and "the model quietly steps down a
+  // tier" describe the same moment rather than two independently tuned numbers.
+  const pressure = used / perDay;
+  el.quotaBar.dataset.pressure = remainingToday <= 0 ? "exhausted" : pressure >= 0.8 ? "high" : "";
 }
 
 /** The custom system-prompt text, appended to an outgoing message. Kept separate from
@@ -1665,32 +1719,39 @@ function updatePaneMode() {
  * `renderLibrary` — the entry's own title and status change under a *running* check without
  * the selection changing at all (`applyPostTitle` naming the post, the verdict landing), and
  * a library re-render is what every one of those already ends with.
+ *
+ * The title and subtitle swap through `setStatusText` rather than a bare `textContent =`,
+ * the same fade-out/fade-in beat `#runStatus` already gets — "New check" replacing itself
+ * with the real title used to be an instant snap, jarring at the top of the shell where the
+ * reader's eye already is. `setStatusText` is also what makes the frequent, mostly-unchanged
+ * calls from `renderLibrary` cheap: it no-ops (no fade, no reflow) whenever the text it's
+ * asked to set is already on screen.
  */
 function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
   if (!entry) {
     el.shellTopbar.hidden = true;
-    el.shellTitle.textContent = "";
-    el.shellSub.textContent = "";
+    setStatusText("shellTitle", "");
+    setStatusText("shellSub", "");
     // The phone bar is the only one at that width, so it stays on screen with nothing
     // selected and says what to do instead — the design system's "Chat to shell — Mobile"
     // screen opens on exactly this line.
-    el.topbarTitle.textContent = "New check";
     el.topbarTitle.removeAttribute("title");
-    el.topbarSub.textContent = "Paste a link to get started";
+    setStatusText("topbarTitle", "New check");
+    setStatusText("topbarSub", "Paste a link to get started");
     return;
   }
   el.shellTopbar.hidden = false;
-  el.shellTitle.textContent = entry.title;
+  setStatusText("shellTitle", entry.title);
   // The full title as a tooltip, same courtesy `.lib-title` gets: this line ellipsises too.
   el.shellTitle.title = entry.title;
   const when = entry.status === "running" ? "checking now" : `checked ${relativeTime(entry.createdAt)}`;
   // A saved link-less conversation has no platform to name and was never "checked" —
   // `statusLabel` calls it "3 messages", which is the whole of what there is to say.
   const subtitle = entry.url ? `${entry.platform} · ${when}` : statusLabel(entry);
-  el.shellSub.textContent = subtitle;
-  el.topbarTitle.textContent = entry.title;
+  setStatusText("shellSub", subtitle);
+  setStatusText("topbarTitle", entry.title);
   el.topbarTitle.title = entry.title;
-  el.topbarSub.textContent = subtitle;
+  setStatusText("topbarSub", subtitle);
 }
 
 /**
@@ -2587,18 +2648,27 @@ function revealPlayer() {
  * stopped and dimmed, seal check drawn — which is what the empty card holds behind its one
  * line (see `renderChatPane`'s empty branch) and what `resolveIris` switches the running
  * card's own iris to when a turn finishes.
+ *
+ * Each blade's rotation is a static, per-instance `transform` on its own `<g>` wrapper
+ * rather than a `--rot` custom property read inside the shared `blade-breathe` keyframes.
+ * WebKit resolves a `var()` referenced from `@keyframes` once for the whole animation
+ * rather than per element that runs it, so all six blades animated to the exact same
+ * rotation and the flower collapsed into what looked like one overlapping pill. Rotation
+ * now lives outside the animation entirely — only `scaleY`/`opacity` are keyframed — so
+ * there is no per-instance value for a shared animation to lose.
  */
 function irisMarkup({ resolved = false } = {}) {
+  const blade = `<rect class="blade" x="46" y="10" width="8" height="34" rx="4"/>`;
   return `
     <div class="iris-wrap${resolved ? " resolved" : ""}" aria-hidden="true">
       <svg viewBox="0 0 100 100">
         <g>
-          <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <g class="blade-rot" style="transform:rotate(0deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(60deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(120deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(180deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(240deg)">${blade}</g>
+          <g class="blade-rot" style="transform:rotate(300deg)">${blade}</g>
         </g>
         <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
@@ -2741,8 +2811,11 @@ function flipClaimsPane(render) {
       // sees the card visibly become the grid, so it should read as a deliberate motion
       // rather than a snap. The easing is a pure ease-out (fast start, long gentle settle)
       // rather than the old ease-in-out S-curve, which had a harsh accelerating start that
-      // read as a jump-cut before the eye had registered the box moving at all.
-      { duration: 800, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+      // read as a jump-cut before the eye had registered the box moving at all. 1100ms
+      // rather than the original 800ms — a check with several claims can fire this every
+      // few seconds as markers stream in, and at 800ms the next split could start before a
+      // reader had finished following the last one, which read as hectic rather than lively.
+      { duration: 1100, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
     );
   });
 }
@@ -2851,7 +2924,7 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
   // status strip is another <div> ahead of these, so nth-of-type would be off by one.
   // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
   // box has visibly finished sliding into place, instead of outrunning it.
-  const style = `--split-delay: ${Math.min(index * 0.07, 0.42)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
+  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
   return `
     <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       <div class="claim-eyebrow${done ? "" : " pending"}">${
@@ -2883,7 +2956,11 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
   const cols = claimGridColumns(count);
   const spanLast = claimGridSpanLast(count, cols);
   setClaimsGridMode("grid-loading", cols);
+  // Prepended the same way renderResultCard prepends it to the finished grid — see
+  // summaryCardHTML's own comment for why this now runs through every stage rather than
+  // only the settled one, matching the DS's "Chat to shell" screen.
   el.claimsPane.innerHTML =
+    summaryCardHTML(claims) +
     claimGridStatusHTML(stage) +
     claims
       .map((claim, i) =>
@@ -3397,16 +3474,18 @@ function claimPanesHTML(entry, animate, newestFollowup) {
 
 /**
  * The check at a glance — how many claims were checked and how they came out — above the
- * claims themselves. Ported from the TRASE Design System's SummaryCard; the phone sheet is
- * the only place it is drawn (`.summary-card` is `display: none` at every other width),
- * because the desktop grid already shows every verdict badge at once and this would be a
- * second copy of what is on screen.
+ * claims themselves. Ported from the TRASE Design System's SummaryCard, and shown at every
+ * width (see the note by `.sheet-handle` in index.html for why this used to be phone-only)
+ * and in both the loading grid (`renderClaimSkeletons`) and the finished one
+ * (`renderResultCard`) — matching the DS's own "Chat to shell" screen, where it sits above
+ * `ClaimGridSplit` through every stage rather than appearing only once the check settles.
  *
  * The four rows are the closed verdict vocabulary from `VERDICTS`, always all four and in
  * that order, with a zero row dimmed rather than dropped: a card that changed shape with
  * each check would have to be re-read every time instead of glanced at. A claim whose
  * verdict never parsed counts toward the total and toward none of the rows, the same way it
- * gets no badge.
+ * gets no badge. Each row carries `data-verdict` so `updateSummaryCard` can find and update
+ * it in place as claims settle, without re-rendering (and re-animating) the whole card.
  */
 function summaryCardHTML(claims) {
   const counts = {};
@@ -3419,7 +3498,7 @@ function summaryCardHTML(claims) {
     .map(([key, verdict]) => {
       const count = counts[key] ?? 0;
       return `
-        <div class="summary-stat" data-count="${count}">
+        <div class="summary-stat" data-verdict="${key}" data-count="${count}">
           <span class="summary-count ${verdict.css}">${count}</span>
           <span class="summary-label">${escapeHTML(verdict.label)}</span>
         </div>`;
@@ -3431,6 +3510,36 @@ function summaryCardHTML(claims) {
       <div class="summary-sub">${claims.length} claim${claims.length === 1 ? "" : "s"} analysed</div>
       <div class="summary-stats">${stats}</div>
     </div>`;
+}
+
+/**
+ * Keeps the loading grid's summary card in step as claims settle one at a time — the same
+ * "surgical, not a re-render" approach `settleClaimPane` uses, and for the same reason: a
+ * fresh `summaryCardHTML` swap would be harmless in itself, but it is simpler to just patch
+ * the two things that actually changed (the counts and the analysed-so-far line) than to
+ * reason about whether replacing the node could ever fight some future animation on it.
+ * A no-op if the card isn't there — `renderClaimSkeletons` hasn't run yet, or the finished
+ * card has already replaced the loading view.
+ */
+function updateSummaryCard(claims) {
+  const card = el.claimsPane.querySelector(".summary-card");
+  if (!card) return;
+  const counts = {};
+  for (const claim of claims) {
+    if (claim.verdictKey && VERDICTS[claim.verdictKey]) {
+      counts[claim.verdictKey] = (counts[claim.verdictKey] ?? 0) + 1;
+    }
+  }
+  const sub = card.querySelector(".summary-sub");
+  if (sub) sub.textContent = `${claims.length} claim${claims.length === 1 ? "" : "s"} analysed`;
+  for (const key of Object.keys(VERDICTS)) {
+    const stat = card.querySelector(`.summary-stat[data-verdict="${key}"]`);
+    if (!stat) continue;
+    const count = counts[key] ?? 0;
+    stat.dataset.count = String(count);
+    const countEl = stat.querySelector(".summary-count");
+    if (countEl) countEl.textContent = String(count);
+  }
 }
 
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
@@ -3563,6 +3672,12 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
       }
 
       if (frame.type === "stage") onStage?.(frame);
+      // Handled here rather than threaded through as another callback like onStage/
+      // onSources: the quota bar is one piece of chrome shared by every caller of
+      // streamChat (a fresh check, a follow-up question, a re-ask), never something a
+      // caller wants to treat differently, so there is nothing a per-call callback would
+      // buy over updating it directly.
+      else if (frame.type === "quotaStatus") updateQuotaBar(frame.remainingToday, frame.perDay);
       else if (frame.type === "delta") {
         answer += frame.text;
         onDelta?.(answer);
@@ -3791,11 +3906,16 @@ async function runCheck(url, existingId, hint) {
         if (!rebuild && settled.length === 0) return;
         drawn = claims;
         if (rebuild) {
+          // renderClaimSkeletons prepends a fresh summaryCardHTML(claims) of its own, so
+          // the counts are already current the moment this lands — nothing more to patch.
           flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
           }
+          // The surgical path above never touches the summary card, unlike the rebuild path
+          // above it — so it's the one place that has to patch it itself.
+          updateSummaryCard(claims);
         }
         // Claims finishing is the most concrete progress this turn produces. The elapsed-time
         // curve knows nothing about it, so the settled fraction pulls the bar along itself.
@@ -4208,25 +4328,26 @@ function setListening(on) {
   el.micBtn.setAttribute("aria-label", label);
   el.micBtn.title = label;
   el.micBtn.innerHTML = on ? MIC_SUBMIT_ICON : MIC_ICON;
-  // While listening, the wave+label take the place of the input/image/check trio rather
-  // than sitting alongside a bar the reader can't type or tap into anyway — recognition
-  // owns the input until it stops. micBtn itself stays exactly where it is throughout;
-  // it's what stops and submits, so it's never part of what this hides.
+  // While listening, the wave takes the place of the input/image/check trio rather than
+  // sitting alongside a bar the reader can't type or tap into anyway — recognition owns
+  // the input until it stops. micBtn itself stays exactly where it is throughout; it's
+  // what stops and submits, so it's never part of what this hides. It used to share this
+  // row with a "Listening…" label — dropped as redundant with the wave itself moving, and
+  // with the mic button beside it already turning red — so the wave alone now grows to
+  // fill the row (see `.listening-wave` in index.html), reading as one clear signal rather
+  // than a caption explaining an animation the reader can already see.
   el.imageBtn.hidden = on;
   el.linkInput.hidden = on;
   el.checkBtn.hidden = on;
   el.listeningWave.hidden = !on;
-  el.listeningLabel.hidden = !on;
   if (on) {
     // Same double-rAF-then-`.in` shape as revealIn: unhiding alone would just pop the row
     // in at full opacity, so the fade-up needs a frame where the element exists at its
     // resting (opacity: 0) style before `.in` gives the transition something to animate to.
     el.listeningWave.classList.remove("in");
-    el.listeningLabel.classList.remove("in");
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         el.listeningWave.classList.add("in");
-        el.listeningLabel.classList.add("in");
       });
     });
   }
@@ -4742,6 +4863,10 @@ el.imageInput.addEventListener("change", async () => {
 el.imageChipRemove.addEventListener("click", clearPendingImage);
 
 applySettings();
+// Best-effort last-seen snapshot (see loadQuota's own comment) — replaced the moment the
+// first real check of this session answers with a fresh quotaStatus frame.
+const savedQuota = loadQuota();
+if (savedQuota) updateQuotaBar(savedQuota.remainingToday, savedQuota.perDay);
 // Classifies now and re-classifies on rotate/resize/pointer change, calling back only
 // when the answer actually changes — see watchDevice in device.js.
 watchDevice(window, applyDevice);

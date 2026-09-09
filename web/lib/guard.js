@@ -20,7 +20,7 @@ export function config(env = process.env) {
   return {
     password: env.APP_PASSWORD || "",
     perMinute: positiveInt(env.RATE_LIMIT_PER_MINUTE, 15),
-    perDay: positiveInt(env.RATE_LIMIT_PER_DAY, 300),
+    perDay: positiveInt(env.RATE_LIMIT_PER_DAY, 10),
     maxInputChars: positiveInt(env.MAX_INPUT_CHARS, 8000),
     maxTurns: positiveInt(env.MAX_TURNS, 20),
     // Every other cap here bounds *input*. Nothing bounded output — a single reply
