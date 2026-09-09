@@ -249,7 +249,7 @@ function setAttrIf(node, name, condition, value) {
 
 /* ---------------------------------------------------------------- daily quota bar */
 
-// The last quota this browser has actually been told, so the composer isn't blank on every
+// The last quota this browser has actually been told, so the sidebar isn't blank on every
 // reload — it corrects itself the moment the next check answers with a fresh number (see
 // `updateQuotaBar`), so this is a best-effort snapshot, never a source of truth in its own
 // right. No client-side guess ever substitutes for a number the server hasn't reported: the
@@ -278,11 +278,12 @@ function persistQuota(remainingToday, perDay) {
 }
 
 /**
- * Renders the row above the composer showing how much of today's `RATE_LIMIT_PER_DAY`
- * (lib/guard.js) this client has left, off the `quotaStatus` frame every `/api/chat`
- * response sends (see streamChat). `perDay <= 0` means the operator hasn't set a limit at
- * all (or set an invalid one) — the guard falls back to a real cap either way, but a bar
- * claiming a "limit" of 0 or a negative number would be nonsense, so nothing is shown.
+ * Renders the row above the sidebar's sign-in button showing how much of today's
+ * `RATE_LIMIT_PER_DAY` (lib/guard.js) this client has left, off the `quotaStatus` frame
+ * every `/api/chat` response sends (see streamChat). `perDay <= 0` means the operator
+ * hasn't set a limit at all (or set an invalid one) — the guard falls back to a real cap
+ * either way, but a bar claiming a "limit" of 0 or a negative number would be nonsense, so
+ * nothing is shown.
  */
 function updateQuotaBar(remainingToday, perDay) {
   if (!el.quotaBar || !Number.isFinite(remainingToday) || !Number.isFinite(perDay) || perDay <= 0) return;

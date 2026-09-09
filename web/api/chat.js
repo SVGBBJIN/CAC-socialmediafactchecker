@@ -146,7 +146,7 @@ export default async function handler(req, res) {
   heartbeat.unref?.();
 
   // How much of today's allowance is left, straight off the counter `authorize` already
-  // advanced above — the composer's quota bar reads this frame rather than a separate
+  // advanced above — the sidebar's quota bar reads this frame rather than a separate
   // endpoint, so checking it costs nothing beyond the request already being made. Named
   // `quotaStatus`, not `usage`: `verifiedChat` already emits a `usage` frame for Gemini
   // token/cache accounting (logged, never forwarded — see below), and the two must not
