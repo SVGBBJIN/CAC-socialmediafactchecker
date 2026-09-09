@@ -900,11 +900,12 @@
          claim-sized box. `grid-auto-rows` still governs every row after it. */
       grid-template-rows: auto;
     }
-    /* The loading variant reserves a second `auto`-height row for `claimGridStatusHTML`'s
-       status strip, on top of the summary card's own row above — `grid-auto-rows` above
-       still governs every claim-box row after both. The finished result has only the one
-       extra row (the summary card): every other cell there is a claim. */
-    .claims-pane.claim-grid.claim-grid-loading { grid-template-rows: auto auto; }
+    /* The loading variant reserves two more `auto`-height rows on top of the summary card's
+       own row above: the pasted-link bubble (`checkBubbleHTML`) and `claimGridStatusHTML`'s
+       status strip — `grid-auto-rows` above still governs every claim-box row after all
+       three. The finished result has only the one extra row (the summary card): the bubble
+       is gone by then (see checkBubbleHTML's own comment) and every other cell is a claim. */
+    .claims-pane.claim-grid.claim-grid-loading { grid-template-rows: auto auto auto; }
     .claims-pane.claim-grid .claim-pane {
       /* A grid item's default `min-height` is `auto` — the same trap a flex item's is (see
          `.claims-pane`'s own comment above) — so without this, a box with more in it than
@@ -1596,7 +1597,11 @@
      markup with nothing above it — an analysis card's worth of margin/border/padding
      would be a rule dividing the card from itself. */
   .thread.chat-thread { border-top: 0; margin-top: 0; padding-top: 0; }
-  .thread-item { display: flex; flex-direction: column; gap: 8px; }
+  /* `grid-column: 1/-1` only means anything when this is the loading grid's lead bubble
+     (see checkBubbleHTML/renderClaimSkeletons in app.js) — spans the full grid width the
+     same way `.summary-card` does rather than being squeezed into one claim-sized cell.
+     A no-op everywhere else `.thread-item` is used (a plain flex column, not a grid). */
+  .thread-item { display: flex; flex-direction: column; gap: 8px; grid-column: 1 / -1; }
   .thread-q {
     align-self: flex-start;
     font-size: 12.5px; color: var(--ink);

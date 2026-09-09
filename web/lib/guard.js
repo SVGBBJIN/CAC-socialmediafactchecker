@@ -178,6 +178,21 @@ export function checkRateLimit(key, limits, now = Date.now()) {
   };
 }
 
+/**
+ * A read-only look at what `checkRateLimit` would report, without recording a hit or
+ * touching the map's eviction/LRU order. `api/config.js` calls this on page load so the
+ * quota bar has a real number to show before the reader has made a single request —
+ * `checkRateLimit` itself can't be reused there, since counting a page load as a "check"
+ * would charge the reader for a request they never made.
+ */
+export function peekRateLimit(key, limits, now = Date.now()) {
+  const hits = (windows.get(key) ?? []).filter((t) => now - t < DAY);
+  return {
+    remainingToday: Math.max(0, limits.perDay - hits.length),
+    pressure: hits.length / limits.perDay,
+  };
+}
+
 /** Test seam — the counters are module state, so tests need a way to start clean. */
 export function resetRateLimits() {
   windows.clear();

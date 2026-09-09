@@ -2686,9 +2686,24 @@ function irisMarkup({ resolved = false } = {}) {
  * There is no `aria-busy="true"` on the card either, tempting as it looks. `aria-busy` on
  * an ancestor suppresses live-region announcements from everything inside it, so setting
  * it here would mute the very status line it was meant to describe. */
-function renderRunningCard() {
+/**
+ * The pasted link, as a small chat-style bubble — the same `.thread-q` shape a follow-up
+ * question's own bubble already uses (see `chatThreadHTML`/`followupThreadHTML`), so
+ * submitting a check reads as sending a message the same way asking a follow-up does,
+ * rather than the link vanishing into a loading spinner with no acknowledgment of what was
+ * actually typed. Shown only while a check is being prepared or its grid is still filling
+ * in (`renderRunningCard`, `renderClaimSkeletons`) — once it settles into the finished
+ * video-pane-plus-claims view, the resolved post's own title says the same thing (video
+ * pane, topbar), and repeating the raw URL there would be a redundant second copy.
+ */
+function checkBubbleHTML(url) {
+  return `<div class="thread-item"><div class="thread-q">${escapeHTML(url)}</div></div>`;
+}
+
+function renderRunningCard(url) {
   setClaimsGridMode(null);
   el.claimsPane.innerHTML = `
+    ${checkBubbleHTML(url)}
     <div class="claim-card">
       <div class="card-loading">
         ${irisMarkup()}
@@ -2951,15 +2966,18 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
  * real text rather than reverting to a shimmer — see `settleClaimPane` for the in-place
  * version that runs when no redraw is needed.
  */
-function renderClaimSkeletons(claims, stage, sources, seekable) {
+function renderClaimSkeletons(claims, stage, sources, seekable, url) {
   const count = claims.length;
   const cols = claimGridColumns(count);
   const spanLast = claimGridSpanLast(count, cols);
   setClaimsGridMode("grid-loading", cols);
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
-  // only the settled one, matching the DS's "Chat to shell" screen.
+  // only the settled one, matching the DS's "Chat to shell" screen. The check bubble stays
+  // above it — see checkBubbleHTML's own comment for why it drops out once the grid
+  // finishes (renderResultCard doesn't call it).
   el.claimsPane.innerHTML =
+    checkBubbleHTML(url) +
     summaryCardHTML(claims) +
     claimGridStatusHTML(stage) +
     claims
@@ -3843,7 +3861,7 @@ async function runCheck(url, existingId, hint) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
-  renderRunningCard();
+  renderRunningCard(url);
   updateComposerMode();
 
   const image = pendingImage;
@@ -3908,7 +3926,7 @@ async function runCheck(url, existingId, hint) {
         if (rebuild) {
           // renderClaimSkeletons prepends a fresh summaryCardHTML(claims) of its own, so
           // the counts are already current the moment this lands — nothing more to patch.
-          flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
+          flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable, url));
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
@@ -4118,6 +4136,9 @@ async function loadServerConfig() {
     const config = await response.json();
     serverConfig = config;
     renderSearchStatus();
+    // A real number the moment the page loads, rather than leaving the sidebar's quota bar
+    // sitting hidden until the reader's first check answers with its own quotaStatus frame.
+    if (config.quota) updateQuotaBar(config.quota.remainingToday, config.quota.perDay);
     if (!config.apiKeyConfigured) {
       el.checkBtn.disabled = true;
       el.linkInput.placeholder = "Server has no GEMINI_API_KEY — see web/README.md";

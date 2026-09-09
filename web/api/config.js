@@ -4,7 +4,7 @@
 // all the browser needs to tell the difference between "ask for a passphrase" and
 // "tell the operator their key is missing".
 
-import { config } from "../lib/guard.js";
+import { config, clientKey, peekRateLimit } from "../lib/guard.js";
 import { modelChainFromEnv } from "../lib/gemini.js";
 import { healthSnapshot } from "../lib/degradation.js";
 import { providerFromEnv } from "../lib/search.js";
@@ -48,6 +48,12 @@ export default async function handler(req, res) {
       // unset, which is how the client tells "accounts aren't configured on this
       // deploy" from "accounts are configured but you're signed out".
       supabase: supabaseConfigFromEnv(),
+      // A read-only look at this client's own daily allowance (see peekRateLimit's own
+      // comment for why this can't just call the same counter /api/chat does) — sent so
+      // the sidebar's quota bar has a real number the moment the page loads, rather than
+      // sitting empty until the reader's first check answers. Keyed the same way /api/chat
+      // authorizes a request (clientKey), so it's the same client's own count either way.
+      quota: { ...peekRateLimit(clientKey(req), limits), perDay: limits.perDay },
     }),
   );
 }

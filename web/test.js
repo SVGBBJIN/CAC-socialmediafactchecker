@@ -75,6 +75,7 @@ import { resolveStaticPath, contentType } from "./lib/static.js";
 import {
   passwordMatches,
   checkRateLimit,
+  peekRateLimit,
   validateMessages,
   resetRateLimits,
   trackedClientCount,
@@ -1707,6 +1708,37 @@ test("limits are per client, not global", () => {
   const now = Date.now();
   for (let i = 0; i < limits.perMinute; i++) checkRateLimit("a", limits, now);
   assert.doesNotThrow(() => checkRateLimit("b", limits, now));
+});
+
+test("peekRateLimit reports a client's count without recording a hit of its own", () => {
+  resetRateLimits();
+  const now = Date.now();
+  checkRateLimit("peeked", { ...limits, perDay: 10 }, now);
+  checkRateLimit("peeked", { ...limits, perDay: 10 }, now);
+
+  const first = peekRateLimit("peeked", { ...limits, perDay: 10 }, now);
+  assert.equal(first.remainingToday, 8, "two real hits, none from peeking yet");
+
+  const second = peekRateLimit("peeked", { ...limits, perDay: 10 }, now);
+  assert.equal(second.remainingToday, 8, "peeking twice in a row still didn't add a hit");
+});
+
+test("peekRateLimit on a client with no history at all reads as a full day's allowance", () => {
+  resetRateLimits();
+  const status = peekRateLimit("never-seen", { ...limits, perDay: 10 }, Date.now());
+  assert.equal(status.remainingToday, 10);
+  assert.equal(status.pressure, 0);
+});
+
+test("peekRateLimit never reports negative remaining, even past the cap", () => {
+  resetRateLimits();
+  const now = Date.now();
+  const tight = { ...limits, perMinute: 1e9, perDay: 2 };
+  // Two hits fill the cap; checkRateLimit's own third call would throw, but nothing here
+  // calls it a third time — this is purely about what peeking after the cap reports.
+  checkRateLimit("capped", tight, now);
+  checkRateLimit("capped", tight, now);
+  assert.equal(peekRateLimit("capped", tight, now).remainingToday, 0);
 });
 
 test("history is trimmed to MAX_TURNS, keeping the most recent", () => {
