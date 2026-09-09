@@ -145,6 +145,14 @@ export default async function handler(req, res) {
   }, HEARTBEAT_MS);
   heartbeat.unref?.();
 
+  // How much of today's allowance is left, straight off the counter `authorize` already
+  // advanced above — the composer's quota bar reads this frame rather than a separate
+  // endpoint, so checking it costs nothing beyond the request already being made. Named
+  // `quotaStatus`, not `usage`: `verifiedChat` already emits a `usage` frame for Gemini
+  // token/cache accounting (logged, never forwarded — see below), and the two must not
+  // collide on the wire.
+  send({ type: "quotaStatus", remainingToday: usage.remainingToday ?? null, perDay: limits.perDay });
+
   // Where the request got to, and when. Stages are the phases that produce no output, so
   // they are also the phases a request dies in without leaving a trace — logging them is
   // what turns "it just stopped" into a line in the host's runtime log naming the step and

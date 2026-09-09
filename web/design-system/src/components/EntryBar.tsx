@@ -52,12 +52,12 @@ export function EntryBar({
       ) : null}
 
       {listening ? (
-        <>
-          <div className="listening-wave in" aria-hidden="true">
-            <span /><span /><span /><span /><span />
-          </div>
-          <span className="listening-label in">Listening…</span>
-        </>
+        // No "Listening…" label beside it — dropped as redundant with the wave's own
+        // motion and the mic button beside it already turning red (see setListening in
+        // public/app.js) — so the wave alone fills the row the label used to share.
+        <div className="listening-wave in" aria-hidden="true">
+          <span /><span /><span /><span /><span /><span /><span /><span /><span />
+        </div>
       ) : (
         <input
           type="text"
@@ -87,8 +87,12 @@ export function EntryBar({
 
       {listening ? null : (
         <button type="submit" className="check-btn" disabled={disabled} aria-label={label} title={label}>
+          {/* The brand mark, not a checkmark — the same dashed-ring-and-dot logo the
+           * sidebar's wordmark carries (Sidebar.jsx), scaled down for a 24px button. */}
           <svg className="check-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            <circle cx="12" cy="12" r="7.5" stroke="currentColor" strokeWidth="1.8" strokeDasharray="9 2 9 2" strokeLinecap="round" />
+            <circle cx="12" cy="12" r="2" fill="currentColor" />
+            <rect x="15.3" y="10.6" width="1.8" height="2.8" rx="0.5" fill="var(--accent-2)" />
           </svg>
           <span className="check-btn-label">{label}</span>
         </button>

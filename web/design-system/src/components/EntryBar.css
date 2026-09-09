@@ -98,36 +98,41 @@
 }
 
 /* While the recognizer is listening the field and submit button hide and this takes their
-   place, so the reader can see the app actually hearing something. */
-.listening-wave, .listening-label {
+   place, so the reader can see the app actually hearing something. Used to share the row
+   with a "Listening…" label; dropped as redundant with the wave's own motion and the mic
+   button beside it already turning red, so the wave alone now expands to fill the row. */
+.listening-wave {
   opacity: 0; transform: translateY(3px);
   transition: opacity 0.25s ease, transform 0.25s ease;
 }
-.listening-wave.in, .listening-label.in { opacity: 1; transform: translateY(0); }
+.listening-wave.in { opacity: 1; transform: translateY(0); }
 .listening-wave {
-  flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
   height: 42px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface);
 }
 .listening-wave span {
   width: 3px; height: 8px; border-radius: 3px; background: var(--accent);
   animation: wave-bounce 0.9s ease-in-out infinite;
 }
-.listening-wave span:nth-child(1) { animation-delay: -0.6s; }
-.listening-wave span:nth-child(2) { animation-delay: -0.4s; }
+/* Nine bars rather than the five this row used to split with the label, spread across the
+   whole width the wave now owns alone. Delays are deliberately out of left-to-right order
+   so the row reads as an organic ripple rather than a single wave visibly sweeping across. */
+.listening-wave span:nth-child(1) { animation-delay: 0s; }
+.listening-wave span:nth-child(2) { animation-delay: -0.5s; }
 .listening-wave span:nth-child(3) { animation-delay: -0.2s; }
-.listening-wave span:nth-child(4) { animation-delay: -0.5s; }
-.listening-wave span:nth-child(5) { animation-delay: -0.1s; }
+.listening-wave span:nth-child(4) { animation-delay: -0.7s; }
+.listening-wave span:nth-child(5) { animation-delay: -0.35s; }
+.listening-wave span:nth-child(6) { animation-delay: -0.65s; }
+.listening-wave span:nth-child(7) { animation-delay: -0.1s; }
+.listening-wave span:nth-child(8) { animation-delay: -0.8s; }
+.listening-wave span:nth-child(9) { animation-delay: -0.45s; }
 @keyframes wave-bounce {
   0%, 100% { height: 8px; opacity: 0.6; }
   50%      { height: 24px; opacity: 1; }
 }
-.listening-label {
-  flex: 0 0 auto;
-  font-family: var(--font-mono); font-size: 11.5px; color: var(--accent); letter-spacing: 0.02em;
-}
 @media (prefers-reduced-motion: reduce) {
   .icon-btn.listening, .listening-wave span { animation: none; }
-  .listening-wave, .listening-label { transition: none; opacity: 1; transform: none; }
+  .listening-wave { transition: none; opacity: 1; transform: none; }
 }
 
 /* An attached image, on its own row under the field (`order`/`flex-basis` rather than a

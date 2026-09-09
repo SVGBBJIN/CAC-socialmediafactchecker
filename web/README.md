@@ -42,7 +42,7 @@ That is the "15 million people on my quota" problem, and it's a separate control
 |---|---|---|---|
 | Passphrase gate | `APP_PASSWORD` | off | Strangers using the endpoint at all |
 | Per-minute limit | `RATE_LIMIT_PER_MINUTE` | 15 | A script, or a stuck retry loop |
-| Per-day limit | `RATE_LIMIT_PER_DAY` | 300 | Slow bleed over a day |
+| Per-day limit | `RATE_LIMIT_PER_DAY` | 10 | Slow bleed over a day |
 | Message size cap | `MAX_INPUT_CHARS` | 8000 | One giant paste costing real money |
 | History cap | `MAX_TURNS` | 20 | Long threads resending everything, forever |
 

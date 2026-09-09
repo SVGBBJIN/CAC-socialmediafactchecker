@@ -132,8 +132,10 @@ const el = {
   imageChipRemove: document.getElementById("imageChipRemove"),
   micBtn: document.getElementById("micBtn"),
   listeningWave: document.getElementById("listeningWave"),
-  listeningLabel: document.getElementById("listeningLabel"),
   listeningSubmitBtn: document.getElementById("listeningSubmitBtn"),
+  quotaBar: document.getElementById("quotaBar"),
+  quotaLabel: document.getElementById("quotaLabel"),
+  quotaFill: document.getElementById("quotaFill"),
   sidebar: document.getElementById("sidebar"),
   sidebarCollapseBtn: document.getElementById("sidebarCollapseBtn"),
   drawerToggle: document.getElementById("drawerToggle"),
@@ -243,6 +245,57 @@ function applySettings() {
 function setAttrIf(node, name, condition, value) {
   if (condition) node.setAttribute(name, value);
   else node.removeAttribute(name);
+}
+
+/* ---------------------------------------------------------------- daily quota bar */
+
+// The last quota this browser has actually been told, so the composer isn't blank on every
+// reload — it corrects itself the moment the next check answers with a fresh number (see
+// `updateQuotaBar`), so this is a best-effort snapshot, never a source of truth in its own
+// right. No client-side guess ever substitutes for a number the server hasn't reported: the
+// bar simply stays hidden until then, the same posture `updateShellTopbar` takes toward an
+// empty title rather than showing one that says nothing.
+const QUOTA_KEY = "trase.quota.v1";
+
+function loadQuota() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(QUOTA_KEY) ?? "null");
+    if (parsed && Number.isFinite(parsed.remainingToday) && Number.isFinite(parsed.perDay) && parsed.perDay > 0) {
+      return parsed;
+    }
+  } catch {
+    // Best-effort, same as the settings/library/feedback stores.
+  }
+  return null;
+}
+
+function persistQuota(remainingToday, perDay) {
+  try {
+    localStorage.setItem(QUOTA_KEY, JSON.stringify({ remainingToday, perDay }));
+  } catch {
+    // Best-effort, same as the settings/library/feedback stores.
+  }
+}
+
+/**
+ * Renders the row above the composer showing how much of today's `RATE_LIMIT_PER_DAY`
+ * (lib/guard.js) this client has left, off the `quotaStatus` frame every `/api/chat`
+ * response sends (see streamChat). `perDay <= 0` means the operator hasn't set a limit at
+ * all (or set an invalid one) — the guard falls back to a real cap either way, but a bar
+ * claiming a "limit" of 0 or a negative number would be nonsense, so nothing is shown.
+ */
+function updateQuotaBar(remainingToday, perDay) {
+  if (!el.quotaBar || !Number.isFinite(remainingToday) || !Number.isFinite(perDay) || perDay <= 0) return;
+  persistQuota(remainingToday, perDay);
+  const used = Math.max(0, perDay - remainingToday);
+  el.quotaBar.hidden = false;
+  el.quotaLabel.textContent = `${used} of ${perDay} checks used today`;
+  el.quotaFill.style.width = `${Math.min(100, Math.round((used / perDay) * 100))}%`;
+  // Matches the pressure thresholds `planChain` (lib/gemini.js) reads off the same
+  // fraction server-side, so "the bar turns amber" and "the model quietly steps down a
+  // tier" describe the same moment rather than two independently tuned numbers.
+  const pressure = used / perDay;
+  el.quotaBar.dataset.pressure = remainingToday <= 0 ? "exhausted" : pressure >= 0.8 ? "high" : "";
 }
 
 /** The custom system-prompt text, appended to an outgoing message. Kept separate from
@@ -3618,6 +3671,12 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
       }
 
       if (frame.type === "stage") onStage?.(frame);
+      // Handled here rather than threaded through as another callback like onStage/
+      // onSources: the quota bar is one piece of chrome shared by every caller of
+      // streamChat (a fresh check, a follow-up question, a re-ask), never something a
+      // caller wants to treat differently, so there is nothing a per-call callback would
+      // buy over updating it directly.
+      else if (frame.type === "quotaStatus") updateQuotaBar(frame.remainingToday, frame.perDay);
       else if (frame.type === "delta") {
         answer += frame.text;
         onDelta?.(answer);
@@ -4268,25 +4327,26 @@ function setListening(on) {
   el.micBtn.setAttribute("aria-label", label);
   el.micBtn.title = label;
   el.micBtn.innerHTML = on ? MIC_SUBMIT_ICON : MIC_ICON;
-  // While listening, the wave+label take the place of the input/image/check trio rather
-  // than sitting alongside a bar the reader can't type or tap into anyway — recognition
-  // owns the input until it stops. micBtn itself stays exactly where it is throughout;
-  // it's what stops and submits, so it's never part of what this hides.
+  // While listening, the wave takes the place of the input/image/check trio rather than
+  // sitting alongside a bar the reader can't type or tap into anyway — recognition owns
+  // the input until it stops. micBtn itself stays exactly where it is throughout; it's
+  // what stops and submits, so it's never part of what this hides. It used to share this
+  // row with a "Listening…" label — dropped as redundant with the wave itself moving, and
+  // with the mic button beside it already turning red — so the wave alone now grows to
+  // fill the row (see `.listening-wave` in index.html), reading as one clear signal rather
+  // than a caption explaining an animation the reader can already see.
   el.imageBtn.hidden = on;
   el.linkInput.hidden = on;
   el.checkBtn.hidden = on;
   el.listeningWave.hidden = !on;
-  el.listeningLabel.hidden = !on;
   if (on) {
     // Same double-rAF-then-`.in` shape as revealIn: unhiding alone would just pop the row
     // in at full opacity, so the fade-up needs a frame where the element exists at its
     // resting (opacity: 0) style before `.in` gives the transition something to animate to.
     el.listeningWave.classList.remove("in");
-    el.listeningLabel.classList.remove("in");
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         el.listeningWave.classList.add("in");
-        el.listeningLabel.classList.add("in");
       });
     });
   }
@@ -4802,6 +4862,10 @@ el.imageInput.addEventListener("change", async () => {
 el.imageChipRemove.addEventListener("click", clearPendingImage);
 
 applySettings();
+// Best-effort last-seen snapshot (see loadQuota's own comment) — replaced the moment the
+// first real check of this session answers with a fresh quotaStatus frame.
+const savedQuota = loadQuota();
+if (savedQuota) updateQuotaBar(savedQuota.remainingToday, savedQuota.perDay);
 // Classifies now and re-classifies on rotate/resize/pointer change, calling back only
 // when the answer actually changes — see watchDevice in device.js.
 watchDevice(window, applyDevice);

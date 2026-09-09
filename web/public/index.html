@@ -401,6 +401,36 @@
   }
   .shell-sub { margin-top: 2px; font-size: 12px; color: var(--muted); opacity: 1; transition: opacity 0.3s ease; }
 
+  /* Today's check allowance (`RATE_LIMIT_PER_DAY`, lib/guard.js), one row above the
+     composer. Hidden until the server has actually reported a number (the `quotaStatus`
+     SSE frame — see `updateQuotaBar` in app.js) rather than guessed at client-side; a
+     best-effort last-seen value is restored from localStorage on load so the row isn't
+     blank again on every reload, and corrects itself the moment the next check answers. */
+  .quota-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 24px 10px;
+    flex-shrink: 0;
+  }
+  .quota-label {
+    flex: 0 0 auto;
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    white-space: nowrap;
+  }
+  .quota-track {
+    flex: 1; height: 4px; border-radius: 999px; overflow: hidden;
+    background: var(--surface-raised);
+  }
+  .quota-fill {
+    height: 100%; width: 0%; border-radius: inherit;
+    background: var(--accent);
+    transition: width 0.4s cubic-bezier(.4,0,.2,1), background 0.3s ease;
+  }
+  /* Close to the day's cap: the same colors a verdict badge uses for "worth a second look"
+     and "stop", so running low reads as an escalating warning instead of blending into the
+     ordinary accent fill all the way down to zero. */
+  .quota-bar[data-pressure="high"] .quota-fill { background: var(--warn); }
+  .quota-bar[data-pressure="exhausted"] .quota-fill { background: var(--bad); }
+
   .entry-bar {
     display: flex; gap: 8px;
     padding: 18px 24px;
@@ -1887,29 +1917,37 @@
 
   /* The mic-listening state — everything else in the entry bar hides (see setListening in
      app.js) and this row takes its place, so the reader sees the app actually listening
-     rather than a plain pulsing button with the rest of the bar sitting there unusable. */
-  .listening-wave, .listening-label {
+     rather than a plain pulsing button with the rest of the bar sitting there unusable.
+     Used to share this row with a "Listening…" label; dropped as redundant with the wave
+     itself moving and the mic button beside it already turning red, so the wave alone now
+     expands to fill the space the label used to take. */
+  .listening-wave {
     opacity: 0; transform: translateY(4px);
     transition: opacity 0.22s ease, transform 0.22s ease;
   }
-  .listening-wave.in, .listening-label.in { opacity: 1; transform: translateY(0); }
+  .listening-wave.in { opacity: 1; transform: translateY(0); }
   .listening-wave {
-    flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
     height: 42px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface);
   }
   .listening-wave span {
     width: 3px; height: 8px; border-radius: 3px; background: var(--accent);
     animation: wave-bounce 0.9s ease-in-out infinite;
   }
-  .listening-wave span:nth-child(1) { animation-delay: -0.6s; }
-  .listening-wave span:nth-child(2) { animation-delay: -0.4s; }
+  /* Nine bars rather than the five this row used to split with the label — spread across
+     the whole width the wave now owns alone. Delays are deliberately out of left-to-right
+     order (not 0, -0.1, -0.2, …) so the row reads as an organic ripple rather than a single
+     wave visibly sweeping across in one direction. */
+  .listening-wave span:nth-child(1) { animation-delay: 0s; }
+  .listening-wave span:nth-child(2) { animation-delay: -0.5s; }
   .listening-wave span:nth-child(3) { animation-delay: -0.2s; }
-  .listening-wave span:nth-child(4) { animation-delay: -0.5s; }
-  .listening-wave span:nth-child(5) { animation-delay: -0.1s; }
+  .listening-wave span:nth-child(4) { animation-delay: -0.7s; }
+  .listening-wave span:nth-child(5) { animation-delay: -0.35s; }
+  .listening-wave span:nth-child(6) { animation-delay: -0.65s; }
+  .listening-wave span:nth-child(7) { animation-delay: -0.1s; }
+  .listening-wave span:nth-child(8) { animation-delay: -0.8s; }
+  .listening-wave span:nth-child(9) { animation-delay: -0.45s; }
   @keyframes wave-bounce { 0%,100% { height: 8px; opacity: 0.6; } 50% { height: 24px; opacity: 1; } }
-  .listening-label {
-    flex: 0 0 auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--accent); letter-spacing: 0.02em;
-  }
 
   /* `width: 100%` plus 24px of margin either side is 100% + 48px inside a flex row that
      is only 100% wide — the chip hung off the right edge of the entry bar. The bar
@@ -2356,6 +2394,7 @@
       background: var(--bg);
       border-top: 1px solid var(--border);
     }
+    .quota-bar { padding: 0 12px 6px; background: var(--bg); }
     /* 16px exactly. Mobile Safari force-zooms the page on focusing any input whose text
        is smaller than that, and never zooms back out — the layout is then wrong for the
        rest of the session. This is a workaround for that, not a type-scale choice. */
@@ -2406,6 +2445,7 @@
        does, this just tightens the gutters around it the way the sidebar above does. */
     .content-grid { gap: 16px; padding: 16px; }
     .entry-bar { padding: 14px 16px; }
+    .quota-bar { padding: 0 16px 8px; }
     /* Same iOS zoom-on-focus rule as above — an iPad does it too. */
     .entry-bar input { font-size: 16px; }
   }
@@ -2778,6 +2818,13 @@
         </div>
       </div>
 
+      <!-- Today's check allowance (RATE_LIMIT_PER_DAY, lib/guard.js) — see the CSS rule's
+           own comment for why it starts hidden. -->
+      <div class="quota-bar" id="quotaBar" hidden>
+        <span class="quota-label" id="quotaLabel"></span>
+        <div class="quota-track"><div class="quota-fill" id="quotaFill"></div></div>
+      </div>
+
       <div class="entry-bar">
         <button type="button" class="icon-btn" id="imageBtn" aria-label="Attach an image" title="Attach an image">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -2795,13 +2842,22 @@
         </button>
         <!-- Shown instead of the input/check pair while recognizer.listening is true — see
              setListening in app.js. micBtn itself stays on screen and in place throughout
-             (it's what stops and submits), so it isn't part of what this replaces. -->
+             (it's what stops and submits), so it isn't part of what this replaces. Fills
+             the row alone now — no "Listening…" label beside it, dropped as redundant with
+             the wave's own motion and the mic button beside it already turning red. -->
         <div class="listening-wave" id="listeningWave" hidden aria-hidden="true">
-          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
         </div>
-        <span class="listening-label" id="listeningLabel" hidden>Listening…</span>
+        <!-- The brand mark, not a checkmark — matching the TRASE Design System's own
+             EntryBar, where the submit button carries the same dashed-ring-and-dot logo as
+             the sidebar's wordmark (Sidebar.jsx) rather than a generic checkmark glyph
+             every other "confirm" button in the app could equally use. -->
         <button type="button" id="checkBtn">
-          <svg class="check-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg class="check-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="7.5" stroke="currentColor" stroke-width="1.8" stroke-dasharray="9 2 9 2" stroke-linecap="round"/>
+            <circle cx="12" cy="12" r="2" fill="currentColor"/>
+            <rect x="15.3" y="10.6" width="1.8" height="2.8" rx="0.5" fill="var(--accent-2)"/>
+          </svg>
           <span class="check-btn-label">Check</span>
         </button>
         <div class="image-chip" id="imageChip" hidden>
