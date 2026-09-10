@@ -1607,15 +1607,17 @@
   }
   /* The bubble for the link a check actually started from — the same shape as `.thread-q`
      (it sits above the same thread), but a favicon-plus-title preview instead of raw
-     question text, and capped in height rather than growing without limit: a long title or
-     a URL with no natural break point scrolls inside the bubble instead of stretching the
-     card around it. */
+     question text. It grows with the title, same as `.thread-q` itself does, up to a cap
+     generous enough that a normal title (even a wrapped two- or three-line one) is never
+     scrolled — only a pathological title, or a URL with no natural break point, hits the
+     cap and scrolls inside the bubble instead of stretching the card around it. */
   .link-bubble {
-    display: flex; align-items: center; gap: 8px;
-    max-height: 54px; overflow-y: auto;
+    display: flex; align-items: flex-start; gap: 8px;
+    max-height: 130px; overflow-y: auto;
   }
   .link-bubble-icon {
     width: 16px; height: 16px; flex-shrink: 0;
+    margin-top: 1px;
     border-radius: 4px;
     color: var(--ink-dim);
   }
