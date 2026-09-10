@@ -1670,6 +1670,32 @@ function fillLibThumb(thumb, entry) {
   icon.src = `${origin}/favicon.ico`;
 }
 
+/**
+ * The bubble shown above a check's analysis for the link it actually started from — the
+ * same "glyph first, favicon once it decodes" shape as `fillLibThumb`'s sidebar thumbnail,
+ * because it's the same problem: no third-party favicon service, just the site's own
+ * `/favicon.ico` fetched straight from the checked host, with the glyph as the honest
+ * fallback for the many sites that don't answer it.
+ *
+ * The title is `entry.title` if a resolve has already improved on it (see `applyPostTitle`),
+ * otherwise the pasted URL itself — there is nothing better to show yet.
+ */
+function linkBubbleHTML(entry) {
+  return `
+    <div class="thread-q link-bubble">
+      <span class="link-bubble-icon" aria-hidden="true"></span>
+      <a class="link-bubble-title" href="${escapeHTML(entry.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(entry.title || entry.url)}</a>
+    </div>`;
+}
+
+/** Fills in the link bubble's icon exactly the way `fillLibThumb` fills in a sidebar row's
+ * — call once the bubble markup above is actually in the document. */
+function fillLinkBubbleIcon(entry, container) {
+  const icon = container.querySelector(".link-bubble-icon");
+  if (!icon) return;
+  fillLibThumb(icon, entry);
+}
+
 function dotClassFor(entry) {
   if (entry.status === "running") return "warn";
   if (entry.status === "error") return "muted";
@@ -2383,6 +2409,13 @@ function applyPostTitle(entry, title, token) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   if (token === videoPaneToken) renderVideoTitle(entry);
+  // The claims pane's link bubble names the post the same way the pane heading does — see
+  // `linkBubbleHTML` — but a full `renderResultCard` here would restart that render's reveal
+  // animation, so just the bubble's own text is swapped in place.
+  if (selectedId === entry.id) {
+    const bubbleLink = el.claimsPane.querySelector(".link-bubble-title");
+    if (bubbleLink) bubbleLink.textContent = title;
+  }
 }
 
 /**
@@ -3545,10 +3578,12 @@ function updateSummaryCard(claims) {
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
     setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
-    el.claimsPane.innerHTML = summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup);
+    el.claimsPane.innerHTML =
+      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup);
   } else {
     setClaimsGridMode(null);
     el.claimsPane.innerHTML = `
+    ${linkBubbleHTML(entry)}
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
@@ -3560,6 +3595,7 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       ${threadHTML(entry, newestFollowup)}
     </div>`;
   }
+  fillLinkBubbleIcon(entry, el.claimsPane);
   revealIn(el.claimsPane);
   // After the markup, not before: the windows are read back off the chips this render just
   // wrote, and the ones from the previous render point at nodes that no longer exist.
