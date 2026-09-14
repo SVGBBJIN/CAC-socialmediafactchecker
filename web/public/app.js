@@ -4031,6 +4031,16 @@ function historyFor(entry) {
 
 /* ---------------------------------------------------------------- the two turns */
 
+// Set by `playLandingExit` when it actually plays, consumed once by `runCheck` right after
+// it re-renders the video pane, to reveal the freshly-shown phone video strip with a wipe
+// (`.media-reveal` in index.html) instead of the strip just appearing — see that class's
+// own comment for why a `@keyframes` animation and not a `transition` is what makes this
+// work over `display: none`. Module-level rather than a return value off `playLandingExit`
+// because there's real work (`renderVideoPane`) between "the landing card left" and "the
+// strip exists to reveal", and threading a boolean across that is no clearer than a flag
+// only these two functions touch.
+let pendingMediaReveal = false;
+
 /**
  * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
  * if the claims pane is still showing the landing card when a check begins, let it visibly
@@ -4043,6 +4053,7 @@ function historyFor(entry) {
 async function playLandingExit() {
   const empty = el.claimsPane.querySelector(".claim-card.claim-empty");
   if (!empty || prefersReducedMotion()) return;
+  pendingMediaReveal = true;
   empty.classList.add("leaving");
   await new Promise((resolve) => setTimeout(resolve, 320));
 }
@@ -4093,6 +4104,19 @@ async function runCheck(url, existingId, hint) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
+  if (pendingMediaReveal) {
+    pendingMediaReveal = false;
+    // The phone video strip: `renderVideoPane` just made it visible for the first time
+    // (`updatePaneMode` above already dropped `single-pane`), so this is the one moment to
+    // wipe it in rather than have it simply appear — see `.media-reveal`'s own comment in
+    // index.html. Queried directly rather than through `el`: this is the pane's static
+    // container, never rebuilt per entry the way its contents are.
+    const videoPane = document.querySelector(".video-pane");
+    if (videoPane) {
+      videoPane.classList.add("media-reveal");
+      videoPane.addEventListener("animationend", () => videoPane.classList.remove("media-reveal"), { once: true });
+    }
+  }
   renderRunningCard();
   updateComposerMode();
 

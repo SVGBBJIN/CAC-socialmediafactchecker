@@ -181,3 +181,24 @@ not the mirror:
   indeterminate wait (the stage text + eased progress bar `createProgressTicker` drives).
   Grafting a second, unrelated "analyzing" language on top would be two ways of saying
   the same thing rather than one considered one.
+
+## Same day, one more pass — the mobile video-strip reveal
+
+One piece of "Mobile Landing to Shell" *was* worth its own pass after all: the strip's
+first appearance wiping in (`.mshell-media{clip-path:...}` in the remote screen) rather
+than just popping into existence the way it always has. Unlike the analyzing interstitial
+and the shared-element flights declined above, this one doesn't compete with anything the
+product already says — it's pure entrance, no borrowed progress language — so it went in
+as `.media-reveal`/`video-pane-reveal` in `web/public/index.html`, triggered by
+`pendingMediaReveal` in `web/public/app.js` (set by `playLandingExit`, consumed once by
+`runCheck` right after `renderVideoPane`). A `@keyframes` animation rather than the
+`transition` the rest of this file's animations tend to reach for first: the strip's
+hidden state is `display: none` (`.content-grid.single-pane .video-pane`), which a
+`transition` cannot animate away from, but a `@keyframes` animation only needs the element
+to already be visible by the time it starts — true here, since `updatePaneMode` has
+already dropped `single-pane` by the point the class is added. Verified against the
+animation's own live `clip-path`/`currentTime` in a headless pass rather than by eye: with
+only a black placeholder behind it (no `GEMINI_API_KEY` in this sandbox to resolve a real
+clip), a partial reveal of a near-black strip against the app's own near-black background
+is nearly invisible to a screenshot diff even though the animation is genuinely
+interpolating — a real video will make the wipe obvious in a way a placeholder can't.

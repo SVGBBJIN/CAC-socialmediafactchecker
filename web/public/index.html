@@ -2417,6 +2417,22 @@
        column's width to zero — there is no width to animate here, the strip is full-bleed
        and it is its height that would have to go.) */
     .content-grid.single-pane .video-pane { display: none; }
+    /* The strip's first appearance after a check starts from the landing state — ported
+       from the TRASE Design System's "Mobile Landing to Shell" screen, whose own
+       `.mshell-media` does the identical clip-path wipe. `runCheck`/`playLandingExit`
+       (app.js) are what add this class, and only the one time it's warranted: reselecting
+       an existing check, or a check started mid-conversation, has nothing to "reveal" — the
+       strip is either already showing or was never hidden by an animatable state. A
+       `@keyframes` animation rather than a `transition` on purpose: `display: none` above
+       is not a value a transition can animate *from* (there is no "before" frame to
+       interpolate against), but an animation only needs the element to already be visible
+       by the time the animation itself starts — which it is, since `updatePaneMode` has
+       already dropped `single-pane` by the point this class is added. */
+    @keyframes video-pane-reveal {
+      from { clip-path: inset(0 0 100% 0); }
+      to   { clip-path: inset(0 0 0 0); }
+    }
+    .video-pane.media-reveal { animation: video-pane-reveal 0.5s cubic-bezier(.2,.8,.3,1); }
     .video-thumb {
       width: 100%; height: 100%; max-height: none;
       /* The base rule's `aspect-ratio: 9/16` shapes the card at every other width; here the
