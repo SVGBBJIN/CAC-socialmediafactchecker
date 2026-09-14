@@ -993,14 +993,17 @@
     will-change: transform;
   }
   /* The DS's ClaimCard gives *every* card a `card-in` scale/translate entrance. Here it is
-     scoped to the empty card alone, and that is deliberate: in this app a `.claim-card` is
+     scoped to the empty card and the freshly-started running card alone (`.run-enter`, see
+     `renderRunningCard` in app.js), and that is deliberate: in this app a `.claim-card` is
      also a `.claim-pane` in the claims grid (see `claimPanesHTML`), and those boxes are torn
      down and rebuilt on every streamed claim while `flipClaimsPane` animates `transform` on
      them through the Web Animations API. A CSS entrance on the same property would fight it
      for the same reason the note on `.claim-grid-loading .claim-pane.in` gives, and would
      replay from the top on every rebuild — a flicker per claim, not an arrival. The empty
-     card is the one variant that mounts once and then just sits there. */
-  .claim-card.claim-empty {
+     card and the running card's very first paint are the two moments that mount once and
+     then just sit there — `renderRunningCard` is only ever called once per check. */
+  .claim-card.claim-empty,
+  .claim-card.run-enter {
     opacity: 0;
     animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
   }
@@ -1010,9 +1013,10 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .claim-card { transition: none; }
-    .claim-card.claim-empty { animation: none; opacity: 1; }
+    .claim-card.claim-empty, .claim-card.run-enter { animation: none; opacity: 1; }
   }
-  [data-motion="reduced"] .claim-card.claim-empty { animation: none; opacity: 1; }
+  [data-motion="reduced"] .claim-card.claim-empty,
+  [data-motion="reduced"] .claim-card.run-enter { animation: none; opacity: 1; }
   /* The soft violet highlight that follows the pointer during the tilt above — positioned
      by `handleCardTilt` setting a `radial-gradient(...)` background inline, centered on the
      cursor. Sits as the card's first child (see `tiltGlare` in app.js) so it paints under
@@ -1455,10 +1459,26 @@
      this moment: nothing running yet, but the app is still visibly itself rather than a
      blank box. */
   .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
-  /* The brand HUD and the invitation now stack in normal flow (`.card-loading`'s own flex
-     column + gap) rather than the text sitting absolutely centred over a settled iris —
-     `.brand-hud`'s four corner pills would collide with text overlaid on top of it the way
-     the old single-mark treatment worked. */
+  /* The full landing composition — ported from the TRASE Design System's "App shell —
+     Landing"/"Mobile Landing" screens: the brand block, `.brand-hud` (further down), the
+     invitation, an action-tile row and a feature row, and a footer line. All of it stacks
+     in normal flow inside `.landing`, a plain flex column — `.claim-card.claim-empty`'s own
+     `display: flex; flex-direction: column` plus this wrapper's own `align-items: center`
+     is what centers each section, and since none of it is absolutely positioned, a card
+     taller than the pane's visible height just grows (`.claim-card` has no explicit height)
+     and `.claims-pane`'s own `overflow-y: auto` scrolls the whole card into view rather
+     than clipping it — `.brand-hud`'s four corner pills would collide with text overlaid on
+     top of it the way the old single-mark treatment worked, which is why nothing here is
+     stacked *on* the HUD the way the old settled-iris + caption used to be. */
+  .landing { display: flex; flex-direction: column; align-items: center; gap: 20px; width: 100%; }
+  .landing-brand { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .landing-mark { width: 38px; height: 38px; margin-bottom: 6px; }
+  .landing-mark svg { width: 100%; height: 100%; }
+  .landing-wordmark { font-family: var(--font-display); font-size: 28px; font-weight: 600; color: var(--ink); }
+  .landing-tagline {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); line-height: 1.7; margin-top: 8px;
+  }
   .claim-empty-text {
     width: 24ch;
     max-width: 100%;
@@ -1476,6 +1496,55 @@
   @media (max-width: 520px) {
     .claim-empty-text { width: 17ch; }
   }
+  /* The action tiles have no distinct behavior to route to — this app has one composer, not
+     a mode per content type the way the row's own icons (video/article/search/paste)
+     suggest — so a click just focuses it (see the `.landing-action` branch in
+     `handleClaimsPaneClick`). */
+  .landing-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; max-width: 420px; }
+  .landing-action {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 12px 4px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-raised); color: inherit; font: inherit; cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .landing-action:hover { border-color: var(--accent); background: var(--surface); }
+  .landing-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .landing-action svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .landing-action span { font-size: 10.5px; color: var(--ink-dim); }
+  .landing-features {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 16px;
+    width: 100%; max-width: 560px; padding-top: 18px; border-top: 1px solid var(--border);
+  }
+  .landing-feature { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 7px; }
+  .landing-feature svg { width: 18px; height: 18px; flex-shrink: 0; }
+  .landing-feature span { font-size: 10.5px; color: var(--ink-dim); line-height: 1.4; }
+  .landing-footer-line {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); text-align: center;
+  }
+  @media (max-width: 520px) {
+    .landing { gap: 16px; }
+    .landing-wordmark { font-size: 24px; }
+    .landing-actions, .landing-features { max-width: 100%; }
+  }
+
+  /* ---------- Chat to shell: the landing card leaving as a check begins ----------
+     Ported from the TRASE Design System's "Chat to shell" screen: submitting a link from
+     the landing state doesn't cut straight to the running card, the landing card visibly
+     leaves first — `runCheck` (app.js) adds this class via `playLandingExit` and awaits a
+     beat before swapping in the running card (`.run-enter` above is that card's own
+     entrance). Skipped entirely under reduced motion — `playLandingExit` no-ops rather than
+     adding the class, so there's nothing here for a browser-level media query to override. */
+  .claim-empty.leaving {
+    transition: opacity 0.32s ease, transform 0.32s ease;
+    opacity: 0;
+    transform: scale(0.97) translateY(-6px);
+  }
+  .claim-empty.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
+  .claim-empty.leaving .brand-hud-pill.sources { opacity: 0; transform: translate(-28px, -18px); }
+  .claim-empty.leaving .brand-hud-pill.context { opacity: 0; transform: translate(28px, -18px); }
+  .claim-empty.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
+  .claim-empty.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
 
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
      leaves the page for a source, a timestamp moves the player a few inches away, and the

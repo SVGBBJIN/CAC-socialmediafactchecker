@@ -1450,7 +1450,72 @@ const followupElapsed = createElapsedTicker("followupElapsed");
 const chatElapsed = createElapsedTicker("chatElapsed");
 
 /* ---------------------------------------------------------------- claim grid */
-/*
+/**
+ * The Trase brand mark — sidebar header, settings nav, and now the landing hero all draw
+ * the same icon rather than a bespoke one per surface.
+ */
+const BRAND_MARK_SVG =
+  '<svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/><line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/><circle cx="32" cy="32" r="6" fill="var(--accent)"/><rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/></svg>';
+
+// Copy and icon paths ported verbatim from the TRASE Design System's "App shell —
+// Landing"/"Mobile Landing" screens. The four action tiles have no distinct behavior to
+// route to — see `landingMarkup`'s own doc comment.
+const LANDING_ACTIONS = [
+  { label: "Video", color: "var(--accent)", svg: '<rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 9.5l5 2.5-5 2.5z" fill="var(--accent)" stroke="none"/>' },
+  { label: "Article", color: "var(--good)", svg: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8.5h6M7 12h10M7 15.5h10" stroke-linecap="round"/>' },
+  { label: "Search", color: "var(--warn)", svg: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.7-4.7" stroke-linecap="round"/>' },
+  { label: "Paste", color: "var(--bad)", svg: '<path d="M9 3h4l1 3h4v3" stroke-linecap="round" stroke-linejoin="round"/><rect x="5" y="7" width="14" height="14" rx="2"/>' },
+];
+const LANDING_FEATURES = [
+  { label: "Fact-check in seconds", color: "var(--good)", svg: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9 12l2.2 2.2L15.5 10" stroke-linecap="round" stroke-linejoin="round"/>' },
+  { label: "See reliable sources", color: "var(--accent)", svg: '<rect x="7" y="7" width="13" height="13" rx="2"/><path d="M4 14V5a2 2 0 012-2h9"/>' },
+  { label: "Get clear, balanced insights", color: "var(--accent-2)", svg: '<path d="M12 3a6 6 0 016 6c0 2.5-1.5 3.8-2.2 5-.4.7-.6 1.3-.6 2H8.8c0-.7-.2-1.3-.6-2C7.5 12.8 6 11.5 6 9a6 6 0 016-6z"/><path d="M9.5 19h5M10.5 21.5h3" stroke-linecap="round"/>' },
+];
+
+/**
+ * The empty/landing state's full composition — brand block, the brand HUD
+ * (`brandHudMarkup`), the invitation, and the TRASE Design System's own "App shell —
+ * Landing"/"Mobile Landing" screens' action-tile row, feature row and footer line, ported
+ * verbatim (copy included). One layout for both breakpoints — the phone media query in
+ * index.html just tightens sizes, the way the rest of this pane's phone treatment already
+ * does, rather than a second markup path to keep in sync.
+ *
+ * The action tiles (Video/Article/Search/Paste) have no distinct behavior to route to —
+ * this app has one composer for every kind of link or question, not a mode per content
+ * type — so a click just focuses it (see the `.landing-action` branch in
+ * `handleClaimsPaneClick`) rather than pretending to filter or specialize anything.
+ */
+function landingMarkup() {
+  const actions = LANDING_ACTIONS.map(
+    (a) => `
+      <button type="button" class="landing-action" aria-label="${escapeHTML(a.label)}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${a.color}" stroke-width="1.8" aria-hidden="true">${a.svg}</svg>
+        <span>${escapeHTML(a.label)}</span>
+      </button>`,
+  ).join("");
+  const features = LANDING_FEATURES.map(
+    (f) => `
+      <div class="landing-feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="1.8" aria-hidden="true">${f.svg}</svg>
+        <span>${escapeHTML(f.label)}</span>
+      </div>`,
+  ).join("");
+  return `
+    <div class="landing">
+      <div class="landing-brand">
+        <div class="landing-mark" aria-hidden="true">${BRAND_MARK_SVG}</div>
+        <div class="landing-wordmark">Trase</div>
+        <div class="landing-tagline">Trace the truth.<br>Understand what you see.</div>
+      </div>
+      ${brandHudMarkup()}
+      <p class="claim-empty-text">Paste a link or ask a question to get started.</p>
+      <div class="landing-actions">${actions}</div>
+      <div class="landing-features">${features}</div>
+      <div class="landing-footer-line">Curiosity leads to a brighter tomorrow.</div>
+    </div>`;
+}
+
+/**
  * The claims pane used to be one card, or several stacked vertically with a scrollbar to
  * reach the later ones. It's a grid now — every claim on screen at once, sized to the
  * pane's own height instead of its own content's, on the theory that "around four claims"
@@ -2036,10 +2101,10 @@ function renderChatPane({ newest = -1 } = {}) {
 
   setClaimsGridMode(null);
   if (!settled && !pending) {
-    // The TRASE Design System's "App shell — Analyzing" screen, which is what this app looks
+    // The TRASE Design System's "App shell — Landing" screen, which is what this app looks
     // like before anything has been pasted: no video column (see `updatePaneMode`), one card
-    // filling the pane, and in it the brand HUD with the invitation under it.
-    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><div class="card-loading">${brandHudMarkup()}<p class="claim-empty-text">Paste a link or ask a question to get started.</p></div></div>`;
+    // filling the pane, and in it the full landing composition (`landingMarkup`).
+    el.claimsPane.innerHTML = `<div class="claim-card claim-empty">${landingMarkup()}</div>`;
     return;
   }
   el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
@@ -2823,8 +2888,10 @@ function brandHudMarkup() {
  * it here would mute the very status line it was meant to describe. */
 function renderRunningCard() {
   setClaimsGridMode(null);
+  // `run-enter`: the "Chat to shell" arrival beat (index.html's own comment on `.run-enter`
+  // explains why it's safe to always apply — this function only ever runs once per check).
   el.claimsPane.innerHTML = `
-    <div class="claim-card">
+    <div class="claim-card run-enter">
       <div class="card-loading">
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus" role="status">Sending to the model…</div>
@@ -3444,6 +3511,13 @@ function flashActionFeedback(row, message) {
  * timestamp chip, or acting on the answer itself. Source pills need no handler of their
  * own here — they're plain links, opened by the browser like any other `<a>`. */
 async function handleClaimsPaneClick(event) {
+  // The landing card's four action tiles (Video/Article/Search/Paste) — see
+  // `landingMarkup`'s own doc comment for why they all do the same one thing.
+  if (event.target.closest(".landing-action")) {
+    el.linkInput.focus();
+    return;
+  }
+
   const chip = event.target.closest(".ts-chip[data-seek]");
   if (chip) {
     revealPlayer();
@@ -3958,6 +4032,22 @@ function historyFor(entry) {
 /* ---------------------------------------------------------------- the two turns */
 
 /**
+ * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
+ * if the claims pane is still showing the landing card when a check begins, let it visibly
+ * leave first — the whole card fades and scales back, the brand HUD's four pills fly
+ * outward on top of that (`.claim-empty.leaving` in index.html) — rather than snapping
+ * straight to the running card. A no-op once a check is already under way (nothing to
+ * transition away from — a follow-up, a re-run, a retry) or under reduced motion, where the
+ * running card's own entrance is left to carry "something happened" on its own.
+ */
+async function playLandingExit() {
+  const empty = el.claimsPane.querySelector(".claim-card.claim-empty");
+  if (!empty || prefersReducedMotion()) return;
+  empty.classList.add("leaving");
+  await new Promise((resolve) => setTimeout(resolve, 320));
+}
+
+/**
  * @param hint the resolve verification already did for this exact link, if it did one.
  *   Deliberately not stored on the entry and not replayed on follow-ups: the URLs inside
  *   it are signed and short-lived, so a hint kept past the moment it was made is one
@@ -3966,6 +4056,16 @@ function historyFor(entry) {
  */
 async function runCheck(url, existingId, hint) {
   if (inFlight) return;
+  // Claimed synchronously, before `playLandingExit`'s own await yields to the event loop —
+  // otherwise a second click landing inside that ~320ms window would race straight past the
+  // guard above, since nothing else marks a check as under way until the real
+  // AbortController is created further down. Overwritten with that controller once it
+  // exists; every other reader of `inFlight` only ever checks it for truthiness.
+  inFlight = true;
+  el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
+
+  await playLandingExit();
 
   const id = existingId ?? crypto.randomUUID();
   const prompt = composeCheckPrompt(url);

@@ -130,3 +130,54 @@ first time.
   (`.brand-hud-*`/`.dial-*`) to fit the product's own existing `.iris-wrap` container and
   naming register — a future diff against the remote project should search for those
   renamed classes, not the original ones.
+
+## Same day, later — the landing pages and the "Chat to shell" transition
+
+Follow-up to the pull above, same session: the remote project also has full-page
+`cards/Screens-App Shell-Landing.html` / `-Mobile-Landing.html` (brand block, the brand
+HUD, the composer, an action-tile row, a feature row, a footer line) and
+`cards/Screens-Chat To Shell.html` / `-Mobile Landing to Shell.html` (the landing card
+leaving as a check begins, the shell arriving in its place). These went into the product,
+not the mirror:
+
+- **Landing content** — `landingMarkup()` in `web/public/app.js` (brand block, the
+  existing `brandHudMarkup()`, the invitation, action tiles, feature row, footer line —
+  copy ported verbatim) replaces what the empty-state claim card held before. One markup
+  for both breakpoints; the existing phone media query in `web/public/index.html` just
+  tightens sizes, same as the rest of this pane's phone treatment already does.
+- **The action tiles are decoration with one real behavior.** The remote screens give
+  Video/Article/Search/Paste distinct demo actions (fake submits), but the product has one
+  composer for every kind of link or question, not a mode per content type — inventing
+  four fake modes would be a worse UI than admitting there's only one. Each tile just
+  focuses the composer.
+- **"Chat to shell" is a crossfade, not the remote's cloned-node morph.** The remote
+  screens fly a cloned copy of the Matrix cluster (measured via `getBoundingClientRect`,
+  interpolated frame-by-frame via `requestAnimationFrame`) into the exact pixel footprint
+  of the real loading dial inside the destination card — the same technique
+  `Screens-Matrix To Watching.html` used and the last section already declined to port, for
+  the same reason: it's built for a demo's fixed choreography (typed text, timed steps),
+  not a real turn whose timing is genuinely unknown (network, model latency). Instead,
+  `playLandingExit()` in `web/public/app.js` fades and scales the whole landing card back
+  (plus flies the four brand-HUD pills outward on top of that, `.claim-empty.leaving` in
+  `web/public/index.html` — this part *is* lifted straight from the remote's `.hero-out`
+  treatment) before the running card fades in on its own (`.run-enter`, reusing the
+  existing `card-in` keyframe `.claim-empty` already had). `runCheck` awaits the exit
+  before doing anything else — see its own comment on why `inFlight` now has to be claimed
+  synchronously first, to close a reentrancy window that await would otherwise open.
+  The desktop video column growing in beside the claims pane is unchanged; that part was
+  already this same design system's "Chat to shell" screen, ported before this file
+  existed (see `.content-grid.single-pane` in `web/public/index.html`).
+- **No design-system mirror component for any of this.** A landing page is a full
+  composition, not a reusable piece — the design-system's own README says as much for its
+  `Screens-*` cards ("full-page compositions that aren't reusable components"). There is
+  nothing here shaped like the mirror's other entries (one component, one `.tsx`/`.css`
+  pair) to port back.
+- **Not attempted**: the mobile "Landing to Shell" screen's analyzing interstitial (a scan
+  ring + a three-line step list — "Fetching the source"/"Extracting claims"/"Matching
+  evidence" — shown between landing and shell) and its own shared-element flights (the
+  entry bar and brand mark gliding from their landing position to their docked shell
+  position). Same reasoning as the morph transition above: built for a fixed demo
+  timeline, and the product already has its own honest progress language for an
+  indeterminate wait (the stage text + eased progress bar `createProgressTicker` drives).
+  Grafting a second, unrelated "analyzing" language on top would be two ways of saying
+  the same thing rather than one considered one.
