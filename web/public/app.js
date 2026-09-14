@@ -76,6 +76,7 @@ const el = {
   mediaExpandBtn: document.getElementById("mediaExpandBtn"),
   shellTitle: document.getElementById("shellTitle"),
   shellSub: document.getElementById("shellSub"),
+  entryBar: document.getElementById("entryBar"),
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
   newCheckBtn: document.getElementById("newCheckBtn"),
@@ -334,6 +335,10 @@ function applyDevice(next) {
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
   if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
   syncDrawerInert();
+  // A resize/rotate can cross the phone breakpoint while the landing page is on screen —
+  // widening out of phone width should hand the composer back to its dock, narrowing into
+  // it should embed it, and neither should wait for the next unrelated re-render to notice.
+  syncLandingComposer();
 }
 
 function isDrawerOpen() {
@@ -1450,7 +1455,213 @@ const followupElapsed = createElapsedTicker("followupElapsed");
 const chatElapsed = createElapsedTicker("chatElapsed");
 
 /* ---------------------------------------------------------------- claim grid */
-/*
+/**
+ * The Trase brand mark — sidebar header, settings nav, and now the landing hero all draw
+ * the same icon rather than a bespoke one per surface.
+ */
+const BRAND_MARK_SVG =
+  '<svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/><line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/><circle cx="32" cy="32" r="6" fill="var(--accent)"/><rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/></svg>';
+
+// Copy and icon paths ported verbatim from the TRASE Design System's "App shell —
+// Landing"/"Mobile Landing" screens. The four action tiles have no distinct behavior to
+// route to — see `landingMarkup`'s own doc comment.
+const LANDING_ACTIONS = [
+  { label: "Video", color: "var(--accent)", svg: '<rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 9.5l5 2.5-5 2.5z" fill="var(--accent)" stroke="none"/>' },
+  { label: "Article", color: "var(--good)", svg: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8.5h6M7 12h10M7 15.5h10" stroke-linecap="round"/>' },
+  { label: "Search", color: "var(--warn)", svg: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.7-4.7" stroke-linecap="round"/>' },
+  { label: "Paste", color: "var(--bad)", svg: '<path d="M9 3h4l1 3h4v3" stroke-linecap="round" stroke-linejoin="round"/><rect x="5" y="7" width="14" height="14" rx="2"/>' },
+];
+const LANDING_FEATURES = [
+  { label: "Fact-check in seconds", color: "var(--good)", svg: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9 12l2.2 2.2L15.5 10" stroke-linecap="round" stroke-linejoin="round"/>' },
+  { label: "See reliable sources", color: "var(--accent)", svg: '<rect x="7" y="7" width="13" height="13" rx="2"/><path d="M4 14V5a2 2 0 012-2h9"/>' },
+  { label: "Get clear, balanced insights", color: "var(--accent-2)", svg: '<path d="M12 3a6 6 0 016 6c0 2.5-1.5 3.8-2.2 5-.4.7-.6 1.3-.6 2H8.8c0-.7-.2-1.3-.6-2C7.5 12.8 6 11.5 6 9a6 6 0 016-6z"/><path d="M9.5 19h5M10.5 21.5h3" stroke-linecap="round"/>' },
+];
+
+/**
+ * The empty/landing state's full composition — brand block, the brand HUD
+ * (`brandHudMarkup`), the invitation, and the TRASE Design System's own "App shell —
+ * Landing"/"Mobile Landing" screens' action-tile row, feature row and footer line, ported
+ * verbatim (copy included). One layout for both breakpoints — the phone media query in
+ * index.html just tightens sizes, the way the rest of this pane's phone treatment already
+ * does, rather than a second markup path to keep in sync.
+ *
+ * The action tiles (Video/Article/Search/Paste) have no distinct behavior to route to —
+ * this app has one composer for every kind of link or question, not a mode per content
+ * type — so a click just focuses it (see the `.landing-action` branch in
+ * `handleClaimsPaneClick`) rather than pretending to filter or specialize anything.
+ */
+function landingMarkup() {
+  const actions = LANDING_ACTIONS.map(
+    (a) => `
+      <button type="button" class="landing-action" aria-label="${escapeHTML(a.label)}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${a.color}" stroke-width="1.8" aria-hidden="true">${a.svg}</svg>
+        <span>${escapeHTML(a.label)}</span>
+      </button>`,
+  ).join("");
+  const features = LANDING_FEATURES.map(
+    (f) => `
+      <div class="landing-feature">
+        <svg viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="1.8" aria-hidden="true">${f.svg}</svg>
+        <span>${escapeHTML(f.label)}</span>
+      </div>`,
+  ).join("");
+  return `
+    <div class="landing">
+      <div class="landing-brand">
+        <div class="landing-mark" aria-hidden="true">${BRAND_MARK_SVG}</div>
+        <div class="landing-wordmark">Trase</div>
+        <div class="landing-tagline">Trace the truth.<br>Understand what you see.</div>
+      </div>
+      ${brandHudMarkup()}
+      <p class="claim-empty-text">Paste a link or ask a question to get started.</p>
+      <!-- Phone only (see .landing-entry in index.html) — syncLandingComposer moves the
+           real composer into this slot right under the HUD, matching the DS's "Mobile
+           Landing" entry-block, instead of leaving it docked a full screen-height below.
+           Empty here on purpose: the composer is a live node with real listeners, so it's
+           moved in by JS after this markup lands, never re-created from a string. -->
+      <div class="landing-entry" id="landingEntrySlot">
+        <h2 class="landing-entry-title">Paste a link or ask anything</h2>
+        <p class="landing-entry-sub">Get a clear, evidence-based answer in seconds.</p>
+      </div>
+      <div class="landing-actions">${actions}</div>
+      <div class="landing-features">${features}</div>
+      <div class="landing-footer-line">Curiosity leads to a brighter tomorrow.</div>
+    </div>`;
+}
+
+/**
+ * On a phone, before any check has run, the real composer (`el.entryBar`) lives inside
+ * `#landingEntrySlot` — a child of the landing page `landingMarkup` just rendered — rather
+ * than at its normal dock (`#entryBarDock`, a static marker right before it in index.html).
+ * Desktop/tablet never embed it: nothing there was reported broken, and the composer
+ * staying reachable without scrolling at those widths is an existing, deliberate property
+ * (see `.entry-bar`'s own "Desktop/tablet" comment) this isn't meant to touch.
+ *
+ * Called after every render that could have changed either the device kind or which markup
+ * is on screen (`applyDevice`, and `renderChatPane`'s empty branch) so the composer is never
+ * left stranded on the wrong side of a device-kind change or a check starting. Moving the
+ * real node (not a clone) is what keeps it a single composer with one set of listeners and
+ * one focus/value state instead of two copies to keep in sync.
+ */
+function syncLandingComposer() {
+  const slot = device.kind === "phone" ? document.getElementById("landingEntrySlot") : null;
+  if (slot) {
+    if (el.entryBar.parentElement !== slot) slot.appendChild(el.entryBar);
+    return;
+  }
+  const dock = document.getElementById("entryBarDock");
+  if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+}
+
+/**
+ * Every place that replaces the claims pane's whole subtree funnels through here instead of
+ * writing `el.claimsPane.innerHTML =` directly, for one reason: on a phone, mid-landing,
+ * `el.entryBar` can currently be *inside* that subtree (`syncLandingComposer` put it there).
+ * `innerHTML =` detaches and destroys whatever was in there — including a live node with a
+ * typed value, focus, and every listener bound to it — so the composer has to be back at its
+ * dock before that happens, not after. A no-op when it wasn't embedded to begin with.
+ *
+ * `flyEntryBarHome` (below) is the animated version of the same move, for the one call site
+ * (`playLandingExit`) that wants a flight instead of a snap; by the time it hands off to
+ * `runCheck`'s own render calls, the composer is already back at its dock, so this is simply
+ * a no-op for that path rather than a competing move.
+ */
+function setClaimsPaneHTML(html) {
+  const dock = document.getElementById("entryBarDock");
+  if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+  el.claimsPane.innerHTML = html;
+}
+
+/**
+ * The composer's half of the "Chat to shell" shared-element flight: `fromRect` is where it
+ * was actually sitting (read off the real DOM by the caller, right before this runs), and
+ * this redocks it, measures where that landed, and paints it straight back at `fromRect`
+ * with a transform — then lets that transform animate to none. A real flight between two
+ * real, measured positions, not the TRASE Design System demo's scripted coordinates.
+ */
+function flyEntryBarHome(fromRect) {
+  const dock = document.getElementById("entryBarDock");
+  if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+  const toRect = el.entryBar.getBoundingClientRect();
+  const dx = fromRect.left - toRect.left;
+  const dy = fromRect.top - toRect.top;
+  const sx = toRect.width ? fromRect.width / toRect.width : 1;
+  if (!dx && !dy && sx === 1) return;
+  el.entryBar.style.transition = "none";
+  el.entryBar.style.transformOrigin = "top left";
+  el.entryBar.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, 1)`;
+  // Forces the browser to paint that starting transform before the next one is queued —
+  // otherwise both writes can coalesce into a single frame and there is nothing to animate
+  // between.
+  void el.entryBar.offsetWidth;
+  requestAnimationFrame(() => {
+    el.entryBar.style.transition = "transform 0.5s cubic-bezier(.2,.8,.3,1)";
+    el.entryBar.style.transform = "none";
+  });
+  el.entryBar.addEventListener(
+    "transitionend",
+    () => {
+      el.entryBar.style.transition = "";
+      el.entryBar.style.transformOrigin = "";
+      el.entryBar.style.transform = "";
+    },
+    { once: true },
+  );
+}
+
+const ANALYZING_STEPS = ["Fetching the source", "Extracting claims", "Matching evidence"];
+
+/** Creates (once) the frosted scan-ring overlay used to bridge the shared-element flight —
+ * see `showAnalyzingOverlay`/`hideAnalyzingOverlay`. A single node appended to `<body>`
+ * rather than anywhere in the claims pane, so `setClaimsPaneHTML` rebuilding what's under it
+ * never touches it. */
+function analyzingOverlayEl() {
+  let overlay = document.getElementById("analyzingOverlay");
+  if (overlay) return overlay;
+  overlay = document.createElement("div");
+  overlay.id = "analyzingOverlay";
+  overlay.className = "analyzing-overlay";
+  overlay.setAttribute("aria-hidden", "true");
+  const steps = ANALYZING_STEPS.map(
+    (label, i) => `<div class="analyzing-step" data-step="${i}"><span class="analyzing-step-dot"></span>${escapeHTML(label)}</div>`,
+  ).join("");
+  overlay.innerHTML = `
+    <div class="analyzing-scan"><div class="analyzing-scan-core"></div></div>
+    <div class="analyzing-target" id="analyzingTarget"></div>
+    <div class="analyzing-steps">${steps}</div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+/**
+ * The TRASE Design System's "Chat to shell"/"Mobile Landing to Shell" analyzing beat: a
+ * frosted scan ring and a 3-step list, shown for the real (short, fixed-duration) span of
+ * the shared-element flight rather than the DS demo's scripted ~2.4s hold. There is no
+ * backend signal yet when this shows — the request hasn't even been sent — so unlike the
+ * demo, only the first step is ever marked active here; the second and third stay dim. The
+ * real per-stage progress (`dialVariant`/`stageText`) takes over inside the running card's
+ * own dial the moment this overlay fades out (`hideAnalyzingOverlay`, called from
+ * `runCheck`), which is honest about what this app can and can't tell the reader before a
+ * single byte has come back.
+ */
+function showAnalyzingOverlay(target) {
+  const overlay = analyzingOverlayEl();
+  document.getElementById("analyzingTarget").textContent = target ?? "";
+  overlay.querySelectorAll(".analyzing-step").forEach((stepEl, i) => {
+    stepEl.classList.toggle("active", i === 0);
+    stepEl.classList.remove("done");
+  });
+  overlay.classList.add("on");
+}
+
+/** Safe to call whether or not the overlay was ever shown — `showAnalyzingOverlay` is
+ * skipped entirely under reduced motion (see `playLandingExit`), and this is still called
+ * unconditionally from `runCheck` right after. */
+function hideAnalyzingOverlay() {
+  document.getElementById("analyzingOverlay")?.classList.remove("on");
+}
+
+/**
  * The claims pane used to be one card, or several stacked vertically with a scrollbar to
  * reach the later ones. It's a grid now — every claim on screen at once, sized to the
  * pane's own height instead of its own content's, on the theory that "around four claims"
@@ -1570,9 +1781,10 @@ function renderLibrary(filter = "") {
     title.title = entry.title;
     const sub = document.createElement("div");
     sub.className = "lib-sub";
-    const dot = document.createElement("span");
-    dot.className = `dot ${dotClassFor(entry)}`;
-    sub.append(dot, document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`));
+    sub.append(
+      entry.status === "running" ? boltIcon() : dotIcon(dotClassFor(entry)),
+      document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`),
+    );
     meta.append(title, sub);
 
     const deleteBtn = document.createElement("button");
@@ -1703,6 +1915,30 @@ function dotClassFor(entry) {
   // independently-answered questions, not one claim under examination.
   if (!entry.url) return "muted";
   return VERDICTS[entry.verdictKey]?.css ?? "muted";
+}
+
+/** The closed-vocabulary status dot every non-running row still uses. */
+function dotIcon(cssClass) {
+  const dot = document.createElement("span");
+  dot.className = `dot ${cssClass}`;
+  return dot;
+}
+
+/**
+ * The status marker for a row that's actually checking right now — a flickering bolt in
+ * place of the plain warn dot, ported from the TRASE Design System's LibraryItem, whose own
+ * running state makes the same swap. `dotClassFor` already answers "warn" for this case;
+ * this is a further distinction *within* that color, not a fifth status alongside the four
+ * closed verdicts.
+ */
+function boltIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "bolt");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" fill="var(--warn)"/>';
+  return svg;
 }
 
 function statusLabel(entry) {
@@ -2011,15 +2247,18 @@ function renderChatPane({ newest = -1 } = {}) {
 
   setClaimsGridMode(null);
   if (!settled && !pending) {
-    // The TRASE Design System's "App shell — Analyzing" screen, which is what this app looks
-    // like before anything has been pasted: no video column (see `updatePaneMode`), one card
-    // filling the pane, and in it the settled iris with the invitation over it.
-    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><div class="card-loading"><div class="empty-stack">${irisMarkup(
-      { resolved: true },
-    )}<p class="claim-empty-text">Paste a link or ask a question to get started.</p></div></div></div>`;
+    // The TRASE Design System's "App shell — Landing" screen, which is what this app looks
+    // like before anything has been pasted: no video column (see `updatePaneMode`), and the
+    // full landing composition (`landingMarkup`) as `.claimsPane`'s own direct content —
+    // not a card floating inside it. `.landing` (index.html) is what carries the fill-height
+    // and entrance treatment a wrapping `.claim-card` used to give this state.
+    setClaimsPaneHTML(landingMarkup());
+    // The markup above is on screen now, `#landingEntrySlot` included — this is what
+    // actually moves the real composer into it on a phone (see `syncLandingComposer`).
+    syncLandingComposer();
     return;
   }
-  el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
+  setClaimsPaneHTML(`<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`);
   // Each answer's own markup carries `data-reveal` (see chatThreadHTML/revealAttrs) rather
   // than a baked-in `.in` class, same as renderResultCard's — so it needs the same call to
   // actually fade in instead of sitting at the `opacity: 0` `.claim-text`/`.thread-a` starts
@@ -2677,34 +2916,113 @@ function revealPlayer() {
 /* ---------------------------------------------------------------- claim card */
 
 /**
- * The busy mark. `resolved: true` hands back the same iris in its settled state — blades
- * stopped and dimmed, seal check drawn — which is what the empty card holds behind its one
- * line (see `renderChatPane`'s empty branch) and what `resolveIris` switches the running
- * card's own iris to when a turn finishes.
- *
- * Each blade's rotation is a static, per-instance `transform` on its own `<g>` wrapper
- * rather than a `--rot` custom property read inside the shared `blade-breathe` keyframes.
- * WebKit resolves a `var()` referenced from `@keyframes` once for the whole animation
- * rather than per element that runs it, so all six blades animated to the exact same
- * rotation and the flower collapsed into what looked like one overlapping pill. Rotation
- * now lives outside the animation entirely — only `scaleY`/`opacity` are keyframed — so
- * there is no per-instance value for a shared animation to lose.
+ * Which of the loading dial's three animated moods best represents a real SSE stage frame
+ * — the same frame `stageText` just above turns into words, read here instead for what the
+ * mark should be *doing*. The dial only has three moods (watching the source material,
+ * searching/reading around it, compiling the answer), coarser than the half-dozen stage
+ * names the server actually sends, so several of those collapse onto the same variant;
+ * nothing here is guessed beyond that — every input is a stage the server reported, same
+ * as `stageText`'s own switch.
  */
-function irisMarkup({ resolved = false } = {}) {
-  const blade = `<rect class="blade" x="46" y="10" width="8" height="34" rx="4"/>`;
+function dialVariant(frame) {
+  switch (frame?.stage) {
+    case "attaching":
+    case "reading":
+      return "watching";
+    case "waiting":
+      return frame.media ? "watching" : "searching";
+    case "rewriting":
+      return "compiling";
+    case "thinking":
+      return frame.round > 0 ? "compiling" : "searching";
+    default:
+      return "searching"; // "busy", or no frame yet — the ordinary in-progress mood
+  }
+}
+
+/** Updates the currently-mounted loading dial's variant in place, without touching
+ * anything else about it — `onDelta`'s rebuilds (renderClaimSkeletons) already bake the
+ * right variant into fresh markup via `stage.variant`, so this only has to cover an
+ * `onStage` frame landing *between* those rebuilds. A no-op if nothing changed, so a stage
+ * that holds doesn't restart the mark's own animation on every unrelated re-render. */
+function setDialVariant(variant) {
+  const dial = document.querySelector(".iris-wrap[data-variant]");
+  if (dial && dial.dataset.variant !== variant) dial.dataset.variant = variant;
+}
+
+/**
+ * The loading dial: rings, twelve ticks, a pulsing core and three orbiting nodes — ported
+ * from the TRASE Design System's MatrixLoader (`components/MatrixLoader.jsx`/`.css`),
+ * replacing the six-blade "iris" flower this used to be (see index.html's own comment on
+ * `.dial` for why). `variant` picks which of the three CSS keyframe sets plays
+ * (`.iris-wrap[data-variant="…"]`); `resolved: true` hands back the same dial paused, with
+ * its seal check drawn — what `resolveIris` switches the running card's own dial to when a
+ * turn finishes. The empty card no longer uses this at all — see `brandHudMarkup` below.
+ */
+function irisMarkup({ resolved = false, variant = "watching" } = {}) {
+  const ticks = Array.from({ length: 12 }, (_, i) => `<i style="--i:${i};transform:rotate(${i * 30}deg)"></i>`).join("");
   return `
-    <div class="iris-wrap${resolved ? " resolved" : ""}" aria-hidden="true">
-      <svg viewBox="0 0 100 100">
-        <g>
-          <g class="blade-rot" style="transform:rotate(0deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(60deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(120deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(180deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(240deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(300deg)">${blade}</g>
-        </g>
+    <div class="iris-wrap${resolved ? " resolved" : ""}" data-variant="${variant}" aria-hidden="true">
+      <div class="dial">
+        <div class="dial-ring r1"></div>
+        <div class="dial-ring r2"></div>
+        <div class="dial-ring r3"></div>
+        <div class="dial-ticks">${ticks}</div>
+        <div class="dial-sweep"></div>
+        <div class="dial-arc"></div>
+        <div class="dial-scan"></div>
+        <div class="dial-core">
+          <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
+            <line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/>
+            <circle cx="32" cy="32" r="6" fill="var(--accent)"/>
+            <rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/>
+          </svg>
+        </div>
+        <div class="dial-node n1"></div>
+        <div class="dial-node n2"></div>
+        <div class="dial-node n3"></div>
+      </div>
+      <svg class="seal-svg" viewBox="0 0 100 100" aria-hidden="true">
         <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
+    </div>`;
+}
+
+/**
+ * The brand HUD: scan rings orbited by four labelled pills ("Sources"/"Context"/"Facts"/
+ * "Clarity") — ported from the TRASE Design System's Matrix (`components/Matrix.jsx`/
+ * `.css`), which names this the empty/landing-state mark. Replaces the plain settled dial
+ * + invitation the empty card used to be alone (see `renderChatPane`'s empty branch): this
+ * one never switches variant and keeps turning gently on its own — the middle ring's slow
+ * rotation and the core's own pulse — since there's no pipeline stage to represent before
+ * a check has even started.
+ */
+function brandHudMarkup() {
+  const ticks = Array.from({ length: 12 }, (_, i) => `<i style="transform:rotate(${i * 30}deg)"></i>`).join("");
+  return `
+    <div class="brand-hud" aria-hidden="true">
+      <div class="brand-hud-cluster">
+        <div class="brand-hud-ring m1"></div>
+        <div class="brand-hud-ring m2"></div>
+        <div class="brand-hud-ring m3"></div>
+        <div class="brand-hud-ticks">${ticks}</div>
+        <div class="brand-hud-core">
+          <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
+            <line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/>
+            <circle cx="32" cy="32" r="6" fill="var(--accent)"/>
+            <rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/>
+          </svg>
+        </div>
+        <div class="brand-hud-node n1"></div>
+        <div class="brand-hud-node n2"></div>
+        <div class="brand-hud-node n3"></div>
+      </div>
+      <span class="brand-hud-pill sources">Sources</span>
+      <span class="brand-hud-pill context">Context</span>
+      <span class="brand-hud-pill facts">Facts</span>
+      <span class="brand-hud-pill clarity">Clarity</span>
     </div>`;
 }
 
@@ -2721,8 +3039,10 @@ function irisMarkup({ resolved = false } = {}) {
  * it here would mute the very status line it was meant to describe. */
 function renderRunningCard() {
   setClaimsGridMode(null);
-  el.claimsPane.innerHTML = `
-    <div class="claim-card">
+  // `run-enter`: the "Chat to shell" arrival beat (index.html's own comment on `.run-enter`
+  // explains why it's safe to always apply — this function only ever runs once per check).
+  setClaimsPaneHTML(`
+    <div class="claim-card run-enter">
       <div class="card-loading">
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus" role="status">Sending to the model…</div>
@@ -2731,7 +3051,7 @@ function renderRunningCard() {
         <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
         <div class="live-sources" id="runSources"></div>
       </div>
-    </div>`;
+    </div>`);
   refreshTimeline();
   runProgress.start();
   runElapsed.start();
@@ -2901,7 +3221,7 @@ function renderLiveSources(sources) {
 function claimGridStatusHTML(stage) {
   return `
     <div class="claim-grid-status">
-      ${irisMarkup()}
+      ${irisMarkup({ variant: stage.variant })}
       <div class="status-text stage-text" id="runStatus" role="status">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
       <div class="elapsed-time" id="runElapsed">0:00</div>
@@ -2992,14 +3312,15 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
   // only the settled one, matching the DS's "Chat to shell" screen.
-  el.claimsPane.innerHTML =
+  setClaimsPaneHTML(
     summaryCardHTML(claims) +
-    claimGridStatusHTML(stage) +
-    claims
-      .map((claim, i) =>
-        loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
-      )
-      .join("");
+      claimGridStatusHTML(stage) +
+      claims
+        .map((claim, i) =>
+          loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
+        )
+        .join(""),
+  );
   revealIn(el.claimsPane);
   refreshTimeline();
   runProgress.resync();
@@ -3090,12 +3411,12 @@ function errorCardText(message) {
 
 function renderErrorCard(entry) {
   setClaimsGridMode(null);
-  el.claimsPane.innerHTML = `
+  setClaimsPaneHTML(`
     <div class="claim-card" role="alert">
       <div class="eyebrow">Check failed</div>
       <p class="claim-text in">${escapeHTML(errorCardText(entry.error))}</p>
       <button type="button" class="retry-button" id="retryBtn">Try again</button>
-    </div>`;
+    </div>`);
   refreshTimeline();
   document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
 }
@@ -3342,6 +3663,13 @@ function flashActionFeedback(row, message) {
  * timestamp chip, or acting on the answer itself. Source pills need no handler of their
  * own here — they're plain links, opened by the browser like any other `<a>`. */
 async function handleClaimsPaneClick(event) {
+  // The landing page's four action tiles (Video/Article/Search/Paste) — see
+  // `landingMarkup`'s own doc comment for why they all do the same one thing.
+  if (event.target.closest(".landing-action")) {
+    el.linkInput.focus();
+    return;
+  }
+
   const chip = event.target.closest(".ts-chip[data-seek]");
   if (chip) {
     revealPlayer();
@@ -3532,7 +3860,7 @@ function summaryCardHTML(claims) {
       const count = counts[key] ?? 0;
       return `
         <div class="summary-stat" data-verdict="${key}" data-count="${count}">
-          <span class="summary-count ${verdict.css}">${count}</span>
+          <span class="summary-count ${verdict.css}"><span class="summary-num" data-count="${count}">${count}</span></span>
           <span class="summary-label">${escapeHTML(verdict.label)}</span>
         </div>`;
     })
@@ -3553,6 +3881,10 @@ function summaryCardHTML(claims) {
  * reason about whether replacing the node could ever fight some future animation on it.
  * A no-op if the card isn't there — `renderClaimSkeletons` hasn't run yet, or the finished
  * card has already replaced the loading view.
+ *
+ * A count that just went *up* rolls the new number in (`.summary-num.rolling`, ported from
+ * the TRASE Design System's SummaryCard) rather than silently swapping the text — never on
+ * a decrease, because there isn't one: a settled claim's verdict is never un-counted.
  */
 function updateSummaryCard(claims) {
   const card = el.claimsPane.querySelector(".summary-card");
@@ -3570,19 +3902,28 @@ function updateSummaryCard(claims) {
     if (!stat) continue;
     const count = counts[key] ?? 0;
     stat.dataset.count = String(count);
-    const countEl = stat.querySelector(".summary-count");
-    if (countEl) countEl.textContent = String(count);
+    const numEl = stat.querySelector(".summary-num");
+    if (!numEl) continue;
+    const previous = Number(numEl.dataset.count ?? 0);
+    numEl.textContent = String(count);
+    numEl.dataset.count = String(count);
+    if (count > previous && !prefersReducedMotion()) {
+      numEl.classList.remove("rolling");
+      void numEl.offsetWidth; // restart the animation even mid-play from a rapid double-bump
+      numEl.classList.add("rolling");
+    }
   }
 }
 
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
     setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
-    el.claimsPane.innerHTML =
-      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup);
+    setClaimsPaneHTML(
+      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
+    );
   } else {
     setClaimsGridMode(null);
-    el.claimsPane.innerHTML = `
+    setClaimsPaneHTML(`
     ${linkBubbleHTML(entry)}
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
@@ -3593,7 +3934,7 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       ${actionRowHTML(entry.id, null)}
       ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
-    </div>`;
+    </div>`);
   }
   fillLinkBubbleIcon(entry, el.claimsPane);
   revealIn(el.claimsPane);
@@ -3843,6 +4184,45 @@ function historyFor(entry) {
 
 /* ---------------------------------------------------------------- the two turns */
 
+// Set by `playLandingExit` when it actually plays, consumed once by `runCheck` right after
+// it re-renders the video pane, to reveal the freshly-shown phone video strip with a wipe
+// (`.media-reveal` in index.html) instead of the strip just appearing — see that class's
+// own comment for why a `@keyframes` animation and not a `transition` is what makes this
+// work over `display: none`. Module-level rather than a return value off `playLandingExit`
+// because there's real work (`renderVideoPane`) between "the landing page left" and "the
+// strip exists to reveal", and threading a boolean across that is no clearer than a flag
+// only these two functions touch.
+let pendingMediaReveal = false;
+
+/**
+ * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
+ * if the claims pane is still showing the landing page when a check begins, let it visibly
+ * leave first — the whole page fades and scales back, the brand HUD's four pills fly
+ * outward on top of that (`.landing.leaving` in index.html), the analyzing overlay fades in
+ * over it (`showAnalyzingOverlay`), and — on a phone, where the composer is currently
+ * embedded in the landing page rather than docked (`syncLandingComposer`) — the real
+ * composer flies back to its dock (`flyEntryBarHome`) instead of just snapping there the
+ * instant the page is torn down. A no-op once a check is already under way (nothing to
+ * transition away from — a follow-up, a re-run, a retry) or under reduced motion, where the
+ * running card's own entrance is left to carry "something happened" on its own.
+ */
+async function playLandingExit(url) {
+  const landing = el.claimsPane.querySelector(".landing");
+  if (!landing || prefersReducedMotion()) return;
+  pendingMediaReveal = true;
+  showAnalyzingOverlay(url);
+  landing.classList.add("leaving");
+  await new Promise((resolve) => setTimeout(resolve, 320));
+
+  // Measured now, at the exact moment the page it's embedded in is about to be torn down —
+  // not before the fade above, whose own `transform: scale(...)` would have made an earlier
+  // reading slightly wrong (`getBoundingClientRect` reflects the rendered, post-transform
+  // box). `runCheck`'s own render calls redock it a moment later regardless (see
+  // `setClaimsPaneHTML`); this is only what turns that redock into a flight.
+  const embedded = device.kind === "phone" && el.entryBar.parentElement?.id === "landingEntrySlot";
+  if (embedded) flyEntryBarHome(el.entryBar.getBoundingClientRect());
+}
+
 /**
  * @param hint the resolve verification already did for this exact link, if it did one.
  *   Deliberately not stored on the entry and not replayed on follow-ups: the URLs inside
@@ -3852,6 +4232,16 @@ function historyFor(entry) {
  */
 async function runCheck(url, existingId, hint) {
   if (inFlight) return;
+  // Claimed synchronously, before `playLandingExit`'s own await yields to the event loop —
+  // otherwise a second click landing inside that ~320ms window would race straight past the
+  // guard above, since nothing else marks a check as under way until the real
+  // AbortController is created further down. Overwritten with that controller once it
+  // exists; every other reader of `inFlight` only ever checks it for truthiness.
+  inFlight = true;
+  el.checkBtn.disabled = true;
+  el.newCheckBtn.disabled = true;
+
+  await playLandingExit(url);
 
   const id = existingId ?? crypto.randomUUID();
   const prompt = composeCheckPrompt(url);
@@ -3879,8 +4269,27 @@ async function runCheck(url, existingId, hint) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
+  if (pendingMediaReveal) {
+    pendingMediaReveal = false;
+    // The phone video strip: `renderVideoPane` just made it visible for the first time
+    // (`updatePaneMode` above already dropped `single-pane`), so this is the one moment to
+    // wipe it in rather than have it simply appear — see `.media-reveal`'s own comment in
+    // index.html. Queried directly rather than through `el`: this is the pane's static
+    // container, never rebuilt per entry the way its contents are.
+    const videoPane = document.querySelector(".video-pane");
+    if (videoPane) {
+      videoPane.classList.add("media-reveal");
+      videoPane.addEventListener("animationend", () => videoPane.classList.remove("media-reveal"), { once: true });
+    }
+  }
   renderRunningCard();
   updateComposerMode();
+  // The running card's own dial (just mounted, real stage-driven) is what takes over the
+  // "still working" narrative from here — see `showAnalyzingOverlay`'s own comment for why
+  // the overlay itself never has more than "Fetching the source" to say. Safe to call
+  // unconditionally: a no-op if the overlay was never shown (reduced motion, or a
+  // follow-up/retry with no landing page to leave in the first place).
+  setTimeout(hideAnalyzingOverlay, 260);
 
   const image = pendingImage;
   clearPendingImage();
@@ -3894,7 +4303,7 @@ async function runCheck(url, existingId, hint) {
   // `onDelta` — which rebuilds the whole loading view from scratch the moment a new claim
   // is discovered (see renderClaimSkeletons) — can carry the stage label and source count
   // forward into the rebuilt markup instead of them resetting to their initial text.
-  const stage = { text: "Sending to the model…", searchCount: 0 };
+  const stage = { text: "Sending to the model…", searchCount: 0, variant: "watching" };
   let drawn = [];
   // The ledger as the stream has it so far. The server sends it as the searches land
   // (`provisional: true`) precisely so a marker can be a link before the turn ends — see
@@ -3910,7 +4319,9 @@ async function runCheck(url, existingId, hint) {
       clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
         stage.text = stageText(frame);
+        stage.variant = dialVariant(frame);
         setStatusText("runStatus", stage.text);
+        setDialVariant(stage.variant);
         runProgress.bump(frame?.stage);
       },
       onSearchCount: (n) => {

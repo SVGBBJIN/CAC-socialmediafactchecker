@@ -37,8 +37,9 @@
     --ink-dim: #A9AFBB;
     --muted: #8A93A3;
     --accent: #4FD1C5;
-    /* Secondary accent — violet, used sparingly (claim-card top edge, iris blades) so the
-       palette reads as considered, not a second brand color competing with teal. */
+    /* Secondary accent — violet, used sparingly (claim-card top edge, the loading dial's
+       and brand HUD's own third ring/node/core accent) so the palette reads as considered,
+       not a second brand color competing with teal. */
     --accent-2: #9C8CF0;
     --good: #6FA98A;
     --warn: #D6A84A;
@@ -375,6 +376,12 @@
   .dot.warn { background: var(--warn); }
   .dot.good { background: var(--good); }
   .dot.muted { background: var(--muted); }
+  /* A row that's actually checking right now, in place of the plain warn dot every other
+     row's own verdict/error state uses — ported from the TRASE Design System's LibraryItem,
+     whose running state makes the same swap. Flickers rather than pulsing smoothly: a
+     lightning bolt reading as "live" is the point, not a calm breathing dot. */
+  .bolt { width: 9px; height: 9px; flex-shrink: 0; animation: bolt-flicker 1.4s ease-in-out infinite; }
+  @keyframes bolt-flicker { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
   /* ---------- Main pane ---------- */
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -986,14 +993,17 @@
     will-change: transform;
   }
   /* The DS's ClaimCard gives *every* card a `card-in` scale/translate entrance. Here it is
-     scoped to the empty card alone, and that is deliberate: in this app a `.claim-card` is
-     also a `.claim-pane` in the claims grid (see `claimPanesHTML`), and those boxes are torn
-     down and rebuilt on every streamed claim while `flipClaimsPane` animates `transform` on
-     them through the Web Animations API. A CSS entrance on the same property would fight it
-     for the same reason the note on `.claim-grid-loading .claim-pane.in` gives, and would
-     replay from the top on every rebuild — a flicker per claim, not an arrival. The empty
-     card is the one variant that mounts once and then just sits there. */
-  .claim-card.claim-empty {
+     scoped to the freshly-started running card alone (`.run-enter`, see `renderRunningCard`
+     in app.js) — `.landing` plays the same entrance below, just not by riding on this class
+     — and that is deliberate: in this app a `.claim-card` is also a `.claim-pane` in the
+     claims grid (see `claimPanesHTML`), and those boxes are torn down and rebuilt on every
+     streamed claim while `flipClaimsPane` animates `transform` on them through the Web
+     Animations API. A CSS entrance on the same property would fight it for the same reason
+     the note on `.claim-grid-loading .claim-pane.in` gives, and would replay from the top on
+     every rebuild — a flicker per claim, not an arrival. The running card's very first paint
+     is the one moment of that kind that mounts once and then just sits there —
+     `renderRunningCard` is only ever called once per check. */
+  .claim-card.run-enter {
     opacity: 0;
     animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
   }
@@ -1003,9 +1013,10 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .claim-card { transition: none; }
-    .claim-card.claim-empty { animation: none; opacity: 1; }
+    .claim-card.run-enter, .landing { animation: none; opacity: 1; }
   }
-  [data-motion="reduced"] .claim-card.claim-empty { animation: none; opacity: 1; }
+  [data-motion="reduced"] .claim-card.run-enter,
+  [data-motion="reduced"] .landing { animation: none; opacity: 1; }
   /* The soft violet highlight that follows the pointer during the tilt above — positioned
      by `handleCardTilt` setting a `radial-gradient(...)` background inline, centered on the
      cursor. Sits as the card's first child (see `tiltGlare` in app.js) so it paints under
@@ -1092,6 +1103,17 @@
   .summary-count.warn  { background: color-mix(in oklab, var(--warn) 20%, transparent);  color: var(--warn); }
   .summary-count.good  { background: color-mix(in oklab, var(--good) 20%, transparent);  color: var(--good); }
   .summary-count.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); }
+  /* Ported from the TRASE Design System's SummaryCard (`AnimatedNumber`): a count that just
+     went up rolls in from above instead of silently swapping digits — `updateSummaryCard`
+     (app.js) is what decides "just went up" and adds/removes this class per bump. Never
+     played on a decrease; there isn't one — a settled claim's verdict is never un-counted. */
+  .summary-num { display: inline-block; }
+  .summary-num.rolling { animation: summary-roll 0.32s ease; }
+  @keyframes summary-roll {
+    0%   { transform: translateY(-55%); opacity: 0; }
+    60%  { opacity: 1; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
   /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
      and disappears as counts change would make the card a different shape on every check. */
   .summary-stat[data-count="0"] { opacity: 0.45; }
@@ -1162,40 +1184,172 @@
     padding: 22px 0;
   }
   .iris-wrap { position: relative; width: 84px; height: 84px; }
-  .iris-wrap svg { width: 100%; height: 100%; }
+  .iris-wrap .seal-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 
-  /* Each blade's rotation is a static transform on its own `.blade-rot` wrapper `<g>`,
-     not a `--rot` custom property read inside `blade-breathe` below. WebKit resolves a
-     `var()` referenced from `@keyframes` once for the whole animation rather than per
-     element running it, so all six blades animated to the same rotation and the flower
-     collapsed into what looked like a single overlapping pill. Keeping rotation outside
-     the animation — only `scaleY`/`opacity` are keyframed — means there's no per-instance
-     value left for a shared animation to lose. */
-  .blade-rot { transform-origin: 50px 50px; }
-  .blade {
-    transform-origin: 50px 50px;
-    fill: var(--accent);
-    opacity: 0.85;
-    /* 3.2s rather than the original 2.6s — a calmer, less flickery breathe, since this mark
-       now sits on screen for an entire multi-claim check rather than a single quick fetch. */
-    animation: blade-breathe 3.2s ease-in-out infinite;
+  /* ---------- The loading dial: rings, ticks, a pulsing core, three orbiting nodes ----------
+     Ported from the TRASE Design System's MatrixLoader (`components/MatrixLoader.jsx`/`.css`),
+     replacing the six-blade "iris" flower this used to be — rings-and-ticks read as *scanning*
+     in a way six wedges never quite did, and (the actual point of the sync) it now has three
+     distinct animated moods instead of one generic breathe: `dialVariant` (app.js) maps a real
+     SSE stage frame onto "watching" the clip/page, "searching" sources, or "compiling" the
+     answer, so the mark says which of those the check is actually doing. `%`-based inset/size
+     throughout is what lets one set of rules serve every size `.iris-wrap` is given — 84px
+     running, 32px in the claim-grid status strip, 150px behind `.brand-hud` below — with no
+     separate size prop to thread through, the same trick the DS component uses via
+     `--mload-size`. */
+  .dial { position: absolute; inset: 0; }
+  .dial-ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+  .dial-ring.r1 { inset: 0; border: 1.5px solid var(--border); }
+  .dial-ring.r2 { inset: 11%; border: 1.5px dashed color-mix(in oklab, var(--warn) 45%, var(--border)); }
+  .dial-ring.r3 { inset: 21%; border: 1.5px solid color-mix(in oklab, var(--accent-2) 50%, var(--border)); }
+  .dial-ticks { position: absolute; inset: 0; }
+  .dial-ticks i { position: absolute; top: 0; left: calc(50% - 1px); width: 2px; height: 50%; transform-origin: 50% 100%; }
+  .dial-ticks i::before {
+    content: ""; position: absolute; top: 2%; left: 0; width: 2px; height: 16%;
+    background: color-mix(in oklab, var(--accent) 50%, var(--border));
   }
-  .blade-rot:nth-child(even) .blade { fill: var(--accent-2); }
-  .blade-rot:nth-child(1) .blade { animation-delay: 0s; }
-  .blade-rot:nth-child(2) .blade { animation-delay: -0.53s; }
-  .blade-rot:nth-child(3) .blade { animation-delay: -1.07s; }
-  .blade-rot:nth-child(4) .blade { animation-delay: -1.6s; }
-  .blade-rot:nth-child(5) .blade { animation-delay: -2.13s; }
-  .blade-rot:nth-child(6) .blade { animation-delay: -2.67s; }
-
-  @keyframes blade-breathe {
-    0%, 100% { transform: scaleY(0.62); opacity: 0.55; }
-    50%      { transform: scaleY(1);    opacity: 0.95; }
+  .dial-core { position: absolute; top: 50%; left: 50%; width: 30%; height: 30%; margin: -15% 0 0 -15%; border-radius: 50%; }
+  .dial-core svg { width: 100%; height: 100%; display: block; }
+  .dial-node { position: absolute; width: 5%; height: 5%; border-radius: 50%; }
+  .dial-node.n1 { top: 24%; left: 18%; background: var(--good); }
+  .dial-node.n2 { top: 64%; left: 78%; background: var(--bad); }
+  .dial-node.n3 { top: 14%; left: 70%; background: var(--accent-2); }
+  .dial-sweep { position: absolute; inset: 0; border-radius: 50%; opacity: 0; }
+  .dial-arc { position: absolute; inset: -2px; border-radius: 50%; box-sizing: border-box; border: 2.5px solid transparent; border-top-color: var(--accent); }
+  .dial-scan {
+    position: absolute; left: 9%; right: 9%; height: 1px; top: 50%; opacity: 0;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
   }
 
-  .seal-check { opacity: 0; transform: scale(0.5); transition: opacity 0.25s ease, transform 0.25s ease; }
-  .iris-wrap.resolved .blade { animation: none; transform: scaleY(0.9); opacity: 0.35; }
+  /* Settled: every ring/tick/core animation simply pauses where it stood rather than
+     resetting to a rest frame — same "stopped mid-motion" reading the old blade flower's
+     `.iris-wrap.resolved .blade { animation: none; ... }` gave, just paused instead of
+     hard-set since a dial mid-scan has no single natural rest pose the way a blade's
+     scaleY(0.9) was. The seal-check overlay's own opacity/scale transition is unchanged. */
+  .iris-wrap.resolved .dial * { animation-play-state: paused; }
+  .iris-wrap.resolved .dial-core, .iris-wrap.resolved .dial-sweep, .iris-wrap.resolved .dial-scan { opacity: 0.2; }
+
+  @keyframes dial-spin { to { transform: rotate(360deg); } }
+
+  /* Watching — attaching the clip, reading a page, or watching the video itself: the
+     aperture breathes, the arc sweeps slowly, and a scanline crosses the frame, like a
+     device warming up on its subject rather than actively hunting for anything yet. */
+  .iris-wrap[data-variant="watching"] .dial-arc { animation: dial-spin 2.4s linear infinite; }
+  .iris-wrap[data-variant="watching"] .dial { animation: dial-aperture 2.6s ease-in-out infinite; }
+  .iris-wrap[data-variant="watching"] .dial-scan { opacity: 1; animation: dial-scanline 2.6s ease-in-out infinite; }
+  .iris-wrap[data-variant="watching"] .dial-core { animation: dial-beat 2.6s ease-in-out infinite; }
+  .iris-wrap[data-variant="watching"] .dial-ring.r1 { animation: dial-open 2.6s ease-in-out infinite; }
+  .iris-wrap[data-variant="watching"] .dial-ring.r2,
+  .iris-wrap[data-variant="watching"] .dial-ring.r3 { animation: dial-close 2.6s ease-in-out infinite; }
+  .iris-wrap[data-variant="watching"] .dial-ring.r3 { animation-delay: 0.18s; }
+  .iris-wrap[data-variant="watching"] .dial-ticks { animation: dial-open 2.6s ease-in-out infinite; }
+  .iris-wrap[data-variant="watching"] .dial-node { animation: dial-blink 2.6s ease-in-out infinite; }
+  @keyframes dial-aperture { 0%, 100% { transform: scale(0.94); } 50% { transform: scale(1.06); } }
+  @keyframes dial-open  { 0%, 100% { transform: scale(1);    opacity: 0.7;  } 50% { transform: scale(1.07); opacity: 1; } }
+  @keyframes dial-close { 0%, 100% { transform: scale(1.04); opacity: 0.55; } 50% { transform: scale(0.9);  opacity: 1; } }
+  @keyframes dial-scanline { 0%, 100% { top: 16%; opacity: 0.2; } 20% { opacity: 1; } 50% { top: 84%; opacity: 1; } 80% { opacity: 1; } }
+  @keyframes dial-beat { 0%, 100% { transform: scale(0.92); } 50% { transform: scale(1.12); } }
+  @keyframes dial-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.9; } }
+
+  /* Searching — sonar: the arc spins fast, a ping expands from the core, and the three
+     nodes ring in turn as if hits were landing. */
+  .iris-wrap[data-variant="searching"] .dial-arc { animation: dial-spin 1.1s linear infinite; }
+  .iris-wrap[data-variant="searching"] .dial-sweep {
+    opacity: 1; border: 1.5px solid color-mix(in oklab, var(--accent) 70%, transparent);
+    box-sizing: border-box; animation: dial-ping 1.8s cubic-bezier(.2,.6,.2,1) infinite;
+  }
+  /* `--i` (set inline per tick, see irisMarkup in app.js) staggers the chase around the
+     ring via calc() rather than twelve separate nth-child rules. */
+  .iris-wrap[data-variant="searching"] .dial-ticks i::before { animation: dial-chase 1.8s linear infinite; animation-delay: calc(var(--i) * 0.15s); }
+  .iris-wrap[data-variant="searching"] .dial-ticks { animation: dial-spin 12s linear infinite; }
+  .iris-wrap[data-variant="searching"] .dial-ring.r2 { animation: dial-spin 6s linear infinite; }
+  .iris-wrap[data-variant="searching"] .dial-ring.r3 { animation: dial-drift 1.8s ease-in-out 0.25s infinite; }
+  .iris-wrap[data-variant="searching"] .dial-core { animation: dial-breathe 1.8s ease-in-out infinite; }
+  .iris-wrap[data-variant="searching"] .dial-node.n1 { animation: dial-hit 1.8s ease-in-out infinite; }
+  .iris-wrap[data-variant="searching"] .dial-node.n2 { animation: dial-hit 1.8s ease-in-out 0.6s infinite; }
+  .iris-wrap[data-variant="searching"] .dial-node.n3 { animation: dial-hit 1.8s ease-in-out 1.2s infinite; }
+  @keyframes dial-ping { 0% { transform: scale(0.16); opacity: 0; } 12% { opacity: 0.9; } 70%, 100% { transform: scale(1.02); opacity: 0; } }
+  @keyframes dial-drift { 0%, 100% { transform: scale(0.88); } 55% { transform: scale(1.06); } }
+  @keyframes dial-chase {
+    0%   { background: color-mix(in oklab, var(--accent) 95%, transparent); height: 34%; }
+    18%  { background: color-mix(in oklab, var(--accent) 40%, var(--border)); height: 14%; }
+    100% { background: color-mix(in oklab, var(--accent) 22%, var(--border)); height: 14%; }
+  }
+  @keyframes dial-breathe { 0%, 100% { opacity: 0.8; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.08); } }
+  @keyframes dial-hit { 0%, 70%, 100% { opacity: 0.15; transform: scale(1); } 12% { opacity: 1; transform: scale(2.4); } }
+
+  /* Compiling — writing the answer: the ticks fill clockwise like a progress ring, the arc
+     eases round rather than spinning flat out, and the rings settle inward. */
+  .iris-wrap[data-variant="compiling"] .dial-arc { border-top-color: var(--accent-2); animation: dial-spin 3.2s cubic-bezier(.5,0,.5,1) infinite; }
+  .iris-wrap[data-variant="compiling"] .dial-ticks i::before {
+    background: color-mix(in oklab, var(--accent) 18%, var(--border));
+    animation: dial-fill 2.4s linear infinite; animation-delay: calc(var(--i) * 0.18s);
+  }
+  .iris-wrap[data-variant="compiling"] .dial-ring.r2 { border-style: solid; border-color: color-mix(in oklab, var(--accent) 30%, var(--border)); animation: dial-settle 2.4s ease-in-out infinite; }
+  .iris-wrap[data-variant="compiling"] .dial-ring.r3 { animation: dial-settle 2.4s ease-in-out 0.3s infinite; }
+  .iris-wrap[data-variant="compiling"] .dial-core { animation: dial-condense 2.4s ease-in-out infinite; }
+  .iris-wrap[data-variant="compiling"] .dial-node { opacity: 0.35; animation: dial-draw 2.4s ease-in-out infinite; }
+  .iris-wrap[data-variant="compiling"] .dial-node.n2 { animation-delay: 0.3s; }
+  .iris-wrap[data-variant="compiling"] .dial-node.n3 { animation-delay: 0.6s; }
+  @keyframes dial-fill {
+    0%, 4% { background: color-mix(in oklab, var(--accent) 18%, var(--border)); height: 16%; }
+    10%    { background: var(--accent); height: 26%; }
+    88%    { background: color-mix(in oklab, var(--accent) 75%, transparent); height: 22%; }
+    100%   { background: color-mix(in oklab, var(--accent) 18%, var(--border)); height: 16%; }
+  }
+  @keyframes dial-settle { 0%, 100% { transform: scale(1); opacity: 0.6; } 55% { transform: scale(0.93); opacity: 1; } }
+  @keyframes dial-condense { 0%, 100% { transform: scale(0.9); } 60% { transform: scale(1.06); } }
+  @keyframes dial-draw { 0%, 100% { opacity: 0.25; transform: translate(0,0); } 55% { opacity: 1; transform: translate(0,-8%); } }
+
+  .seal-check { opacity: 0; transform: scale(0.5); transform-origin: 50px 50px; transition: opacity 0.25s ease, transform 0.25s ease; }
   .iris-wrap.resolved .seal-check { opacity: 1; transform: scale(1); }
+
+  /* ---------- Brand HUD (empty state) ----------
+     Ported from the TRASE Design System's Matrix (`components/Matrix.jsx`/`.css`) — the
+     scan-ring mark with four orbiting labels, used there for exactly the empty/landing
+     state this card already is. Replaces the plain settled dial + text this used to be
+     alone: unlike the loading dial above, this one never switches variant and carries only
+     two animations of its own — the middle ring's slow 40s rotation and the core's gentle
+     pulse — since there's no pipeline stage to represent before a check has even started. */
+  .brand-hud { position: relative; width: 236px; max-width: 100%; height: 220px; }
+  .brand-hud-cluster { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 196px; height: 196px; }
+  .brand-hud-ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+  .brand-hud-ring.m1 { width: 196px; height: 196px; border: 1px solid var(--border); }
+  .brand-hud-ring.m2 {
+    width: 154px; height: 154px; top: 21px; left: 21px;
+    border: 1.5px dashed color-mix(in oklab, var(--warn) 45%, var(--border));
+    animation: brand-hud-spin-slow 40s linear infinite;
+  }
+  .brand-hud-ring.m3 { width: 115px; height: 115px; top: 40.5px; left: 40.5px; border: 1px solid color-mix(in oklab, var(--accent-2) 50%, var(--border)); }
+  @keyframes brand-hud-spin-slow { to { transform: rotate(360deg); } }
+  .brand-hud-ticks { position: absolute; top: 0; left: 0; width: 196px; height: 196px; }
+  .brand-hud-ticks i {
+    position: absolute; top: 2px; left: 50%; width: 2px; height: 8px; margin-left: -1px;
+    background: color-mix(in oklab, var(--accent) 50%, var(--border));
+    transform-origin: 50% 98px;
+  }
+  .brand-hud-core { position: absolute; top: 69px; left: 69px; width: 58px; height: 58px; border-radius: 50%; animation: brand-hud-pulse 2.8s ease-in-out infinite; }
+  .brand-hud-core svg { width: 100%; height: 100%; display: block; }
+  @keyframes brand-hud-pulse { 0%, 100% { transform: scale(0.96); } 50% { transform: scale(1.04); } }
+  .brand-hud-node { position: absolute; width: 5px; height: 5px; border-radius: 50%; }
+  .brand-hud-node.n1 { top: 24%; left: 18%; background: var(--good); }
+  .brand-hud-node.n2 { top: 64%; left: 78%; background: var(--bad); }
+  .brand-hud-node.n3 { top: 14%; left: 70%; background: var(--accent-2); }
+  .brand-hud-pill {
+    position: absolute; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.03em;
+    padding: 6px 12px; border-radius: 999px; background: var(--surface-raised); border: 1px solid var(--border);
+  }
+  .brand-hud-pill.sources { top: 0; left: 0; color: var(--accent); }
+  .brand-hud-pill.context { top: 0; right: 0; color: var(--accent-2); }
+  .brand-hud-pill.facts   { top: 150px; left: 0; color: var(--good); }
+  .brand-hud-pill.clarity { top: 150px; right: 0; color: var(--warn); }
+  /* Narrow phone: the card is barely wider than the mark's own natural size, so it's
+     scaled down bodily rather than rebuilt at different absolute values — the negative
+     margin takes back the empty space `scale()` (which doesn't reflow layout) leaves
+     under it. */
+  @media (max-width: 520px) {
+    .brand-hud { transform: scale(0.82); transform-origin: top center; margin-bottom: -38px; }
+  }
 
   .status-text { font-size: 13px; color: var(--ink-dim); text-align: center; min-height: 18px; transition: opacity 0.35s ease; }
   .source-counter { font-family: var(--font-mono); font-size: 11px; color: var(--accent); min-height: 14px; }
@@ -1291,32 +1445,21 @@
   .claim-text a.citation { color: var(--accent); text-decoration: none; }
   .claim-text a.citation:hover { text-decoration: underline; }
 
-  /* The claims pane's very first state, before any check has run — `.claim-card`'s only
-     child then (see the empty-state render in app.js). Its own class rather than a
-     `.claim-text` override: that class is the body copy of every settled claim elsewhere in
-     the app, and this message isn't a claim's analysis, it's an instruction. Centered both
-     ways (the flex rules) because there's nothing else in the card yet for the eye to land
-     on top-left of; `.claim-card`'s own `display: flex; flex-direction: column` is what
-     gives this something to center within.
+  /* The claims pane's very first state, before any check has run (see the empty-state
+     render in app.js) — and, since `renderChatPane`'s empty branch is what "New check" and
+     a deleted selection both fall back to as well, that same moment mid-session. Its own
+     class rather than a `.claim-text` override: that class is the body copy of every
+     settled claim elsewhere in the app, and this message isn't a claim's analysis, it's an
+     instruction.
 
-     The line now sits *over* a large, settled iris rather than alone in the middle of an
-     empty card — the TRASE Design System's "App shell — Analyzing" screen, whose claim card
-     is this same `loading="empty"` variant. The iris is the app's own busy mark held still
-     (`.resolved`: blades stopped and dimmed, seal drawn), which is why it can carry the
-     card while nothing is running without reading as something in progress. */
-  .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
-  .empty-stack { position: relative; display: flex; align-items: center; justify-content: center; }
-  .empty-stack .iris-wrap { width: 150px; height: 150px; opacity: 0.5; }
+     Sits under the brand HUD (`.brand-hud`, further down) rather than alone in an empty
+     pane — the TRASE Design System's "App shell — New Chat" screen carries the same brand
+     mark for exactly this moment: nothing running yet, but the app is still visibly itself
+     rather than a blank space. */
   .claim-empty-text {
-    /* Absolutely positioned over the iris, so the two are one mark rather than a stack of
-       two things. `clamp` instead of the DS's flat 22px because the DS's `white-space:
-       nowrap` is kept — the line has to break nowhere and still fit a 320px phone. */
-    position: absolute;
-    /* Centred over the iris. The DS's own line is short enough to set `white-space: nowrap`
-       on; this app's is a sentence naming both things a reader can do here, so it wraps
-       inside a measure instead — at `nowrap` it would run out past the card's edges and be
-       clipped by its `overflow: hidden`. */
     width: 24ch;
+    max-width: 100%;
+    text-align: center;
     font-family: var(--font-display);
     font-size: clamp(17px, 5.1vw, 22px); font-weight: 600; line-height: 1.4;
     margin: 0;
@@ -1325,11 +1468,163 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
   }
-  /* A narrower measure where the card itself is narrow — 24ch of 17px serif is wider than
-     a 320px phone's card, once the card's own padding is taken off it. */
+  /* A narrower measure on a phone-width pane — 24ch of 17px serif is wider than a 320px
+     phone screen once its own side gutters are taken off it. */
   @media (max-width: 520px) {
     .claim-empty-text { width: 17ch; }
   }
+  /* The full landing composition — ported from the TRASE Design System's "App shell —
+     Landing"/"Mobile Landing" screens: the brand block, `.brand-hud` (further down), the
+     invitation, an action-tile row and a feature row, and a footer line.
+
+     Its own page now, not a card: `.claims-pane`'s direct flex child on this one state,
+     rather than the bordered, backgrounded, pointer-tilting box (`.claim-card`, above) every
+     other render path wraps its content in. A landing screen sitting inside a smaller box
+     floating on the page is exactly what the DS's own "Landing"/"Mobile Landing" screens
+     aren't — there, this composition *is* `.lshell-scroll`'s entire content, no card wrapping
+     it, and a viewport taller than the content just shows page background past the footer
+     line rather than a card with dead space inside its own border.
+
+     `flex: 1 1 auto` is the one thing carried over from `.claim-card` itself — it's what
+     reaches the bottom of the pane on a short viewport instead of floating near the top with
+     bare space under it, the same reason `.claim-card` gives for the same property — and the
+     `card-in` entrance is the same one `.claim-card.run-enter` plays, just no longer riding
+     on that class to get it (see both of their reduced-motion overrides, which still travel
+     together for the same reason). Since none of it is absolutely positioned, a composition
+     taller than the pane's visible height just grows and `.claims-pane`'s own
+     `overflow-y: auto` scrolls it into view rather than clipping it — `.brand-hud`'s four
+     corner pills would collide with text overlaid on top of it the way the old single-mark
+     treatment worked, which is why nothing here is stacked *on* the HUD the way the old
+     settled-iris + caption used to be. */
+  .landing {
+    display: flex; flex-direction: column; align-items: center; gap: 20px; width: 100%;
+    flex: 1 1 auto;
+    opacity: 0;
+    animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
+  }
+  .landing-brand { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .landing-mark { width: 38px; height: 38px; margin-bottom: 6px; }
+  .landing-mark svg { width: 100%; height: 100%; }
+  .landing-wordmark { font-family: var(--font-display); font-size: 28px; font-weight: 600; color: var(--ink); }
+  .landing-tagline {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); line-height: 1.7; margin-top: 8px;
+  }
+  /* The action tiles have no distinct behavior to route to — this app has one composer, not
+     a mode per content type the way the row's own icons (video/article/search/paste)
+     suggest — so a click just focuses it (see the `.landing-action` branch in
+     `handleClaimsPaneClick`). */
+  /* Hidden by default — desktop/tablet keep the composer docked at the bottom of the
+     screen, always reachable without scrolling, exactly as it already was. Only the phone
+     breakpoint below turns this into the DS's embedded `entry-block` and actually moves the
+     real composer into it (`syncLandingComposer` in app.js); at every other width this stays
+     an empty, invisible node so `landingMarkup`'s one layout for both breakpoints doesn't
+     need a second markup path just for this one piece. */
+  .landing-entry { display: none; }
+  .landing-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; max-width: 420px; }
+  .landing-action {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 12px 4px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-raised); color: inherit; font: inherit; cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .landing-action:hover { border-color: var(--accent); background: var(--surface); }
+  .landing-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .landing-action svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .landing-action span { font-size: 10.5px; color: var(--ink-dim); }
+  .landing-features {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 16px;
+    width: 100%; max-width: 560px; padding-top: 18px; border-top: 1px solid var(--border);
+  }
+  .landing-feature { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 7px; }
+  .landing-feature svg { width: 18px; height: 18px; flex-shrink: 0; }
+  .landing-feature span { font-size: 10.5px; color: var(--ink-dim); line-height: 1.4; }
+  .landing-footer-line {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); text-align: center;
+  }
+  @media (max-width: 520px) {
+    .landing { gap: 16px; }
+    .landing-wordmark { font-size: 24px; }
+    .landing-actions, .landing-features { max-width: 100%; }
+  }
+
+  /* ---------- Chat to shell: the landing page leaving as a check begins ----------
+     Ported from the TRASE Design System's "Chat to shell" screen: submitting a link from
+     the landing state doesn't cut straight to the running card, the landing page visibly
+     leaves first — `runCheck` (app.js) adds this class via `playLandingExit` and awaits a
+     beat before swapping in the running card (`.run-enter` above is that card's own
+     entrance). Skipped entirely under reduced motion — `playLandingExit` no-ops rather than
+     adding the class, so there's nothing here for a browser-level media query to override. */
+  .landing.leaving {
+    transition: opacity 0.32s ease, transform 0.32s ease;
+    opacity: 0;
+    transform: scale(0.97) translateY(-6px);
+  }
+  .landing.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
+  .landing.leaving .brand-hud-pill.sources { opacity: 0; transform: translate(-28px, -18px); }
+  .landing.leaving .brand-hud-pill.context { opacity: 0; transform: translate(28px, -18px); }
+  .landing.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
+  .landing.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
+
+  /* ---------- Analyzing interstitial: bridges the shared-element flight ----------
+     Ported from the TRASE Design System's "Chat to shell"/"Mobile Landing to Shell"
+     screens: a frosted scan ring and a 3-item step list, laid over everything while the
+     landing card is leaving and the composer is (on a phone) flying back to its dock
+     (`showAnalyzingOverlay`/`hideAnalyzingOverlay` in app.js, both called from the real
+     `playLandingExit`/`runCheck` turn — not a demo's scripted timeline). It only ever shows
+     as much progress as the app actually has at that point, which at this moment is none —
+     the request hasn't even been sent yet — so unlike the DS's own demo, the step list here
+     never advances past "Fetching the source" before the running card's own dial (real
+     stage-driven, `irisMarkup`) takes over and the overlay fades out from underneath it. A
+     single persistent node appended to `<body>` (see `analyzingOverlayEl`), not part of any
+     pane's markup, so it's never at risk from `setClaimsPaneHTML` rebuilding what's under
+     it. */
+  .analyzing-overlay {
+    position: fixed; inset: 0; z-index: 40;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+    padding: 0 28px;
+    background: color-mix(in oklch, var(--bg) 92%, transparent);
+    backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.45s ease;
+  }
+  .analyzing-overlay.on { opacity: 1; }
+  .analyzing-scan {
+    position: relative; width: 120px; height: 120px; border-radius: 50%;
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .analyzing-scan::before {
+    content: ""; position: absolute; inset: -1px; border-radius: 50%;
+    border: 2px solid transparent; border-top-color: var(--accent);
+    animation: analyzing-scan-spin 1s linear infinite;
+  }
+  @keyframes analyzing-scan-spin { to { transform: rotate(360deg); } }
+  .analyzing-scan-core {
+    width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 8px color-mix(in oklch, var(--accent) 14%, transparent);
+    /* Reuses the brand HUD's own pulse keyframe (see `.brand-hud-core`) at a faster speed
+       rather than declaring a second, identical `@keyframes` block. */
+    animation: brand-hud-pulse 1.6s ease-in-out infinite;
+  }
+  .analyzing-target {
+    max-width: 320px; text-align: center; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.04em; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .analyzing-steps { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 260px; }
+  .analyzing-step {
+    display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted);
+    opacity: 0.35; transition: opacity 0.3s ease, color 0.3s ease;
+  }
+  .analyzing-step.active, .analyzing-step.done { opacity: 1; color: var(--ink-dim); }
+  .analyzing-step-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--border);
+    flex: 0 0 auto; transition: background 0.3s ease;
+  }
+  .analyzing-step.active .analyzing-step-dot { background: var(--accent); }
+  .analyzing-step.done .analyzing-step-dot { background: var(--good); }
 
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
      leaves the page for a source, a timestamp moves the player a few inches away, and the
@@ -2202,6 +2497,22 @@
        column's width to zero — there is no width to animate here, the strip is full-bleed
        and it is its height that would have to go.) */
     .content-grid.single-pane .video-pane { display: none; }
+    /* The strip's first appearance after a check starts from the landing state — ported
+       from the TRASE Design System's "Mobile Landing to Shell" screen, whose own
+       `.mshell-media` does the identical clip-path wipe. `runCheck`/`playLandingExit`
+       (app.js) are what add this class, and only the one time it's warranted: reselecting
+       an existing check, or a check started mid-conversation, has nothing to "reveal" — the
+       strip is either already showing or was never hidden by an animatable state. A
+       `@keyframes` animation rather than a `transition` on purpose: `display: none` above
+       is not a value a transition can animate *from* (there is no "before" frame to
+       interpolate against), but an animation only needs the element to already be visible
+       by the time the animation itself starts — which it is, since `updatePaneMode` has
+       already dropped `single-pane` by the point this class is added. */
+    @keyframes video-pane-reveal {
+      from { clip-path: inset(0 0 100% 0); }
+      to   { clip-path: inset(0 0 0 0); }
+    }
+    .video-pane.media-reveal { animation: video-pane-reveal 0.5s cubic-bezier(.2,.8,.3,1); }
     .video-thumb {
       width: 100%; height: 100%; max-height: none;
       /* The base rule's `aspect-ratio: 9/16` shapes the card at every other width; here the
@@ -2426,6 +2737,41 @@
     .entry-bar input { font-size: 16px; padding: 12px; min-width: 0; }
     .image-chip { margin: 0 12px; }
 
+    /* ---------- Phone landing: the composer lives in the middle of the screen, not
+       welded to the bottom ---------- */
+    /* Ported from the TRASE Design System's "Mobile Landing" screen: `entry-block` sits in
+       the scrollable composition itself, right under the brand HUD, rather than as a
+       separate bar pinned to the window's bottom edge. Without this the empty-state card
+       (short) sits at the top of `.claims-pane` (tall, `flex: 1 1 auto`) with the real
+       composer docked a full screen-height below it — a big dead gap, and the actual input
+       nowhere near "the middle" the DS puts it. `landingMarkup`'s own paragraph is replaced
+       by this block's heading/subtext on this one breakpoint; `syncLandingComposer` (app.js)
+       is what actually moves the real `#entryBar` node in here, and back out to
+       `#entryBarDock` the moment a check starts or the viewport grows past phone width. */
+    .claim-empty-text { display: none; }
+    .landing-entry {
+      display: flex; flex-direction: column; align-items: stretch;
+      width: 100%; margin-top: 2px;
+      padding: 18px 16px;
+      border-radius: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+    .landing-entry-title {
+      font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--ink);
+      margin: 0 0 4px; text-align: center;
+    }
+    .landing-entry-sub {
+      font-size: 11.5px; color: var(--ink-dim); margin: 0 0 14px; text-align: center; line-height: 1.5;
+    }
+    /* Strips the docked-bar treatment (hairline, own opaque background) now that it's a
+       plain child of a card that already supplies its own edge — see the base `.entry-bar`
+       phone rules just above. Higher specificity wins regardless of source order, but kept
+       here, right after them, so the override reads next to what it's overriding. */
+    .landing-entry .entry-bar {
+      margin: 0; padding: 0; border-top: 0; background: transparent;
+    }
+
     /* Dialogs are sheets at this width — a 92vw box floating mid-screen wastes the room
        it is short of. */
     .passphrase {
@@ -2568,7 +2914,6 @@
     color: var(--bad);
   }
 
-  [data-motion="reduced"] .blade,
   [data-motion="reduced"] .content-grid,
   [data-motion="reduced"] .video-pane,
   [data-motion="reduced"] .claim-text,
@@ -2593,18 +2938,34 @@
   [data-motion="reduced"] .listening-label,
   [data-motion="reduced"] .source-expand,
   [data-motion="reduced"] .source-expand-item,
+  [data-motion="reduced"] .bolt,
+  [data-motion="reduced"] .summary-num.rolling,
+  [data-motion="reduced"] .analyzing-scan::before,
+  [data-motion="reduced"] .analyzing-scan-core,
+  [data-motion="reduced"] .entry-bar,
   [data-motion="reduced"] .icon-btn.listening { animation: none !important; transition: none !important; }
+  /* Belt and suspenders: `playLandingExit` already never shows this overlay or calls
+     `flyEntryBarHome` under reduced motion (see both functions' own comments), so this
+     should never matter in practice — kept anyway, the same way every other JS-gated
+     animation in this file still gets a CSS-level fallback. */
+  [data-motion="reduced"] .analyzing-overlay { display: none !important; }
   /* `.badge`/`.badge-icon` reach their visible state only through the stamp-in/pop
      keyframes' `forwards` fill — unlike the `.in`-class/`transition` pairs above, killing
      the animation with nothing else in its place would leave every badge and its icon
      stuck at their 0%-keyframe opacity (invisible) instead of just arriving instantly. */
   [data-motion="reduced"] .badge.in { opacity: 1; transform: none; }
   [data-motion="reduced"] .badge.in .badge-icon { opacity: 1; transform: none; }
+  /* The loading dial and the brand HUD each carry many descendants with their own
+     `animation` — one per ring/tick/core/node, times three variants for the dial — so this
+     is a wildcard rather than each one named individually the way the rest of this list is. */
+  [data-motion="reduced"] .iris-wrap *,
+  [data-motion="reduced"] .brand-hud * { animation: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .blade, .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item { animation: none !important; transition: none !important; }
+    .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
     .badge.in { opacity: 1; transform: none; }
     .badge.in .badge-icon { opacity: 1; transform: none; }
+    .iris-wrap *, .brand-hud * { animation: none !important; }
   }
 
   /* ---------- Instant press feedback ---------- */
@@ -2857,7 +3218,14 @@
         <div class="quota-track"><div class="quota-fill" id="quotaFill"></div></div>
       </div>
 
-      <div class="entry-bar">
+      <!-- Empty on purpose — the composer's normal resting place. `syncLandingComposer`
+           (app.js) moves the real `#entryBar` back to right after this marker whenever it
+           isn't currently embedded in the phone landing card (`#landingEntrySlot`, inside
+           `landingMarkup`); `setClaimsPaneHTML` uses the same marker to guarantee the
+           composer is never still inside a subtree about to be thrown away by
+           `.claimsPane.innerHTML =`. -->
+      <div id="entryBarDock" hidden></div>
+      <div class="entry-bar" id="entryBar">
         <button type="button" class="icon-btn" id="imageBtn" aria-label="Attach an image" title="Attach an image">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>

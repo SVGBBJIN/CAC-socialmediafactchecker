@@ -2,46 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import "./ClaimCard.css";
 import { VerdictBadge, type VerdictKey } from "./VerdictBadge";
 import { SourcePills, type Source } from "./SourcePill";
-
-const BLADE_ROTATIONS = [0, 60, 120, 180, 240, 300];
-
-/**
- * The busy mark. `resolved` is the settled state — blades stopped and dimmed, seal drawn —
- * which is what the empty card holds behind its line and what the running card switches to
- * when a turn finishes. Mirrors `irisMarkup` in public/app.js.
- *
- * Each blade's rotation is a static, per-instance `transform` on its own `<g>` wrapper
- * rather than a `--rot` custom property read inside the shared `blade-breathe` keyframes.
- * WebKit resolves a `var()` referenced from `@keyframes` once for the whole animation
- * rather than per element that runs it, so all six blades animated to the exact same
- * rotation and the flower collapsed into what looked like one overlapping pill. Rotation
- * now lives outside the animation entirely — only `scaleY`/`opacity` are keyframed — so
- * there is no per-instance value for a shared animation to lose.
- */
-export function Iris({ resolved }: { resolved?: boolean }) {
-  return (
-    <div className={`iris-wrap${resolved ? " resolved" : ""}`} aria-hidden="true">
-      <svg viewBox="0 0 100 100">
-        <g>
-          {BLADE_ROTATIONS.map((rot) => (
-            <g key={rot} className="blade-rot" style={{ transform: `rotate(${rot}deg)` } as CSSProperties}>
-              <rect className="blade" x="46" y="10" width="8" height="34" rx="4" />
-            </g>
-          ))}
-        </g>
-        <path
-          className="seal-check"
-          d="M32 52 L44 64 L70 36"
-          stroke="var(--good)"
-          strokeWidth="6"
-          fill="none"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </div>
-  );
-}
+import { LoadingDial, type DialVariant } from "./LoadingDial";
+import { BrandHud } from "./BrandHud";
 
 /** Adds the `.in` class a frame after mount, the way `revealIn` (public/app.js) does — the
  * title, analysis text and claim count all start at opacity 0 and fade in from there. */
@@ -117,8 +79,12 @@ export interface ClaimCardProps {
   progress?: number;
   /** "found": how many claims the model named. */
   claimCount?: number;
-  /** "empty": the invitation over the settled iris. */
+  /** "empty": the invitation under the brand HUD. */
   emptyText?: string;
+  /** "spinner"/"found": which of the loading dial's three moods to play — see
+   * `dialVariant` in public/app.js for how a real pipeline stage picks one. Defaults to a
+   * sensible mood per loading state when omitted. */
+  dialVariant?: DialVariant;
 }
 
 /**
@@ -141,6 +107,7 @@ export function ClaimCard({
   progress,
   claimCount,
   emptyText = "Paste a link or ask a question to get started.",
+  dialVariant,
 }: ClaimCardProps) {
   const revealed = useRevealed();
   const tilt = useTilt();
@@ -162,10 +129,8 @@ export function ClaimCard({
     return shell(
       "claim-card claim-empty",
       <div className="card-loading">
-        <div className="empty-stack">
-          <Iris resolved />
-          <p className="claim-empty-text">{emptyText}</p>
-        </div>
+        <BrandHud />
+        <p className="claim-empty-text">{emptyText}</p>
       </div>,
     );
   }
@@ -175,11 +140,11 @@ export function ClaimCard({
       "claim-card",
       <div className="card-loading">
         {/* Still turning, not resolved: naming a count is not the same as being done — the
-         * check keeps running after this moment, and an iris that stopped here would say
+         * check keeps running after this moment, and a dial that stopped here would say
          * otherwise. This was the design system's own fix (it used to show the bare number
          * alone), ported into the product as the same gap in its claim-grid status strip:
          * see `claimGridStatusHTML` in public/app.js. */}
-        <Iris />
+        <LoadingDial variant={dialVariant ?? "searching"} />
         <div className={`found-count${revealed ? " in" : ""}`}>{claimCount ?? 0}</div>
         <div className="status-text">{claimCount === 1 ? "claim found" : "claims found"}</div>
       </div>,
@@ -191,7 +156,7 @@ export function ClaimCard({
     return shell(
       "claim-card",
       <div className="card-loading">
-        <Iris resolved={resolved} />
+        <LoadingDial variant={dialVariant ?? "watching"} resolved={resolved} />
         {/* `role="status"` on the stage line and nowhere else in this card: it is the one
             node whose text says what the check is doing. The clock and the bar tick every
             second and would drown it out. */}

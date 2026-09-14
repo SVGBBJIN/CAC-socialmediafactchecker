@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import "./SummaryCard.css";
 import type { VerdictKey } from "./VerdictBadge";
 
@@ -24,6 +25,24 @@ export interface SummaryCardProps {
   compact?: boolean;
 }
 
+/** A count that just went *up* rolls the new number in rather than silently swapping the
+ * text — ported from `updateSummaryCard` in public/app.js. Never on a decrease, because
+ * there isn't one: a settled claim's verdict is never un-counted. */
+function AnimatedCount({ value }: { value: number }) {
+  const [rolling, setRolling] = useState(false);
+  const previous = useRef(value);
+  useEffect(() => {
+    if (value > previous.current) {
+      setRolling(true);
+      const t = setTimeout(() => setRolling(false), 320);
+      previous.current = value;
+      return () => clearTimeout(t);
+    }
+    previous.current = value;
+  }, [value]);
+  return <span className={`summary-num${rolling ? " rolling" : ""}`}>{value}</span>;
+}
+
 /** The check at a glance, above the claims themselves. */
 export function SummaryCard({ title = "Fact check summary", counts = {}, total, compact }: SummaryCardProps) {
   const analysed = total ?? STATS.reduce((sum, stat) => sum + (counts[stat.key] ?? 0), 0);
@@ -38,7 +57,9 @@ export function SummaryCard({ title = "Fact check summary", counts = {}, total, 
           const count = counts[stat.key] ?? 0;
           return (
             <div className="summary-stat" data-count={count} key={stat.key}>
-              <span className={`summary-count ${stat.css}`}>{count}</span>
+              <span className={`summary-count ${stat.css}`}>
+                <AnimatedCount value={count} />
+              </span>
               <span className="summary-label">{stat.label}</span>
             </div>
           );
