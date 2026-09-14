@@ -23,6 +23,16 @@
 .summary-count.warn  { background: color-mix(in oklab, var(--warn) 20%, transparent);  color: var(--warn); }
 .summary-count.good  { background: color-mix(in oklab, var(--good) 20%, transparent);  color: var(--good); }
 .summary-count.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); }
+.summary-num { display: inline-block; }
+.summary-num.rolling { animation: summary-roll 0.32s ease; }
+@keyframes summary-roll {
+  0%   { transform: translateY(-55%); opacity: 0; }
+  60%  { opacity: 1; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .summary-num.rolling { animation: none; }
+}
 /* Dimmed rather than dropped: the four verdicts are a fixed set, and a card that changed
    shape with each check would have to be read again instead of glanced at. */
 .summary-stat[data-count="0"] { opacity: 0.45; }

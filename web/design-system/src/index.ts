@@ -16,11 +16,16 @@ export type { SidebarProps } from "./components/Sidebar";
 export { EntryBar } from "./components/EntryBar";
 export type { EntryBarProps } from "./components/EntryBar";
 
-export { ClaimCard, Iris } from "./components/ClaimCard";
+export { ClaimCard } from "./components/ClaimCard";
 export type { ClaimCardProps, ClaimCardLoading } from "./components/ClaimCard";
 
 export { ClaimGridSplit } from "./components/ClaimGridSplit";
 export type { ClaimGridSplitProps, SplitCell } from "./components/ClaimGridSplit";
+
+export { LoadingDial } from "./components/LoadingDial";
+export type { LoadingDialProps, DialVariant } from "./components/LoadingDial";
+
+export { BrandHud } from "./components/BrandHud";
 
 export { VideoPlayer } from "./components/VideoPlayer";
 export type { VideoPlayerProps, VideoMarker } from "./components/VideoPlayer";

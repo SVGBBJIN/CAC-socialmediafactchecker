@@ -45,7 +45,17 @@ export function LibraryItem({ title, platform, statusLabel, status, active, onSe
       <div className="lib-meta">
         <div className="lib-title">{title}</div>
         <div className="lib-sub">
-          <span className={`dot ${DOT[status]}`} />
+          {/* A row that's actually checking right now gets a flickering bolt instead of
+           * the plain warn dot every other status uses — ported from public/app.js's
+           * `boltIcon`/`dotIcon` split in `renderLibrary`. A further distinction *within*
+           * the warn color, not a fifth status alongside the four closed verdicts. */}
+          {status === "running" ? (
+            <svg className="bolt" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" fill="var(--warn)" />
+            </svg>
+          ) : (
+            <span className={`dot ${DOT[status]}`} />
+          )}
           {platform} · {statusLabel}
         </div>
       </div>

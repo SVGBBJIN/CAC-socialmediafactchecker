@@ -82,49 +82,16 @@
 .claim-text a.citation { color: var(--accent); text-decoration: none; }
 .claim-text a.citation:hover { text-decoration: underline; }
 
-/* ---------- Running: the iris, the stage line, the clock ---------- */
+/* ---------- Running: the loading dial, the stage line, the clock ----------
+   The dial itself (`.iris-wrap`/`.dial*`) lives in LoadingDial.css, imported by
+   LoadingDial.tsx rather than re-declared here — this file only owns the sizing and
+   layout `.card-loading` gives whatever loading state is showing. */
 /* `flex: 1` lets this claim the card's whole height and centre in it, rather than sitting
    pinned near the top of a tall, otherwise empty card. */
 .card-loading {
   flex: 1;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
   padding: 22px 0;
-}
-.iris-wrap { position: relative; width: 84px; height: 84px; }
-.iris-wrap svg { width: 100%; height: 100%; }
-/* Each blade's rotation is a static transform on its own `.blade-rot` wrapper `<g>`, not a
-   `--rot` custom property read inside `blade-breathe` below. WebKit resolves a `var()`
-   referenced from `@keyframes` once for the whole animation rather than per element
-   running it, so all six blades animated to the same rotation and the flower collapsed
-   into what looked like a single overlapping pill. Keeping rotation outside the animation
-   — only `scaleY`/`opacity` are keyframed — means there's no per-instance value left for a
-   shared animation to lose. */
-.blade-rot { transform-origin: 50px 50px; }
-.blade {
-  transform-origin: 50px 50px;
-  fill: var(--accent);
-  opacity: 0.85;
-  /* 3.2s rather than the original 2.6s — a calmer, less flickery breathe, since this mark
-     now sits on screen for an entire multi-claim check rather than a single quick fetch. */
-  animation: blade-breathe 3.2s ease-in-out infinite;
-}
-.blade-rot:nth-child(even) .blade { fill: var(--accent-2); }
-.blade-rot:nth-child(1) .blade { animation-delay: 0s; }
-.blade-rot:nth-child(2) .blade { animation-delay: -0.53s; }
-.blade-rot:nth-child(3) .blade { animation-delay: -1.07s; }
-.blade-rot:nth-child(4) .blade { animation-delay: -1.6s; }
-.blade-rot:nth-child(5) .blade { animation-delay: -2.13s; }
-.blade-rot:nth-child(6) .blade { animation-delay: -2.67s; }
-@keyframes blade-breathe {
-  0%, 100% { transform: scaleY(0.62); opacity: 0.55; }
-  50%      { transform: scaleY(1);    opacity: 0.95; }
-}
-/* Settled: blades stopped and dimmed, seal drawn. The empty card holds this state too. */
-.seal-check { opacity: 0; transform: scale(0.5); transition: opacity 0.25s ease, transform 0.25s ease; }
-.iris-wrap.resolved .blade { animation: none; transform: scaleY(0.9); opacity: 0.35; }
-.iris-wrap.resolved .seal-check { opacity: 1; transform: scale(1); }
-@media (prefers-reduced-motion: reduce) {
-  .blade, .seal-check { animation: none; transition: none; }
 }
 
 .status-text { font-size: 13px; color: var(--ink-dim); text-align: center; min-height: 18px; transition: opacity 0.35s ease; }
@@ -185,10 +152,12 @@
 }
 
 /* ---------- Empty: before any check has run ---------- */
-/* The invitation sits over a large, settled iris — the design system's "App shell —
-   Analyzing" screen. The entrance is scoped to this variant alone: every other card is
-   also a `.claim-pane` whose `transform` ClaimGridSplit animates, and a CSS entrance on
-   the same property would fight it and replay on every rebuild. */
+/* The invitation now sits *under* the brand HUD (BrandHud.tsx/.css) in normal flow —
+   `.card-loading`'s own flex column + gap — rather than absolutely centred over a settled
+   dial: the HUD's four corner pills would collide with text overlaid on top of it the way
+   the old single-mark treatment worked. The entrance is scoped to this variant alone:
+   every other card is also a `.claim-pane` whose `transform` ClaimGridSplit animates, and
+   a CSS entrance on the same property would fight it and replay on every rebuild. */
 .claim-card.claim-empty { align-items: center; justify-content: center; text-align: center; }
 .claim-card.claim-empty {
   opacity: 0;
@@ -201,14 +170,10 @@
 @media (prefers-reduced-motion: reduce) {
   .claim-card.claim-empty { animation: none; opacity: 1; }
 }
-.empty-stack { position: relative; display: flex; align-items: center; justify-content: center; }
-.empty-stack .iris-wrap { width: 150px; height: 150px; opacity: 0.5; }
 .claim-empty-text {
-  position: absolute;
-  /* A measure rather than the design system's single `nowrap` line: this app's invitation
-     is a sentence naming both things a reader can do here, and at `nowrap` it would run
-     out past the card's edges and be clipped by its `overflow: hidden`. */
   width: 24ch;
+  max-width: 100%;
+  text-align: center;
   font-family: var(--font-display);
   font-size: clamp(17px, 5.1vw, 22px); font-weight: 600; line-height: 1.4;
   margin: 0;

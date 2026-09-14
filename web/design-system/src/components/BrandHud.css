@@ -1,0 +1,41 @@
+/* Ported from web/public/index.html's `.brand-hud*` rules — the empty/landing-state mark.
+   Two animations of its own: the middle ring's slow 40s rotation and the core's gentle
+   pulse; everything else sits still, since there's no pipeline stage to represent yet. */
+.brand-hud { position: relative; width: 236px; max-width: 100%; height: 220px; }
+.brand-hud-cluster { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 196px; height: 196px; }
+.brand-hud-ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+.brand-hud-ring.m1 { width: 196px; height: 196px; border: 1px solid var(--border); }
+.brand-hud-ring.m2 {
+  width: 154px; height: 154px; top: 21px; left: 21px;
+  border: 1.5px dashed color-mix(in oklab, var(--warn) 45%, var(--border));
+  animation: brand-hud-spin-slow 40s linear infinite;
+}
+.brand-hud-ring.m3 { width: 115px; height: 115px; top: 40.5px; left: 40.5px; border: 1px solid color-mix(in oklab, var(--accent-2) 50%, var(--border)); }
+@keyframes brand-hud-spin-slow { to { transform: rotate(360deg); } }
+.brand-hud-ticks { position: absolute; top: 0; left: 0; width: 196px; height: 196px; }
+.brand-hud-ticks i {
+  position: absolute; top: 2px; left: 50%; width: 2px; height: 8px; margin-left: -1px;
+  background: color-mix(in oklab, var(--accent) 50%, var(--border));
+  transform-origin: 50% 98px;
+}
+.brand-hud-core { position: absolute; top: 69px; left: 69px; width: 58px; height: 58px; border-radius: 50%; animation: brand-hud-pulse 2.8s ease-in-out infinite; }
+.brand-hud-core svg { width: 100%; height: 100%; display: block; }
+@keyframes brand-hud-pulse { 0%, 100% { transform: scale(0.96); } 50% { transform: scale(1.04); } }
+.brand-hud-node { position: absolute; width: 5px; height: 5px; border-radius: 50%; }
+.brand-hud-node.n1 { top: 24%; left: 18%; background: var(--good); }
+.brand-hud-node.n2 { top: 64%; left: 78%; background: var(--bad); }
+.brand-hud-node.n3 { top: 14%; left: 70%; background: var(--accent-2); }
+.brand-hud-pill {
+  position: absolute; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.03em;
+  padding: 6px 12px; border-radius: 999px; background: var(--surface-raised); border: 1px solid var(--border);
+}
+.brand-hud-pill.sources { top: 0; left: 0; color: var(--accent); }
+.brand-hud-pill.context { top: 0; right: 0; color: var(--accent-2); }
+.brand-hud-pill.facts   { top: 150px; left: 0; color: var(--good); }
+.brand-hud-pill.clarity { top: 150px; right: 0; color: var(--warn); }
+@media (max-width: 520px) {
+  .brand-hud { transform: scale(0.82); transform-origin: top center; margin-bottom: -38px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-hud-ring.m2, .brand-hud-core { animation: none; }
+}

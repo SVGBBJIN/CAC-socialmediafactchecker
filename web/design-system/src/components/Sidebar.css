@@ -188,3 +188,10 @@
 .dot.warn { background: var(--warn); }
 .dot.good { background: var(--good); }
 .dot.muted { background: var(--muted); }
+/* A row that's checking right now — flickers rather than pulsing smoothly, since reading
+   as "live" is the point rather than a calm breathing dot. */
+.bolt { width: 9px; height: 9px; flex-shrink: 0; animation: bolt-flicker 1.4s ease-in-out infinite; }
+@keyframes bolt-flicker { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) {
+  .bolt { animation: none; }
+}

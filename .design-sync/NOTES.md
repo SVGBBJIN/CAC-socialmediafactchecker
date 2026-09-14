@@ -66,3 +66,67 @@ in the product, so their stories overflowed a standard grid cell) — recorded i
   video pane, no action row/like-dislike, no passphrase dialog, no settings panel). Any of
   those could be added as new components in `web/design-system/src/components/` the same
   way, then re-synced.
+
+## 2026-09-14 — pulled new animations back from the design project into the product
+
+Direction reversed from every note above: this run read the **remote** Trase Design
+System project and hand-ported what was new there into `web/public` (the real product),
+then brought `web/design-system/src/**` back in step so it still mirrors the product —
+the same re-sync workflow the "Re-sync risks" section above anticipated, just run for the
+first time.
+
+- **The project moved.** `9310f352-c8b4-4404-9a33-59321721029b` (recorded above and in
+  the old `.design-sync/config.json`) now 404s. The current "TRASE Design System" project
+  is `87a24e5a-ecbf-4bfa-9a0e-bb61ca5fab17` — `config.json` is updated to it. Unclear why
+  the id changed; if a future sync finds this one gone too, re-resolve by name via
+  `list_projects` rather than assuming the stored id is still good.
+- **What came in:** `Matrix` (a static brand HUD — scan rings + four orbiting
+  "Sources/Context/Facts/Clarity" pills, used for the empty/landing state) and
+  `MatrixLoader` (the same ring/tick/core language, animated three different ways per
+  pipeline stage — `watching`/`searching`/`compiling`), replacing the old six-blade "iris"
+  spinner. Ported into the product as `.dial*`/`.brand-hud*` in `web/public/index.html`
+  and `irisMarkup`/`dialVariant`/`brandHudMarkup` in `web/public/app.js` (`.iris-wrap`
+  stays the container name — nothing about that concept changed, only what turns inside
+  it), then mirrored back into `web/design-system/src/components/LoadingDial.tsx`/`.css`
+  and `BrandHud.tsx`/`.css`, wired into `ClaimCard.tsx` in place of the old `Iris` export
+  and `LibraryItem.tsx`'s running-row bolt icon and `SummaryCard.tsx`'s rolling-number
+  count animation (`.summary-num.rolling`).
+- **`dialVariant` is a product mapping, not a straight port.** The remote `ClaimCard.jsx`
+  picks a `MatrixLoader` variant from its own loading-state prop (`found` → searching,
+  `skeleton` → compiling, default → watching) — a shape that doesn't line up with the
+  product's real state machine, which already tracks a genuine SSE stage per turn
+  (attaching/reading/waiting/thinking/busy/rewriting). `dialVariant(frame)` in
+  `web/public/app.js` maps *that* onto the three moods instead, so the mark reflects what
+  the check is actually doing rather than which loading-state prop happened to be passed.
+  The design-system mirror's own `ClaimCard.tsx` exposes an optional `dialVariant` prop
+  with the same three sensible per-state defaults, for a consumer with no real stage of
+  its own to report.
+- **Deliberately not adopted**, each for a reason already on record elsewhere in this repo
+  or this file:
+  - `ClaimStack` (a single vertical auto-scrolling column replacing the claim grid) — the
+    product's 2-column claim grid is a considered, extensively-commented design decision
+    in `web/public/index.html` (`claimGridColumns`'s own doc comment: "about four visible,
+    the rest a scroll away"), not an oversight `ClaimStack` corrects. Not ported; not
+    mirrored.
+  - `VerdictBadge`'s remote redesign (solid-fill pills, icon-only/expandable variant, and
+    `misleading`/`false`/`true` as additional verdict keys) — the verdict vocabulary is
+    closed at four (`public/claims.js`'s `VERDICTS`, `lib/verified-chat.js`'s prompt); the
+    remote's own README already drifts from the product here ("Misleading" instead of
+    "Disputed"), which is the same drift `SummaryCard.tsx`'s doc comment already flagged
+    before this run. Left alone.
+  - `tokens.css`'s dropped serif (`--font-display` now the same sans as `--font-body`) —
+    `web/public/index.html`'s own token block already documents keeping the serif as a
+    deliberate, permanent divergence from the design system. Left alone.
+  - The full pixel-cloned Matrix→MatrixLoader morph transition
+    (`cards/Screens-Matrix To Watching.html`, a demo-only rAF choreography that measures
+    and flies a cloned DOM node between two fixed layouts) — real, but disproportionate to
+    port faithfully into vanilla JS for what the product needed; the two marks appear in
+    different, non-overlapping moments (empty state vs. running) rather than one morphing
+    live into the other.
+- **Not yet re-synced**: `LibraryItem`/`ShellTopBar`/`MobileShell`/`ClaimGridSplit` exist
+  only in the local mirror (the remote project's file list has no equivalents for the
+  first two by those names, and no `MobileShell` at all); `Matrix`/`MatrixLoader`'s exact
+  remote class names (`.matrix-*`/`.mload-*`) were renamed on the way in
+  (`.brand-hud-*`/`.dial-*`) to fit the product's own existing `.iris-wrap` container and
+  naming register — a future diff against the remote project should search for those
+  renamed classes, not the original ones.

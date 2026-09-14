@@ -9,6 +9,8 @@
 @import "./components/VerdictBadge.css";
 @import "./components/TimestampChip.css";
 @import "./components/SourcePill.css";
+@import "./components/LoadingDial.css";
+@import "./components/BrandHud.css";
 @import "./components/ClaimCard.css";
 @import "./components/ClaimGridSplit.css";
 @import "./components/VideoPlayer.css";

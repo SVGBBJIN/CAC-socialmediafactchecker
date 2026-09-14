@@ -1,0 +1,114 @@
+/* Ported from web/public/index.html's `.iris-wrap`/`.dial*` rules — the loading dial:
+   rings, ticks, a pulsing core and three orbiting nodes, with three animated moods
+   (`data-variant="watching|searching|compiling"`) mapped from a real pipeline stage by
+   `dialVariant` in public/app.js. Replaces the six-blade "iris" flower this system's own
+   ClaimCard used to draw. `%`-based inset/size throughout is what lets one set of rules
+   serve every size `.iris-wrap` is given, with no separate size prop to thread through. */
+.iris-wrap { position: relative; width: 84px; height: 84px; }
+.iris-wrap .seal-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+.dial { position: absolute; inset: 0; }
+.dial-ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+.dial-ring.r1 { inset: 0; border: 1.5px solid var(--border); }
+.dial-ring.r2 { inset: 11%; border: 1.5px dashed color-mix(in oklab, var(--warn) 45%, var(--border)); }
+.dial-ring.r3 { inset: 21%; border: 1.5px solid color-mix(in oklab, var(--accent-2) 50%, var(--border)); }
+.dial-ticks { position: absolute; inset: 0; }
+.dial-ticks i { position: absolute; top: 0; left: calc(50% - 1px); width: 2px; height: 50%; transform-origin: 50% 100%; }
+.dial-ticks i::before {
+  content: ""; position: absolute; top: 2%; left: 0; width: 2px; height: 16%;
+  background: color-mix(in oklab, var(--accent) 50%, var(--border));
+}
+.dial-core { position: absolute; top: 50%; left: 50%; width: 30%; height: 30%; margin: -15% 0 0 -15%; border-radius: 50%; }
+.dial-core svg { width: 100%; height: 100%; display: block; }
+.dial-node { position: absolute; width: 5%; height: 5%; border-radius: 50%; }
+.dial-node.n1 { top: 24%; left: 18%; background: var(--good); }
+.dial-node.n2 { top: 64%; left: 78%; background: var(--bad); }
+.dial-node.n3 { top: 14%; left: 70%; background: var(--accent-2); }
+.dial-sweep { position: absolute; inset: 0; border-radius: 50%; opacity: 0; }
+.dial-arc { position: absolute; inset: -2px; border-radius: 50%; box-sizing: border-box; border: 2.5px solid transparent; border-top-color: var(--accent); }
+.dial-scan {
+  position: absolute; left: 9%; right: 9%; height: 1px; top: 50%; opacity: 0;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+/* Settled: every ring/tick/core animation pauses where it stood rather than resetting to
+   a rest frame — a dial mid-scan has no single natural "stopped" pose the way the old
+   blade flower's `scaleY(0.9)` did. The seal-check overlay's own transition is unchanged. */
+.iris-wrap.resolved .dial * { animation-play-state: paused; }
+.iris-wrap.resolved .dial-core, .iris-wrap.resolved .dial-sweep, .iris-wrap.resolved .dial-scan { opacity: 0.2; }
+.seal-check { opacity: 0; transform: scale(0.5); transform-origin: 50px 50px; transition: opacity 0.25s ease, transform 0.25s ease; }
+.iris-wrap.resolved .seal-check { opacity: 1; transform: scale(1); }
+
+@keyframes dial-spin { to { transform: rotate(360deg); } }
+
+/* Watching — attaching the clip, reading a page, or watching the video itself: the
+   aperture breathes, the arc sweeps slowly, and a scanline crosses the frame. */
+.iris-wrap[data-variant="watching"] .dial-arc { animation: dial-spin 2.4s linear infinite; }
+.iris-wrap[data-variant="watching"] .dial { animation: dial-aperture 2.6s ease-in-out infinite; }
+.iris-wrap[data-variant="watching"] .dial-scan { opacity: 1; animation: dial-scanline 2.6s ease-in-out infinite; }
+.iris-wrap[data-variant="watching"] .dial-core { animation: dial-beat 2.6s ease-in-out infinite; }
+.iris-wrap[data-variant="watching"] .dial-ring.r1 { animation: dial-open 2.6s ease-in-out infinite; }
+.iris-wrap[data-variant="watching"] .dial-ring.r2,
+.iris-wrap[data-variant="watching"] .dial-ring.r3 { animation: dial-close 2.6s ease-in-out infinite; }
+.iris-wrap[data-variant="watching"] .dial-ring.r3 { animation-delay: 0.18s; }
+.iris-wrap[data-variant="watching"] .dial-ticks { animation: dial-open 2.6s ease-in-out infinite; }
+.iris-wrap[data-variant="watching"] .dial-node { animation: dial-blink 2.6s ease-in-out infinite; }
+@keyframes dial-aperture { 0%, 100% { transform: scale(0.94); } 50% { transform: scale(1.06); } }
+@keyframes dial-open  { 0%, 100% { transform: scale(1);    opacity: 0.7;  } 50% { transform: scale(1.07); opacity: 1; } }
+@keyframes dial-close { 0%, 100% { transform: scale(1.04); opacity: 0.55; } 50% { transform: scale(0.9);  opacity: 1; } }
+@keyframes dial-scanline { 0%, 100% { top: 16%; opacity: 0.2; } 20% { opacity: 1; } 50% { top: 84%; opacity: 1; } 80% { opacity: 1; } }
+@keyframes dial-beat { 0%, 100% { transform: scale(0.92); } 50% { transform: scale(1.12); } }
+@keyframes dial-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.9; } }
+
+/* Searching — sonar: the arc spins fast, a ping expands from the core, and the three
+   nodes ring in turn as if hits were landing. */
+.iris-wrap[data-variant="searching"] .dial-arc { animation: dial-spin 1.1s linear infinite; }
+.iris-wrap[data-variant="searching"] .dial-sweep {
+  opacity: 1; border: 1.5px solid color-mix(in oklab, var(--accent) 70%, transparent);
+  box-sizing: border-box; animation: dial-ping 1.8s cubic-bezier(.2,.6,.2,1) infinite;
+}
+.iris-wrap[data-variant="searching"] .dial-ticks i::before { animation: dial-chase 1.8s linear infinite; animation-delay: calc(var(--i) * 0.15s); }
+.iris-wrap[data-variant="searching"] .dial-ticks { animation: dial-spin 12s linear infinite; }
+.iris-wrap[data-variant="searching"] .dial-ring.r2 { animation: dial-spin 6s linear infinite; }
+.iris-wrap[data-variant="searching"] .dial-ring.r3 { animation: dial-drift 1.8s ease-in-out 0.25s infinite; }
+.iris-wrap[data-variant="searching"] .dial-core { animation: dial-breathe 1.8s ease-in-out infinite; }
+.iris-wrap[data-variant="searching"] .dial-node.n1 { animation: dial-hit 1.8s ease-in-out infinite; }
+.iris-wrap[data-variant="searching"] .dial-node.n2 { animation: dial-hit 1.8s ease-in-out 0.6s infinite; }
+.iris-wrap[data-variant="searching"] .dial-node.n3 { animation: dial-hit 1.8s ease-in-out 1.2s infinite; }
+@keyframes dial-ping { 0% { transform: scale(0.16); opacity: 0; } 12% { opacity: 0.9; } 70%, 100% { transform: scale(1.02); opacity: 0; } }
+@keyframes dial-drift { 0%, 100% { transform: scale(0.88); } 55% { transform: scale(1.06); } }
+@keyframes dial-chase {
+  0%   { background: color-mix(in oklab, var(--accent) 95%, transparent); height: 34%; }
+  18%  { background: color-mix(in oklab, var(--accent) 40%, var(--border)); height: 14%; }
+  100% { background: color-mix(in oklab, var(--accent) 22%, var(--border)); height: 14%; }
+}
+@keyframes dial-breathe { 0%, 100% { opacity: 0.8; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.08); } }
+@keyframes dial-hit { 0%, 70%, 100% { opacity: 0.15; transform: scale(1); } 12% { opacity: 1; transform: scale(2.4); } }
+
+/* Compiling — writing the answer: the ticks fill clockwise like a progress ring, the arc
+   eases round rather than spinning flat out, and the rings settle inward. */
+.iris-wrap[data-variant="compiling"] .dial-arc { border-top-color: var(--accent-2); animation: dial-spin 3.2s cubic-bezier(.5,0,.5,1) infinite; }
+.iris-wrap[data-variant="compiling"] .dial-ticks i::before {
+  background: color-mix(in oklab, var(--accent) 18%, var(--border));
+  animation: dial-fill 2.4s linear infinite; animation-delay: calc(var(--i) * 0.18s);
+}
+.iris-wrap[data-variant="compiling"] .dial-ring.r2 { border-style: solid; border-color: color-mix(in oklab, var(--accent) 30%, var(--border)); animation: dial-settle 2.4s ease-in-out infinite; }
+.iris-wrap[data-variant="compiling"] .dial-ring.r3 { animation: dial-settle 2.4s ease-in-out 0.3s infinite; }
+.iris-wrap[data-variant="compiling"] .dial-core { animation: dial-condense 2.4s ease-in-out infinite; }
+.iris-wrap[data-variant="compiling"] .dial-node { opacity: 0.35; animation: dial-draw 2.4s ease-in-out infinite; }
+.iris-wrap[data-variant="compiling"] .dial-node.n2 { animation-delay: 0.3s; }
+.iris-wrap[data-variant="compiling"] .dial-node.n3 { animation-delay: 0.6s; }
+@keyframes dial-fill {
+  0%, 4% { background: color-mix(in oklab, var(--accent) 18%, var(--border)); height: 16%; }
+  10%    { background: var(--accent); height: 26%; }
+  88%    { background: color-mix(in oklab, var(--accent) 75%, transparent); height: 22%; }
+  100%   { background: color-mix(in oklab, var(--accent) 18%, var(--border)); height: 16%; }
+}
+@keyframes dial-settle { 0%, 100% { transform: scale(1); opacity: 0.6; } 55% { transform: scale(0.93); opacity: 1; } }
+@keyframes dial-condense { 0%, 100% { transform: scale(0.9); } 60% { transform: scale(1.06); } }
+@keyframes dial-draw { 0%, 100% { opacity: 0.25; transform: translate(0,0); } 55% { opacity: 1; transform: translate(0,-8%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .iris-wrap .dial *, .iris-wrap .seal-check { animation: none !important; transition: none !important; }
+  .iris-wrap.resolved .seal-check { opacity: 1; transform: scale(1); }
+}

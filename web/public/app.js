@@ -1570,9 +1570,10 @@ function renderLibrary(filter = "") {
     title.title = entry.title;
     const sub = document.createElement("div");
     sub.className = "lib-sub";
-    const dot = document.createElement("span");
-    dot.className = `dot ${dotClassFor(entry)}`;
-    sub.append(dot, document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`));
+    sub.append(
+      entry.status === "running" ? boltIcon() : dotIcon(dotClassFor(entry)),
+      document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`),
+    );
     meta.append(title, sub);
 
     const deleteBtn = document.createElement("button");
@@ -1703,6 +1704,30 @@ function dotClassFor(entry) {
   // independently-answered questions, not one claim under examination.
   if (!entry.url) return "muted";
   return VERDICTS[entry.verdictKey]?.css ?? "muted";
+}
+
+/** The closed-vocabulary status dot every non-running row still uses. */
+function dotIcon(cssClass) {
+  const dot = document.createElement("span");
+  dot.className = `dot ${cssClass}`;
+  return dot;
+}
+
+/**
+ * The status marker for a row that's actually checking right now — a flickering bolt in
+ * place of the plain warn dot, ported from the TRASE Design System's LibraryItem, whose own
+ * running state makes the same swap. `dotClassFor` already answers "warn" for this case;
+ * this is a further distinction *within* that color, not a fifth status alongside the four
+ * closed verdicts.
+ */
+function boltIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "bolt");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" fill="var(--warn)"/>';
+  return svg;
 }
 
 function statusLabel(entry) {
@@ -2013,10 +2038,8 @@ function renderChatPane({ newest = -1 } = {}) {
   if (!settled && !pending) {
     // The TRASE Design System's "App shell — Analyzing" screen, which is what this app looks
     // like before anything has been pasted: no video column (see `updatePaneMode`), one card
-    // filling the pane, and in it the settled iris with the invitation over it.
-    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><div class="card-loading"><div class="empty-stack">${irisMarkup(
-      { resolved: true },
-    )}<p class="claim-empty-text">Paste a link or ask a question to get started.</p></div></div></div>`;
+    // filling the pane, and in it the brand HUD with the invitation under it.
+    el.claimsPane.innerHTML = `<div class="claim-card claim-empty"><div class="card-loading">${brandHudMarkup()}<p class="claim-empty-text">Paste a link or ask a question to get started.</p></div></div>`;
     return;
   }
   el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
@@ -2677,34 +2700,113 @@ function revealPlayer() {
 /* ---------------------------------------------------------------- claim card */
 
 /**
- * The busy mark. `resolved: true` hands back the same iris in its settled state — blades
- * stopped and dimmed, seal check drawn — which is what the empty card holds behind its one
- * line (see `renderChatPane`'s empty branch) and what `resolveIris` switches the running
- * card's own iris to when a turn finishes.
- *
- * Each blade's rotation is a static, per-instance `transform` on its own `<g>` wrapper
- * rather than a `--rot` custom property read inside the shared `blade-breathe` keyframes.
- * WebKit resolves a `var()` referenced from `@keyframes` once for the whole animation
- * rather than per element that runs it, so all six blades animated to the exact same
- * rotation and the flower collapsed into what looked like one overlapping pill. Rotation
- * now lives outside the animation entirely — only `scaleY`/`opacity` are keyframed — so
- * there is no per-instance value for a shared animation to lose.
+ * Which of the loading dial's three animated moods best represents a real SSE stage frame
+ * — the same frame `stageText` just above turns into words, read here instead for what the
+ * mark should be *doing*. The dial only has three moods (watching the source material,
+ * searching/reading around it, compiling the answer), coarser than the half-dozen stage
+ * names the server actually sends, so several of those collapse onto the same variant;
+ * nothing here is guessed beyond that — every input is a stage the server reported, same
+ * as `stageText`'s own switch.
  */
-function irisMarkup({ resolved = false } = {}) {
-  const blade = `<rect class="blade" x="46" y="10" width="8" height="34" rx="4"/>`;
+function dialVariant(frame) {
+  switch (frame?.stage) {
+    case "attaching":
+    case "reading":
+      return "watching";
+    case "waiting":
+      return frame.media ? "watching" : "searching";
+    case "rewriting":
+      return "compiling";
+    case "thinking":
+      return frame.round > 0 ? "compiling" : "searching";
+    default:
+      return "searching"; // "busy", or no frame yet — the ordinary in-progress mood
+  }
+}
+
+/** Updates the currently-mounted loading dial's variant in place, without touching
+ * anything else about it — `onDelta`'s rebuilds (renderClaimSkeletons) already bake the
+ * right variant into fresh markup via `stage.variant`, so this only has to cover an
+ * `onStage` frame landing *between* those rebuilds. A no-op if nothing changed, so a stage
+ * that holds doesn't restart the mark's own animation on every unrelated re-render. */
+function setDialVariant(variant) {
+  const dial = document.querySelector(".iris-wrap[data-variant]");
+  if (dial && dial.dataset.variant !== variant) dial.dataset.variant = variant;
+}
+
+/**
+ * The loading dial: rings, twelve ticks, a pulsing core and three orbiting nodes — ported
+ * from the TRASE Design System's MatrixLoader (`components/MatrixLoader.jsx`/`.css`),
+ * replacing the six-blade "iris" flower this used to be (see index.html's own comment on
+ * `.dial` for why). `variant` picks which of the three CSS keyframe sets plays
+ * (`.iris-wrap[data-variant="…"]`); `resolved: true` hands back the same dial paused, with
+ * its seal check drawn — what `resolveIris` switches the running card's own dial to when a
+ * turn finishes. The empty card no longer uses this at all — see `brandHudMarkup` below.
+ */
+function irisMarkup({ resolved = false, variant = "watching" } = {}) {
+  const ticks = Array.from({ length: 12 }, (_, i) => `<i style="--i:${i};transform:rotate(${i * 30}deg)"></i>`).join("");
   return `
-    <div class="iris-wrap${resolved ? " resolved" : ""}" aria-hidden="true">
-      <svg viewBox="0 0 100 100">
-        <g>
-          <g class="blade-rot" style="transform:rotate(0deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(60deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(120deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(180deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(240deg)">${blade}</g>
-          <g class="blade-rot" style="transform:rotate(300deg)">${blade}</g>
-        </g>
+    <div class="iris-wrap${resolved ? " resolved" : ""}" data-variant="${variant}" aria-hidden="true">
+      <div class="dial">
+        <div class="dial-ring r1"></div>
+        <div class="dial-ring r2"></div>
+        <div class="dial-ring r3"></div>
+        <div class="dial-ticks">${ticks}</div>
+        <div class="dial-sweep"></div>
+        <div class="dial-arc"></div>
+        <div class="dial-scan"></div>
+        <div class="dial-core">
+          <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
+            <line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/>
+            <circle cx="32" cy="32" r="6" fill="var(--accent)"/>
+            <rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/>
+          </svg>
+        </div>
+        <div class="dial-node n1"></div>
+        <div class="dial-node n2"></div>
+        <div class="dial-node n3"></div>
+      </div>
+      <svg class="seal-svg" viewBox="0 0 100 100" aria-hidden="true">
         <path class="seal-check" d="M32 52 L44 64 L70 36" stroke="var(--good)" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
+    </div>`;
+}
+
+/**
+ * The brand HUD: scan rings orbited by four labelled pills ("Sources"/"Context"/"Facts"/
+ * "Clarity") — ported from the TRASE Design System's Matrix (`components/Matrix.jsx`/
+ * `.css`), which names this the empty/landing-state mark. Replaces the plain settled dial
+ * + invitation the empty card used to be alone (see `renderChatPane`'s empty branch): this
+ * one never switches variant and keeps turning gently on its own — the middle ring's slow
+ * rotation and the core's own pulse — since there's no pipeline stage to represent before
+ * a check has even started.
+ */
+function brandHudMarkup() {
+  const ticks = Array.from({ length: 12 }, (_, i) => `<i style="transform:rotate(${i * 30}deg)"></i>`).join("");
+  return `
+    <div class="brand-hud" aria-hidden="true">
+      <div class="brand-hud-cluster">
+        <div class="brand-hud-ring m1"></div>
+        <div class="brand-hud-ring m2"></div>
+        <div class="brand-hud-ring m3"></div>
+        <div class="brand-hud-ticks">${ticks}</div>
+        <div class="brand-hud-core">
+          <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/>
+            <line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/>
+            <circle cx="32" cy="32" r="6" fill="var(--accent)"/>
+            <rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/>
+          </svg>
+        </div>
+        <div class="brand-hud-node n1"></div>
+        <div class="brand-hud-node n2"></div>
+        <div class="brand-hud-node n3"></div>
+      </div>
+      <span class="brand-hud-pill sources">Sources</span>
+      <span class="brand-hud-pill context">Context</span>
+      <span class="brand-hud-pill facts">Facts</span>
+      <span class="brand-hud-pill clarity">Clarity</span>
     </div>`;
 }
 
@@ -2901,7 +3003,7 @@ function renderLiveSources(sources) {
 function claimGridStatusHTML(stage) {
   return `
     <div class="claim-grid-status">
-      ${irisMarkup()}
+      ${irisMarkup({ variant: stage.variant })}
       <div class="status-text stage-text" id="runStatus" role="status">${escapeHTML(stage.text)}</div>
       <div class="source-counter" id="runCounter">${stage.searchCount ? `Source ${stage.searchCount}` : "&nbsp;"}</div>
       <div class="elapsed-time" id="runElapsed">0:00</div>
@@ -3532,7 +3634,7 @@ function summaryCardHTML(claims) {
       const count = counts[key] ?? 0;
       return `
         <div class="summary-stat" data-verdict="${key}" data-count="${count}">
-          <span class="summary-count ${verdict.css}">${count}</span>
+          <span class="summary-count ${verdict.css}"><span class="summary-num" data-count="${count}">${count}</span></span>
           <span class="summary-label">${escapeHTML(verdict.label)}</span>
         </div>`;
     })
@@ -3553,6 +3655,10 @@ function summaryCardHTML(claims) {
  * reason about whether replacing the node could ever fight some future animation on it.
  * A no-op if the card isn't there — `renderClaimSkeletons` hasn't run yet, or the finished
  * card has already replaced the loading view.
+ *
+ * A count that just went *up* rolls the new number in (`.summary-num.rolling`, ported from
+ * the TRASE Design System's SummaryCard) rather than silently swapping the text — never on
+ * a decrease, because there isn't one: a settled claim's verdict is never un-counted.
  */
 function updateSummaryCard(claims) {
   const card = el.claimsPane.querySelector(".summary-card");
@@ -3570,8 +3676,16 @@ function updateSummaryCard(claims) {
     if (!stat) continue;
     const count = counts[key] ?? 0;
     stat.dataset.count = String(count);
-    const countEl = stat.querySelector(".summary-count");
-    if (countEl) countEl.textContent = String(count);
+    const numEl = stat.querySelector(".summary-num");
+    if (!numEl) continue;
+    const previous = Number(numEl.dataset.count ?? 0);
+    numEl.textContent = String(count);
+    numEl.dataset.count = String(count);
+    if (count > previous && !prefersReducedMotion()) {
+      numEl.classList.remove("rolling");
+      void numEl.offsetWidth; // restart the animation even mid-play from a rapid double-bump
+      numEl.classList.add("rolling");
+    }
   }
 }
 
@@ -3894,7 +4008,7 @@ async function runCheck(url, existingId, hint) {
   // `onDelta` — which rebuilds the whole loading view from scratch the moment a new claim
   // is discovered (see renderClaimSkeletons) — can carry the stage label and source count
   // forward into the rebuilt markup instead of them resetting to their initial text.
-  const stage = { text: "Sending to the model…", searchCount: 0 };
+  const stage = { text: "Sending to the model…", searchCount: 0, variant: "watching" };
   let drawn = [];
   // The ledger as the stream has it so far. The server sends it as the searches land
   // (`provisional: true`) precisely so a marker can be a link before the turn ends — see
@@ -3910,7 +4024,9 @@ async function runCheck(url, existingId, hint) {
       clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
         stage.text = stageText(frame);
+        stage.variant = dialVariant(frame);
         setStatusText("runStatus", stage.text);
+        setDialVariant(stage.variant);
         runProgress.bump(frame?.stage);
       },
       onSearchCount: (n) => {
