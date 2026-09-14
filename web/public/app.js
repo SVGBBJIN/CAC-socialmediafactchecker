@@ -335,7 +335,7 @@ function applyDevice(next) {
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
   if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
   syncDrawerInert();
-  // A resize/rotate can cross the phone breakpoint while the landing card is on screen —
+  // A resize/rotate can cross the phone breakpoint while the landing page is on screen —
   // widening out of phone width should hand the composer back to its dock, narrowing into
   // it should embed it, and neither should wait for the next unrelated re-render to notice.
   syncLandingComposer();
@@ -1531,7 +1531,7 @@ function landingMarkup() {
 
 /**
  * On a phone, before any check has run, the real composer (`el.entryBar`) lives inside
- * `#landingEntrySlot` — a child of the landing card `landingMarkup` just rendered — rather
+ * `#landingEntrySlot` — a child of the landing page `landingMarkup` just rendered — rather
  * than at its normal dock (`#entryBarDock`, a static marker right before it in index.html).
  * Desktop/tablet never embed it: nothing there was reported broken, and the composer
  * staying reachable without scrolling at those widths is an existing, deliberate property
@@ -2248,9 +2248,11 @@ function renderChatPane({ newest = -1 } = {}) {
   setClaimsGridMode(null);
   if (!settled && !pending) {
     // The TRASE Design System's "App shell — Landing" screen, which is what this app looks
-    // like before anything has been pasted: no video column (see `updatePaneMode`), one card
-    // filling the pane, and in it the full landing composition (`landingMarkup`).
-    setClaimsPaneHTML(`<div class="claim-card claim-empty">${landingMarkup()}</div>`);
+    // like before anything has been pasted: no video column (see `updatePaneMode`), and the
+    // full landing composition (`landingMarkup`) as `.claimsPane`'s own direct content —
+    // not a card floating inside it. `.landing` (index.html) is what carries the fill-height
+    // and entrance treatment a wrapping `.claim-card` used to give this state.
+    setClaimsPaneHTML(landingMarkup());
     // The markup above is on screen now, `#landingEntrySlot` included — this is what
     // actually moves the real composer into it on a phone (see `syncLandingComposer`).
     syncLandingComposer();
@@ -3661,7 +3663,7 @@ function flashActionFeedback(row, message) {
  * timestamp chip, or acting on the answer itself. Source pills need no handler of their
  * own here — they're plain links, opened by the browser like any other `<a>`. */
 async function handleClaimsPaneClick(event) {
-  // The landing card's four action tiles (Video/Article/Search/Paste) — see
+  // The landing page's four action tiles (Video/Article/Search/Paste) — see
   // `landingMarkup`'s own doc comment for why they all do the same one thing.
   if (event.target.closest(".landing-action")) {
     el.linkInput.focus();
@@ -4187,32 +4189,32 @@ function historyFor(entry) {
 // (`.media-reveal` in index.html) instead of the strip just appearing — see that class's
 // own comment for why a `@keyframes` animation and not a `transition` is what makes this
 // work over `display: none`. Module-level rather than a return value off `playLandingExit`
-// because there's real work (`renderVideoPane`) between "the landing card left" and "the
+// because there's real work (`renderVideoPane`) between "the landing page left" and "the
 // strip exists to reveal", and threading a boolean across that is no clearer than a flag
 // only these two functions touch.
 let pendingMediaReveal = false;
 
 /**
  * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
- * if the claims pane is still showing the landing card when a check begins, let it visibly
- * leave first — the whole card fades and scales back, the brand HUD's four pills fly
- * outward on top of that (`.claim-empty.leaving` in index.html), the analyzing overlay
- * fades in over it (`showAnalyzingOverlay`), and — on a phone, where the composer is
- * currently embedded in the landing card rather than docked (`syncLandingComposer`) — the
- * real composer flies back to its dock (`flyEntryBarHome`) instead of just snapping there
- * the instant the card is torn down. A no-op once a check is already under way (nothing to
+ * if the claims pane is still showing the landing page when a check begins, let it visibly
+ * leave first — the whole page fades and scales back, the brand HUD's four pills fly
+ * outward on top of that (`.landing.leaving` in index.html), the analyzing overlay fades in
+ * over it (`showAnalyzingOverlay`), and — on a phone, where the composer is currently
+ * embedded in the landing page rather than docked (`syncLandingComposer`) — the real
+ * composer flies back to its dock (`flyEntryBarHome`) instead of just snapping there the
+ * instant the page is torn down. A no-op once a check is already under way (nothing to
  * transition away from — a follow-up, a re-run, a retry) or under reduced motion, where the
  * running card's own entrance is left to carry "something happened" on its own.
  */
 async function playLandingExit(url) {
-  const empty = el.claimsPane.querySelector(".claim-card.claim-empty");
-  if (!empty || prefersReducedMotion()) return;
+  const landing = el.claimsPane.querySelector(".landing");
+  if (!landing || prefersReducedMotion()) return;
   pendingMediaReveal = true;
   showAnalyzingOverlay(url);
-  empty.classList.add("leaving");
+  landing.classList.add("leaving");
   await new Promise((resolve) => setTimeout(resolve, 320));
 
-  // Measured now, at the exact moment the card it's embedded in is about to be torn down —
+  // Measured now, at the exact moment the page it's embedded in is about to be torn down —
   // not before the fade above, whose own `transform: scale(...)` would have made an earlier
   // reading slightly wrong (`getBoundingClientRect` reflects the rendered, post-transform
   // box). `runCheck`'s own render calls redock it a moment later regardless (see
@@ -4286,7 +4288,7 @@ async function runCheck(url, existingId, hint) {
   // "still working" narrative from here — see `showAnalyzingOverlay`'s own comment for why
   // the overlay itself never has more than "Fetching the source" to say. Safe to call
   // unconditionally: a no-op if the overlay was never shown (reduced motion, or a
-  // follow-up/retry with no landing card to leave in the first place).
+  // follow-up/retry with no landing page to leave in the first place).
   setTimeout(hideAnalyzingOverlay, 260);
 
   const image = pendingImage;

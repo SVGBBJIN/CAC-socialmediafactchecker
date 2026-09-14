@@ -302,3 +302,37 @@ rounds don't split that finely). The flight's ~500ms duration and its FLIP-only 
 simplification, named as one above rather than silently — a fuller port remains possible if
 asked for again, but this is the second time it's been weighed against the app's
 unpredictable real latency and set aside for the same reason.
+
+## Same session, one more fix — the landing page stops being a card
+
+Immediate follow-up: "make the landing page its own separate page not a card." Fair —
+`renderChatPane`'s empty branch wrapped the whole landing composition in `.claim-card`, the
+same bordered/backgrounded/pointer-tilting box every settled claim and the running/error
+cards use. On a phone that box was already invisible (`.claim-card:not(.claim-pane)` strips
+it to a transparent, borderless sheet at that width — see that rule's own comment), which is
+why the mobile screenshots in the earlier sections never showed it. Desktop never got that
+treatment, so there the landing content sat inside a visibly bordered rectangle that grew to
+fill the pane (`flex: 1 1 auto`) even though the content itself was shorter than that —
+a card with dead space inside its own border, which is exactly what a screenshot of the
+DS's own "App shell — Landing" doesn't show: there, this composition *is* `.lshell-scroll`'s
+entire content, no card wrapping it at all.
+
+Fix: `.landing` (already the outermost element `landingMarkup()` returns) is now
+`.claimsPane`'s direct child on this state — no `.claim-card` wrapper — and picked up the
+two things that wrapper used to supply: `flex: 1 1 auto` (reach the bottom of the pane on a
+short viewport) and the `card-in` entrance (same keyframes `.claim-card.run-enter` plays,
+just not riding on that class to get it). `playLandingExit`'s "Chat to shell" exit
+(`.claim-empty.leaving` → `.landing.leaving`) and its `querySelector` moved with it. No
+`justify-content: center` was added to vertically center the composition within the pane —
+checked against the DS's own screen, which doesn't do that either (`.lshell-scroll` is a
+plain top-down flex column, same as `.landing` always was); on a viewport taller than the
+content, this now just shows plain page background past the footer line rather than a
+bordered box with room inside it, which reads as intentional rather than short.
+
+Verified in a headless pass: computed style on the live `.landing` element confirms no
+`.claim-card` class, transparent background, no border, zero padding, and `#claimsPane` as
+its direct parent; a full desktop screenshot alongside the mobile one from the previous
+section shows the border is simply gone rather than relocated. The leave/flight/overlay
+sequence from the previous section was re-run end to end against the renamed classes to
+confirm nothing there was riding on the old selector unnoticed. `npm test` — 629/629 —
+unaffected, as expected for a markup/CSS-only change.
