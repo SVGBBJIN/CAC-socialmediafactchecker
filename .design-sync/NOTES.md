@@ -336,3 +336,102 @@ section shows the border is simply gone rather than relocated. The leave/flight/
 sequence from the previous section was re-run end to end against the renamed classes to
 confirm nothing there was riding on the old selector unnoticed. `npm test` — 629/629 —
 unaffected, as expected for a markup/CSS-only change.
+
+## Next session — splitting the idle state into the DS's two screens
+
+"Fix the new chat state to match app shell--new chat." The design system has *two* screens
+for the one moment this app had one of: `cards/Screens-App Shell-Landing.html` (ported in the
+sections above, and until now the only thing `renderChatPane`'s empty branch rendered) and
+`cards/Screens-App Shell-New Chat.html`, which nothing here had ever looked at. They are not
+the same composition at two sizes — the landing introduces the app to someone who has never
+seen it (brand block, HUD, entry block, action tiles, feature row, footer line), and the New
+Chat screen is the shell sitting idle with nothing to introduce (brand block, HUD, stop).
+
+The user's call on how they should map, asked before any of this was written: **split them**
+— landing while the library is empty, the New Chat hero once there is anything to go back
+to — and **rework the landing to be exactly like the design**, which they clarified means
+"in the landing we're removing the sidebar and entry bar." That clarification is what
+resolved the one apparent contradiction in the brief: the DS's `.newchat-hero` is a bordered
+box, which is precisely the border commit e2bc62f had just deliberately removed from the
+landing. It isn't a contradiction, because the two belong to different screens — the hero is
+a box *inside* a shell that stays, and the landing is a page with no shell at all.
+
+- **The landing is now a page, not a pane.** `data-view="landing"` on `<html>`
+  (`setLandingView` in app.js) takes the sidebar, both top bars and every ancestor's padding
+  off the screen; `landingMarkup` supplies the DS's own `.lshell-topbar` (hamburger +
+  settings) over `.lshell-scroll` instead. Sizes are the DS's rather than the shrunk-to-fit
+  card ones this state used to use: 52px mark, 42px wordmark, 12px tagline on one line (the
+  old markup broke it in two — that is the *New Chat* screen's treatment, not the landing's),
+  the HUD at its full 280x340 with a 236px cluster, `entry-block` at 26px padding and 560px
+  wide, 21px action-tile icons, a 760px feature row.
+- **The composer is embedded at every width now, not just on a phone.** Nothing clever: with
+  the shell gone there is no docked position left for it to be in, so the breakpoint that
+  used to choose between the two has nothing to choose. `syncLandingComposer` lost its
+  `device.kind === "phone"` test and became "is the slot on screen"; `playLandingExit`'s
+  flight test lost the same clause and now asks only where the composer actually is. The
+  desktop composer arrives wearing the raised-card treatment (`@media (min-width: 701px)` on
+  `.entry-bar`) that the phone one never had, so `.landing-entry .entry-bar` had to strip
+  border, radius, shadow and background as well as the old hairline — without that the
+  landing showed a card inside a card.
+- **The sidebar is off-screen, not absent.** `#landingLibBtn` opens it as the drawer, and
+  `openDrawer`'s `device.kind !== "phone"` guard is now `&& !isLandingView()` so that works
+  at a desktop too — otherwise the library and the sign-in button under it would be
+  unreachable while the page is up. `drawerHandle`/`setDrawerHandleState` keep whichever of
+  the two handles is on screen carrying the `aria-expanded`/`aria-label` state and taking
+  focus back on close (the phone's `.drawer-toggle` is `display: none` above 700px, and
+  focusing a hidden element drops focus on `<body>` — the exact bug that focus restore
+  exists to prevent).
+- **The shell topbar stops being blank.** `updateShellTopbar` hid `.shell-topbar` outright
+  with nothing selected; on the New Chat screen the DS gives it "New chat" / "Nothing checked
+  yet", so it now does, and stays hidden only on the landing, which has no shell to put it
+  in. The sidebar button is "New chat" too, both label and `aria-label`/`title`.
+- **Both screens leave the same way.** `playLandingExit` queries `.landing, .newchat-hero`
+  and the `.leaving` rules are shared: the hero is the same brand block over the same HUD,
+  and a check starting from it is the same event, so it flies its pills out rather than
+  blinking away while the landing gets a send-off.
+- **Removed**: `.claim-empty-text` (the invitation paragraph the DS's landing replaces with
+  `entry-block`'s own heading and subtext) and the whole phone-only `.landing-entry` block,
+  now that the embed is unconditional. `.landing` itself no longer animates — its children
+  stagger in via the DS's `rise-in` — so both reduced-motion overrides moved to
+  `.landing .rise, .landing .brand-hud` with it.
+
+**Two bugs the headless pass caught that a screenshot wouldn't have.** Both are the kind
+that look fine until you read the numbers:
+
+- `.lshell-scroll` is a column flex container, and a column flex container shrinks its items
+  to fit before it will overflow. The HUD was arriving **160px tall instead of 340**, its
+  absolutely-positioned rings quietly crushed together, on any viewport shorter than the
+  composition — which is every laptop. `.lshell-scroll > * { flex-shrink: 0 }` is what makes
+  `overflow-y: auto` above it mean anything.
+- The phone's HUD scale was written as `transform: scale(0.86)` the way the existing
+  `.brand-hud` phone rule does it — and silently did nothing, because `.brand-hud` is the one
+  element here carrying the `rise-in` animation, whose last keyframe is `transform: none`,
+  and an animation beats a plain declaration. Re-specified as real geometry (241x292 wrap,
+  1.035 cluster scale) instead. Worth remembering before reaching for `transform` on anything
+  in `.lshell-scroll`.
+
+**Verification.** Headless, reading live state rather than judging by eye, across both
+breakpoints and both screens: the view attribute, each chrome element's computed
+visibility and box, the composer's real `parentElement` at each stage, the rendered wordmark
+size, and the HUD's measured box (which is how both bugs above surfaced). The drawer was
+opened from `#landingLibBtn` at 1440px and closed from the scrim. The exit was driven through
+the real trigger from *both* screens — `/api/probe-link` stubbed, the intake confirm dialog
+answered the way a reader answers it — confirming `.landing.leaving` / `.newchat-hero.leaving`,
+the analyzing overlay, the composer landing back at its dock, and `flyEntryBarHome` running at
+desktop width for the first time (its `style.transform` is set, where an unrun flight leaves it
+empty). `npm test` — 629/629 — before and after; nothing in the suite touches this markup.
+
+**Self-critique.** Three things are worth naming rather than leaving to be discovered:
+
+- The phone top bar still says "New check" / "Paste a link to get started" while the sidebar
+  button next to it now says "New chat" and the desktop bar says "New chat" / "Nothing checked
+  yet". That is exactly what was asked for (the phone-copy option was offered and not picked),
+  but it is an inconsistency, and if it wasn't deliberate it is a two-line fix.
+- The split is on `library.length === 0`, so the landing is genuinely unreachable once you
+  have checked anything — clearing the library is the only way back to it. That follows from
+  the mapping that was chosen, but it does mean the screen most of the design effort went
+  into is the one almost nobody sees twice.
+- `#landingLibBtn` opens a library that is empty by definition on the screen it appears on.
+  It is in the DS's own landing topbar and it is the only route to sign-in while the page is
+  up, which is why it is wired rather than dropped, but "Open checks" opening an empty list is
+  a fair thing to call odd.

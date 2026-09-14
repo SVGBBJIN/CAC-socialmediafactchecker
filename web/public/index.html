@@ -1013,10 +1013,13 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .claim-card { transition: none; }
-    .claim-card.run-enter, .landing { animation: none; opacity: 1; }
+    .claim-card.run-enter,
+    .landing .rise,
+    .landing .brand-hud { animation: none; opacity: 1; }
   }
   [data-motion="reduced"] .claim-card.run-enter,
-  [data-motion="reduced"] .landing { animation: none; opacity: 1; }
+  [data-motion="reduced"] .landing .rise,
+  [data-motion="reduced"] .landing .brand-hud { animation: none; opacity: 1; }
   /* The soft violet highlight that follows the pointer during the tilt above — positioned
      by `handleCardTilt` setting a `radial-gradient(...)` background inline, centered on the
      cursor. Sits as the card's first child (see `tiltGlare` in app.js) so it paints under
@@ -1445,109 +1448,278 @@
   .claim-text a.citation { color: var(--accent); text-decoration: none; }
   .claim-text a.citation:hover { text-decoration: underline; }
 
-  /* The claims pane's very first state, before any check has run (see the empty-state
-     render in app.js) — and, since `renderChatPane`'s empty branch is what "New check" and
-     a deleted selection both fall back to as well, that same moment mid-session. Its own
-     class rather than a `.claim-text` override: that class is the body copy of every
-     settled claim elsewhere in the app, and this message isn't a claim's analysis, it's an
-     instruction.
+  /* ---------- The landing page ----------
+     The TRASE Design System's "App shell — Landing" screen, ported at its own size.
 
-     Sits under the brand HUD (`.brand-hud`, further down) rather than alone in an empty
-     pane — the TRASE Design System's "App shell — New Chat" screen carries the same brand
-     mark for exactly this moment: nothing running yet, but the app is still visibly itself
-     rather than a blank space. */
-  .claim-empty-text {
-    width: 24ch;
-    max-width: 100%;
-    text-align: center;
-    font-family: var(--font-display);
-    font-size: clamp(17px, 5.1vw, 22px); font-weight: 600; line-height: 1.4;
-    margin: 0;
-    /* Ink into accent, the same gradient-text treatment the shell's own title uses. */
-    background: linear-gradient(135deg, var(--ink), var(--accent) 130%);
-    -webkit-background-clip: text; background-clip: text;
-    color: transparent;
-  }
-  /* A narrower measure on a phone-width pane — 24ch of 17px serif is wider than a 320px
-     phone screen once its own side gutters are taken off it. */
-  @media (max-width: 520px) {
-    .claim-empty-text { width: 17ch; }
-  }
-  /* The full landing composition — ported from the TRASE Design System's "App shell —
-     Landing"/"Mobile Landing" screens: the brand block, `.brand-hud` (further down), the
-     invitation, an action-tile row and a feature row, and a footer line.
+     A page, not a pane. While `data-view="landing"` is on <html> (`setLandingView` in
+     app.js) the rules in the landing-view section further down take the sidebar and both
+     top bars off the screen entirely, and this supplies the window's whole chrome instead:
+     the DS's two-button `.lshell-topbar` over a centred scroll column. That is also what
+     lets the composer live inside `.landing-entry` at every width rather than only on a
+     phone — with no shell around the page there is no docked position left to choose
+     between, so the breakpoint that used to decide has nothing to decide.
 
-     Its own page now, not a card: `.claims-pane`'s direct flex child on this one state,
-     rather than the bordered, backgrounded, pointer-tilting box (`.claim-card`, above) every
-     other render path wraps its content in. A landing screen sitting inside a smaller box
-     floating on the page is exactly what the DS's own "Landing"/"Mobile Landing" screens
-     aren't — there, this composition *is* `.lshell-scroll`'s entire content, no card wrapping
-     it, and a viewport taller than the content just shows page background past the footer
-     line rather than a card with dead space inside its own border.
-
-     `flex: 1 1 auto` is the one thing carried over from `.claim-card` itself — it's what
-     reaches the bottom of the pane on a short viewport instead of floating near the top with
-     bare space under it, the same reason `.claim-card` gives for the same property — and the
-     `card-in` entrance is the same one `.claim-card.run-enter` plays, just no longer riding
-     on that class to get it (see both of their reduced-motion overrides, which still travel
-     together for the same reason). Since none of it is absolutely positioned, a composition
-     taller than the pane's visible height just grows and `.claims-pane`'s own
-     `overflow-y: auto` scrolls it into view rather than clipping it — `.brand-hud`'s four
-     corner pills would collide with text overlaid on top of it the way the old single-mark
-     treatment worked, which is why nothing here is stacked *on* the HUD the way the old
-     settled-iris + caption used to be. */
+     The sizes are the DS's own and are larger than the card this state used to be (52px
+     mark, 42px wordmark against 38 and 28): a screen that is the only thing in the window
+     can afford them, and the DS draws them that way for the same reason. The composition is
+     deliberately not the "New chat" hero at a bigger size — see `.newchat-hero` below. */
   .landing {
-    display: flex; flex-direction: column; align-items: center; gap: 20px; width: 100%;
-    flex: 1 1 auto;
-    opacity: 0;
-    animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
+    display: flex; flex-direction: column;
+    flex: 1 1 auto; min-height: 0; width: 100%;
   }
-  .landing-brand { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-  .landing-mark { width: 38px; height: 38px; margin-bottom: 6px; }
-  .landing-mark svg { width: 100%; height: 100%; }
-  .landing-wordmark { font-family: var(--font-display); font-size: 28px; font-weight: 600; color: var(--ink); }
+  .lshell-topbar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 32px;
+  }
+  .icon-btn-plain {
+    width: 36px; height: 36px; flex-shrink: 0;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent; border: 1px solid var(--border); color: var(--ink-dim);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .icon-btn-plain:hover { background: var(--surface-raised); color: var(--ink); }
+  .icon-btn-plain:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .icon-btn-plain svg { width: 17px; height: 17px; }
+  /* The page's own scroller, so the top bar stays put while the composition moves under it
+     — which is why `.claims-pane`'s `overflow-y` is turned off on this view rather than
+     left to fight with this one. */
+  .lshell-scroll {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding: 8px 32px 48px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  /* A column flex container shrinks its items to fit before it will overflow, and every
+     block here has a height that means something — the HUD's most of all, whose rings are
+     absolutely positioned inside a box whose height is the only thing holding them apart.
+     Without this the composition silently compresses on any viewport shorter than itself
+     (the HUD was arriving 160px tall instead of 340) rather than scrolling, which is what
+     `overflow-y` above is for. */
+  .lshell-scroll > * { flex-shrink: 0; }
+
+  /* The DS stages the composition in top-to-bottom rather than fading the page as one
+     block. The HUD takes the same treatment without carrying the class, since its markup
+     (`brandHudMarkup` in app.js) is shared with the running card and the "New chat" hero,
+     neither of which wants a landing entrance baked into it. */
+  @keyframes rise-in {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+  }
+  .landing .rise,
+  .landing .brand-hud { animation: rise-in 0.55s cubic-bezier(.2,.7,.2,1) both; }
+  .landing-brand { animation-delay: 0s; }
+  .landing .brand-hud { animation-delay: 0.08s; }
+  .landing-entry { animation-delay: 0.2s; }
+  .landing-actions { animation-delay: 0.26s; }
+  .landing-features { animation-delay: 0.32s; }
+  .landing-footer-line { animation-delay: 0.38s; }
+
+  .landing-brand {
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    margin-top: 8px;
+  }
+  .brand-mark { width: 52px; height: 52px; margin-bottom: 12px; }
+  .brand-mark svg { width: 100%; height: 100%; display: block; }
+  .landing-wordmark {
+    font-family: var(--font-display); font-size: 42px; font-weight: 600;
+    color: var(--ink); line-height: 1;
+  }
   .landing-tagline {
-    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
-    color: var(--muted); line-height: 1.7; margin-top: 8px;
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--muted); margin-top: 12px; line-height: 1.7;
   }
+
+  /* The DS's landing draws the HUD at its full 280x340 with a 236px cluster; `.brand-hud`'s
+     own geometry (a 196px cluster in a 236x220 box) is the smaller copy the running card
+     and the "New chat" hero use. Scaled rather than re-specified, so there stays one set of
+     ring numbers to keep true — the same move the phone breakpoint already makes on it —
+     and the two lower pills move out to the taller box's corners, where the DS puts them. */
+  .landing .brand-hud { width: 280px; height: 340px; margin: 30px auto 0; }
+  .landing .brand-hud-cluster {
+    transform: translateX(-50%) scale(1.204); transform-origin: top center;
+  }
+  .landing .brand-hud-pill.facts { top: auto; bottom: 0; left: 14px; }
+  .landing .brand-hud-pill.clarity { top: auto; bottom: 0; right: 14px; }
+
+  /* The DS's `entry-block`. On this screen it is the composer's only home at any width —
+     `syncLandingComposer` (app.js) moves the real `#entryBar` node in here. */
+  .landing-entry {
+    display: flex; flex-direction: column; align-items: stretch;
+    width: 100%; max-width: 560px;
+    margin-top: 28px; padding: 26px;
+    border-radius: 18px;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+  .landing-entry-title {
+    font-family: var(--font-display); font-size: 22px; font-weight: 600; color: var(--ink);
+    margin: 0 0 6px; text-align: center;
+  }
+  .landing-entry-sub {
+    font-size: 13.5px; color: var(--ink-dim); margin: 0 0 18px; text-align: center;
+    line-height: 1.5;
+  }
+  /* Strips both docked treatments the composer can arrive wearing — the phone bar's
+     hairline and the desktop card's border, radius, shadow and raised background (see
+     `.entry-bar`'s own rules above) — now that it is a plain child of a card that already
+     supplies an edge. Without the desktop half of this, the landing would show a raised
+     card sitting inside another card. */
+  .landing-entry .entry-bar {
+    margin: 0; padding: 0;
+    border: 0; border-radius: 0;
+    background: transparent; box-shadow: none;
+  }
+
   /* The action tiles have no distinct behavior to route to — this app has one composer, not
      a mode per content type the way the row's own icons (video/article/search/paste)
      suggest — so a click just focuses it (see the `.landing-action` branch in
      `handleClaimsPaneClick`). */
-  /* Hidden by default — desktop/tablet keep the composer docked at the bottom of the
-     screen, always reachable without scrolling, exactly as it already was. Only the phone
-     breakpoint below turns this into the DS's embedded `entry-block` and actually moves the
-     real composer into it (`syncLandingComposer` in app.js); at every other width this stays
-     an empty, invisible node so `landingMarkup`'s one layout for both breakpoints doesn't
-     need a second markup path just for this one piece. */
-  .landing-entry { display: none; }
-  .landing-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; max-width: 420px; }
+  .landing-actions {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-top: 20px; width: 100%; max-width: 560px;
+  }
   .landing-action {
-    display: flex; flex-direction: column; align-items: center; gap: 6px;
-    padding: 12px 4px; border-radius: 10px; border: 1px solid var(--border);
-    background: var(--surface-raised); color: inherit; font: inherit; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding: 16px 6px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--surface); color: inherit; font: inherit; cursor: pointer;
     transition: border-color 0.15s ease, background 0.15s ease;
   }
-  .landing-action:hover { border-color: var(--accent); background: var(--surface); }
+  .landing-action:hover { border-color: var(--accent); background: var(--surface-raised); }
   .landing-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .landing-action svg { width: 16px; height: 16px; flex-shrink: 0; }
-  .landing-action span { font-size: 10.5px; color: var(--ink-dim); }
+  .landing-action svg { width: 21px; height: 21px; flex-shrink: 0; }
+  .landing-action span { font-size: 12px; color: var(--ink-dim); }
   .landing-features {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 16px;
-    width: 100%; max-width: 560px; padding-top: 18px; border-top: 1px solid var(--border);
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+    margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--border);
+    width: 100%; max-width: 760px;
   }
-  .landing-feature { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 7px; }
-  .landing-feature svg { width: 18px; height: 18px; flex-shrink: 0; }
-  .landing-feature span { font-size: 10.5px; color: var(--ink-dim); line-height: 1.4; }
+  .landing-feature {
+    display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px;
+  }
+  .landing-feature svg { width: 24px; height: 24px; flex-shrink: 0; }
+  .landing-feature span { font-size: 12.5px; color: var(--ink-dim); line-height: 1.4; }
   .landing-footer-line {
-    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--muted); text-align: center;
+    margin-top: 26px; text-align: center;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  /* Phone: the DS's "Mobile Landing" is the same composition with its margins and type
+     pulled in, not a different one — same single markup path, same order. */
+  @media (max-width: 520px) {
+    .lshell-topbar { padding: 14px 16px; }
+    .lshell-scroll { padding: 4px 16px 32px; }
+    .brand-mark { width: 44px; height: 44px; margin-bottom: 10px; }
+    .landing-wordmark { font-size: 32px; }
+    .landing-tagline { font-size: 11px; margin-top: 10px; }
+    /* The same 0.86 the rest of this breakpoint pulls things in by, but applied as real
+       geometry rather than a `transform`: `.brand-hud` is the one element here carrying the
+       rise-in animation, whose final keyframe is `transform: none`, and an animation beats a
+       plain declaration — so a transform on it would simply be dropped. */
+    .landing .brand-hud { width: 241px; height: 292px; margin-top: 24px; }
+    .landing .brand-hud-cluster { transform: translateX(-50%) scale(1.035); }
+    .landing-entry { margin-top: 20px; padding: 18px 16px; border-radius: 16px; }
+    .landing-entry-title { font-size: 17px; }
+    .landing-entry-sub { font-size: 11.5px; margin-bottom: 14px; }
+    .landing-actions, .landing-features { max-width: 100%; }
+    .landing-actions { gap: 8px; }
+    .landing-action { padding: 12px 4px; gap: 6px; }
+    .landing-action svg { width: 18px; height: 18px; }
+    .landing-action span { font-size: 10.5px; }
+    .landing-features { gap: 12px 16px; }
+    .landing-feature span { font-size: 11px; }
+  }
+
+  /* ---------- The landing view: the shell stands down ----------
+     The landing is a page, so while it is up the shell around it is simply not drawn — no
+     sidebar column, no phone top bar, no desktop title bar, and none of the content grid's
+     padding, since `.lshell-topbar`/`.lshell-scroll` carry the window's own margins
+     instead. Set and cleared by `setLandingView` (app.js).
+
+     The composer is deliberately *not* hidden here. It is the same live node the shell
+     docks, moved into the page by `syncLandingComposer` — hiding it by selector would hide
+     it where it actually is. */
+  [data-view="landing"] .topbar,
+  [data-view="landing"] .shell-topbar { display: none; }
+  /* All three of these carry padding of their own at one width or another (the phone gives
+     `.claims-pane` side gutters and `.claims-pane-wrap` a top inset, for the sheet-over-video
+     layout that isn't happening here) — the page supplies its own margins, so every one of
+     them has to stand down, not just the grid. */
+  [data-view="landing"] .content-grid,
+  [data-view="landing"] .claims-pane-wrap,
+  [data-view="landing"] .claims-pane { padding: 0; gap: 0; }
+  [data-view="landing"] .claims-pane { overflow: hidden; }
+  /* The DS lights the landing from the top of the window rather than the middle of a pane;
+     `.main` is the element that spans the window once the sidebar is gone. */
+  [data-view="landing"] .main {
+    background-image: radial-gradient(circle at 50% 0%, var(--surface-raised) 0%, var(--bg) 55%);
+  }
+  /* The sidebar is off-screen rather than absent: `#landingLibBtn` still opens it as the
+     drawer, at every width here (see `openDrawer` in app.js), which is the only way to
+     reach signing in while the page is up. This is the phone drawer's own treatment
+     (further down) lifted out of its breakpoint for this one view — repeated rather than
+     shared because the phone rules hold at that width anyway, and hoisting them would mean
+     one selector doing two unrelated jobs. */
+  [data-view="landing"] .sidebar {
+    position: fixed; z-index: 40;
+    top: 0; bottom: 0; left: 0;
+    width: min(300px, 84vw);
+    border-right: 1px solid var(--border);
+    box-shadow: 0 0 40px rgba(0,0,0,0.5);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 0.24s ease, visibility 0s linear 0.24s;
+  }
+  [data-view="landing"][data-drawer="open"] .sidebar {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.24s ease, visibility 0s;
+  }
+  [data-view="landing"][data-drawer="open"] .scrim { opacity: 1; pointer-events: auto; }
+
+  /* ---------- The New Chat hero ----------
+     The TRASE Design System's "App shell — New Chat" screen: the same idle moment the
+     landing covers, drawn for a reader who has checked something before and has just
+     pressed "New chat". The shell is all still around them — sidebar, title bar, docked
+     composer — so this is a box inside the pane rather than a page replacing it, and it is
+     the one place in the app where the bordered, radially-lit panel the DS draws is the
+     right shape: a landing has an app to introduce, and this has nothing to introduce, so
+     it is the brand block and the HUD and no more.
+
+     Deliberately not `.claim-card`: that class is the settled/running claim's own box, with
+     a pointer tilt and a glare layer that would make an idle screen feel clickable. */
+  .newchat-hero {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px;
+    padding: 32px;
+    border-radius: 18px; border: 1px solid var(--border);
+    background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
+    opacity: 0;
+    animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
+  }
+  .newchat-brand {
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+  }
+  .newchat-hero .brand-mark { width: 44px; height: 44px; margin-bottom: 10px; }
+  .newchat-wordmark {
+    font-family: var(--font-display); font-size: 34px; font-weight: 600;
+    color: var(--ink); line-height: 1;
+  }
+  .newchat-tagline {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--muted); margin-top: 10px; line-height: 1.7;
   }
   @media (max-width: 520px) {
-    .landing { gap: 16px; }
-    .landing-wordmark { font-size: 24px; }
-    .landing-actions, .landing-features { max-width: 100%; }
+    /* The phone has one pane and a video strip to share it with, so the hero gives up its
+       border the same way `.claim-card` does at this width (see that rule's own comment)
+       and just centres what it holds. */
+    .newchat-hero { padding: 16px 8px; border: 0; border-radius: 0; background-image: none; }
+    .newchat-wordmark { font-size: 26px; }
+    .newchat-tagline { font-size: 10px; }
   }
+  @media (prefers-reduced-motion: reduce) { .newchat-hero { animation: none; opacity: 1; } }
+  [data-motion="reduced"] .newchat-hero { animation: none; opacity: 1; }
 
   /* ---------- Chat to shell: the landing page leaving as a check begins ----------
      Ported from the TRASE Design System's "Chat to shell" screen: submitting a link from
@@ -1555,17 +1727,28 @@
      leaves first — `runCheck` (app.js) adds this class via `playLandingExit` and awaits a
      beat before swapping in the running card (`.run-enter` above is that card's own
      entrance). Skipped entirely under reduced motion — `playLandingExit` no-ops rather than
-     adding the class, so there's nothing here for a browser-level media query to override. */
-  .landing.leaving {
+     adding the class, so there's nothing here for a browser-level media query to override.
+
+     Both idle screens leave the same way. The "New chat" hero is a smaller composition than
+     the landing, but it is the same brand block over the same HUD, and a check starting
+     from it is the same event — so it flies its pills out too rather than blinking away
+     while the landing gets a send-off. */
+  .landing.leaving,
+  .newchat-hero.leaving {
     transition: opacity 0.32s ease, transform 0.32s ease;
     opacity: 0;
     transform: scale(0.97) translateY(-6px);
   }
-  .landing.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
-  .landing.leaving .brand-hud-pill.sources { opacity: 0; transform: translate(-28px, -18px); }
-  .landing.leaving .brand-hud-pill.context { opacity: 0; transform: translate(28px, -18px); }
-  .landing.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
-  .landing.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
+  .landing.leaving .brand-hud-pill,
+  .newchat-hero.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
+  .landing.leaving .brand-hud-pill.sources,
+  .newchat-hero.leaving .brand-hud-pill.sources { opacity: 0; transform: translate(-28px, -18px); }
+  .landing.leaving .brand-hud-pill.context,
+  .newchat-hero.leaving .brand-hud-pill.context { opacity: 0; transform: translate(28px, -18px); }
+  .landing.leaving .brand-hud-pill.facts,
+  .newchat-hero.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
+  .landing.leaving .brand-hud-pill.clarity,
+  .newchat-hero.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
 
   /* ---------- Analyzing interstitial: bridges the shared-element flight ----------
      Ported from the TRASE Design System's "Chat to shell"/"Mobile Landing to Shell"
@@ -2737,41 +2920,6 @@
     .entry-bar input { font-size: 16px; padding: 12px; min-width: 0; }
     .image-chip { margin: 0 12px; }
 
-    /* ---------- Phone landing: the composer lives in the middle of the screen, not
-       welded to the bottom ---------- */
-    /* Ported from the TRASE Design System's "Mobile Landing" screen: `entry-block` sits in
-       the scrollable composition itself, right under the brand HUD, rather than as a
-       separate bar pinned to the window's bottom edge. Without this the empty-state card
-       (short) sits at the top of `.claims-pane` (tall, `flex: 1 1 auto`) with the real
-       composer docked a full screen-height below it — a big dead gap, and the actual input
-       nowhere near "the middle" the DS puts it. `landingMarkup`'s own paragraph is replaced
-       by this block's heading/subtext on this one breakpoint; `syncLandingComposer` (app.js)
-       is what actually moves the real `#entryBar` node in here, and back out to
-       `#entryBarDock` the moment a check starts or the viewport grows past phone width. */
-    .claim-empty-text { display: none; }
-    .landing-entry {
-      display: flex; flex-direction: column; align-items: stretch;
-      width: 100%; margin-top: 2px;
-      padding: 18px 16px;
-      border-radius: 16px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-    }
-    .landing-entry-title {
-      font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--ink);
-      margin: 0 0 4px; text-align: center;
-    }
-    .landing-entry-sub {
-      font-size: 11.5px; color: var(--ink-dim); margin: 0 0 14px; text-align: center; line-height: 1.5;
-    }
-    /* Strips the docked-bar treatment (hairline, own opaque background) now that it's a
-       plain child of a card that already supplies its own edge — see the base `.entry-bar`
-       phone rules just above. Higher specificity wins regardless of source order, but kept
-       here, right after them, so the override reads next to what it's overriding. */
-    .landing-entry .entry-bar {
-      margin: 0; padding: 0; border-top: 0; background: transparent;
-    }
-
     /* Dialogs are sheets at this width — a 92vw box floating mid-screen wastes the room
        it is short of. */
     .passphrase {
@@ -2845,7 +2993,6 @@
   [data-font-size="large"] .claim-text { font-size: calc(16.5px * 1.16); }
   [data-font-size="large"] .claim-title { font-size: calc(15.5px * 1.16); }
   [data-font-size="large"] .thread-a.claim-text { font-size: calc(14.5px * 1.16); }
-  [data-font-size="large"] .claim-empty-text { font-size: clamp(19px, 5.9vw, 25.5px); }
   [data-font-size="large"] body, [data-font-size="large"] .entry-bar input, [data-font-size="large"] .lib-title { font-size: 1.1em; }
 
   /* `:not([data-theme="light"])` on every rule in this block: theme and contrast are two
@@ -3044,9 +3191,9 @@
       <!-- `aria-label`/`title` as well as the visible label: `[data-sidebar="collapsed"]`
            hides `.new-check-label`, and without them the collapsed rail's plus icon
            announces as an unnamed button — the one control in that rail that did. -->
-      <button type="button" class="new-check" id="newCheckBtn" aria-label="New check" title="New check">
+      <button type="button" class="new-check" id="newCheckBtn" aria-label="New chat" title="New chat">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span class="new-check-label">New check</span>
+        <span class="new-check-label">New chat</span>
       </button>
       <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks…" />
       <ul class="lib-list" id="libList"></ul>
