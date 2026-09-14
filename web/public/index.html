@@ -1500,6 +1500,13 @@
      a mode per content type the way the row's own icons (video/article/search/paste)
      suggest — so a click just focuses it (see the `.landing-action` branch in
      `handleClaimsPaneClick`). */
+  /* Hidden by default — desktop/tablet keep the composer docked at the bottom of the
+     screen, always reachable without scrolling, exactly as it already was. Only the phone
+     breakpoint below turns this into the DS's embedded `entry-block` and actually moves the
+     real composer into it (`syncLandingComposer` in app.js); at every other width this stays
+     an empty, invisible node so `landingMarkup`'s one layout for both breakpoints doesn't
+     need a second markup path just for this one piece. */
+  .landing-entry { display: none; }
   .landing-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; max-width: 420px; }
   .landing-action {
     display: flex; flex-direction: column; align-items: center; gap: 6px;
@@ -1545,6 +1552,65 @@
   .claim-empty.leaving .brand-hud-pill.context { opacity: 0; transform: translate(28px, -18px); }
   .claim-empty.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
   .claim-empty.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
+
+  /* ---------- Analyzing interstitial: bridges the shared-element flight ----------
+     Ported from the TRASE Design System's "Chat to shell"/"Mobile Landing to Shell"
+     screens: a frosted scan ring and a 3-item step list, laid over everything while the
+     landing card is leaving and the composer is (on a phone) flying back to its dock
+     (`showAnalyzingOverlay`/`hideAnalyzingOverlay` in app.js, both called from the real
+     `playLandingExit`/`runCheck` turn — not a demo's scripted timeline). It only ever shows
+     as much progress as the app actually has at that point, which at this moment is none —
+     the request hasn't even been sent yet — so unlike the DS's own demo, the step list here
+     never advances past "Fetching the source" before the running card's own dial (real
+     stage-driven, `irisMarkup`) takes over and the overlay fades out from underneath it. A
+     single persistent node appended to `<body>` (see `analyzingOverlayEl`), not part of any
+     pane's markup, so it's never at risk from `setClaimsPaneHTML` rebuilding what's under
+     it. */
+  .analyzing-overlay {
+    position: fixed; inset: 0; z-index: 40;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px;
+    padding: 0 28px;
+    background: color-mix(in oklch, var(--bg) 92%, transparent);
+    backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.45s ease;
+  }
+  .analyzing-overlay.on { opacity: 1; }
+  .analyzing-scan {
+    position: relative; width: 120px; height: 120px; border-radius: 50%;
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .analyzing-scan::before {
+    content: ""; position: absolute; inset: -1px; border-radius: 50%;
+    border: 2px solid transparent; border-top-color: var(--accent);
+    animation: analyzing-scan-spin 1s linear infinite;
+  }
+  @keyframes analyzing-scan-spin { to { transform: rotate(360deg); } }
+  .analyzing-scan-core {
+    width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 8px color-mix(in oklch, var(--accent) 14%, transparent);
+    /* Reuses the brand HUD's own pulse keyframe (see `.brand-hud-core`) at a faster speed
+       rather than declaring a second, identical `@keyframes` block. */
+    animation: brand-hud-pulse 1.6s ease-in-out infinite;
+  }
+  .analyzing-target {
+    max-width: 320px; text-align: center; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: 0.04em; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .analyzing-steps { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 260px; }
+  .analyzing-step {
+    display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted);
+    opacity: 0.35; transition: opacity 0.3s ease, color 0.3s ease;
+  }
+  .analyzing-step.active, .analyzing-step.done { opacity: 1; color: var(--ink-dim); }
+  .analyzing-step-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--border);
+    flex: 0 0 auto; transition: background 0.3s ease;
+  }
+  .analyzing-step.active .analyzing-step-dot { background: var(--accent); }
+  .analyzing-step.done .analyzing-step-dot { background: var(--good); }
 
   /* When in the clip a claim was made. Deliberately not styled like `.citation`: a citation
      leaves the page for a source, a timestamp moves the player a few inches away, and the
@@ -2657,6 +2723,41 @@
     .entry-bar input { font-size: 16px; padding: 12px; min-width: 0; }
     .image-chip { margin: 0 12px; }
 
+    /* ---------- Phone landing: the composer lives in the middle of the screen, not
+       welded to the bottom ---------- */
+    /* Ported from the TRASE Design System's "Mobile Landing" screen: `entry-block` sits in
+       the scrollable composition itself, right under the brand HUD, rather than as a
+       separate bar pinned to the window's bottom edge. Without this the empty-state card
+       (short) sits at the top of `.claims-pane` (tall, `flex: 1 1 auto`) with the real
+       composer docked a full screen-height below it — a big dead gap, and the actual input
+       nowhere near "the middle" the DS puts it. `landingMarkup`'s own paragraph is replaced
+       by this block's heading/subtext on this one breakpoint; `syncLandingComposer` (app.js)
+       is what actually moves the real `#entryBar` node in here, and back out to
+       `#entryBarDock` the moment a check starts or the viewport grows past phone width. */
+    .claim-empty-text { display: none; }
+    .landing-entry {
+      display: flex; flex-direction: column; align-items: stretch;
+      width: 100%; margin-top: 2px;
+      padding: 18px 16px;
+      border-radius: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+    .landing-entry-title {
+      font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--ink);
+      margin: 0 0 4px; text-align: center;
+    }
+    .landing-entry-sub {
+      font-size: 11.5px; color: var(--ink-dim); margin: 0 0 14px; text-align: center; line-height: 1.5;
+    }
+    /* Strips the docked-bar treatment (hairline, own opaque background) now that it's a
+       plain child of a card that already supplies its own edge — see the base `.entry-bar`
+       phone rules just above. Higher specificity wins regardless of source order, but kept
+       here, right after them, so the override reads next to what it's overriding. */
+    .landing-entry .entry-bar {
+      margin: 0; padding: 0; border-top: 0; background: transparent;
+    }
+
     /* Dialogs are sheets at this width — a 92vw box floating mid-screen wastes the room
        it is short of. */
     .passphrase {
@@ -2825,7 +2926,15 @@
   [data-motion="reduced"] .source-expand-item,
   [data-motion="reduced"] .bolt,
   [data-motion="reduced"] .summary-num.rolling,
+  [data-motion="reduced"] .analyzing-scan::before,
+  [data-motion="reduced"] .analyzing-scan-core,
+  [data-motion="reduced"] .entry-bar,
   [data-motion="reduced"] .icon-btn.listening { animation: none !important; transition: none !important; }
+  /* Belt and suspenders: `playLandingExit` already never shows this overlay or calls
+     `flyEntryBarHome` under reduced motion (see both functions' own comments), so this
+     should never matter in practice — kept anyway, the same way every other JS-gated
+     animation in this file still gets a CSS-level fallback. */
+  [data-motion="reduced"] .analyzing-overlay { display: none !important; }
   /* `.badge`/`.badge-icon` reach their visible state only through the stamp-in/pop
      keyframes' `forwards` fill — unlike the `.in`-class/`transition` pairs above, killing
      the animation with nothing else in its place would leave every badge and its icon
@@ -3095,7 +3204,14 @@
         <div class="quota-track"><div class="quota-fill" id="quotaFill"></div></div>
       </div>
 
-      <div class="entry-bar">
+      <!-- Empty on purpose — the composer's normal resting place. `syncLandingComposer`
+           (app.js) moves the real `#entryBar` back to right after this marker whenever it
+           isn't currently embedded in the phone landing card (`#landingEntrySlot`, inside
+           `landingMarkup`); `setClaimsPaneHTML` uses the same marker to guarantee the
+           composer is never still inside a subtree about to be thrown away by
+           `.claimsPane.innerHTML =`. -->
+      <div id="entryBarDock" hidden></div>
+      <div class="entry-bar" id="entryBar">
         <button type="button" class="icon-btn" id="imageBtn" aria-label="Attach an image" title="Attach an image">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>

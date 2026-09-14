@@ -76,6 +76,7 @@ const el = {
   mediaExpandBtn: document.getElementById("mediaExpandBtn"),
   shellTitle: document.getElementById("shellTitle"),
   shellSub: document.getElementById("shellSub"),
+  entryBar: document.getElementById("entryBar"),
   linkInput: document.getElementById("linkInput"),
   checkBtn: document.getElementById("checkBtn"),
   newCheckBtn: document.getElementById("newCheckBtn"),
@@ -334,6 +335,10 @@ function applyDevice(next) {
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
   if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
   syncDrawerInert();
+  // A resize/rotate can cross the phone breakpoint while the landing card is on screen —
+  // widening out of phone width should hand the composer back to its dock, narrowing into
+  // it should embed it, and neither should wait for the next unrelated re-render to notice.
+  syncLandingComposer();
 }
 
 function isDrawerOpen() {
@@ -1509,10 +1514,151 @@ function landingMarkup() {
       </div>
       ${brandHudMarkup()}
       <p class="claim-empty-text">Paste a link or ask a question to get started.</p>
+      <!-- Phone only (see .landing-entry in index.html) — syncLandingComposer moves the
+           real composer into this slot right under the HUD, matching the DS's "Mobile
+           Landing" entry-block, instead of leaving it docked a full screen-height below.
+           Empty here on purpose: the composer is a live node with real listeners, so it's
+           moved in by JS after this markup lands, never re-created from a string. -->
+      <div class="landing-entry" id="landingEntrySlot">
+        <h2 class="landing-entry-title">Paste a link or ask anything</h2>
+        <p class="landing-entry-sub">Get a clear, evidence-based answer in seconds.</p>
+      </div>
       <div class="landing-actions">${actions}</div>
       <div class="landing-features">${features}</div>
       <div class="landing-footer-line">Curiosity leads to a brighter tomorrow.</div>
     </div>`;
+}
+
+/**
+ * On a phone, before any check has run, the real composer (`el.entryBar`) lives inside
+ * `#landingEntrySlot` — a child of the landing card `landingMarkup` just rendered — rather
+ * than at its normal dock (`#entryBarDock`, a static marker right before it in index.html).
+ * Desktop/tablet never embed it: nothing there was reported broken, and the composer
+ * staying reachable without scrolling at those widths is an existing, deliberate property
+ * (see `.entry-bar`'s own "Desktop/tablet" comment) this isn't meant to touch.
+ *
+ * Called after every render that could have changed either the device kind or which markup
+ * is on screen (`applyDevice`, and `renderChatPane`'s empty branch) so the composer is never
+ * left stranded on the wrong side of a device-kind change or a check starting. Moving the
+ * real node (not a clone) is what keeps it a single composer with one set of listeners and
+ * one focus/value state instead of two copies to keep in sync.
+ */
+function syncLandingComposer() {
+  const slot = device.kind === "phone" ? document.getElementById("landingEntrySlot") : null;
+  if (slot) {
+    if (el.entryBar.parentElement !== slot) slot.appendChild(el.entryBar);
+    return;
+  }
+  const dock = document.getElementById("entryBarDock");
+  if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+}
+
+/**
+ * Every place that replaces the claims pane's whole subtree funnels through here instead of
+ * writing `el.claimsPane.innerHTML =` directly, for one reason: on a phone, mid-landing,
+ * `el.entryBar` can currently be *inside* that subtree (`syncLandingComposer` put it there).
+ * `innerHTML =` detaches and destroys whatever was in there — including a live node with a
+ * typed value, focus, and every listener bound to it — so the composer has to be back at its
+ * dock before that happens, not after. A no-op when it wasn't embedded to begin with.
+ *
+ * `flyEntryBarHome` (below) is the animated version of the same move, for the one call site
+ * (`playLandingExit`) that wants a flight instead of a snap; by the time it hands off to
+ * `runCheck`'s own render calls, the composer is already back at its dock, so this is simply
+ * a no-op for that path rather than a competing move.
+ */
+function setClaimsPaneHTML(html) {
+  const dock = document.getElementById("entryBarDock");
+  if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+  el.claimsPane.innerHTML = html;
+}
+
+/**
+ * The composer's half of the "Chat to shell" shared-element flight: `fromRect` is where it
+ * was actually sitting (read off the real DOM by the caller, right before this runs), and
+ * this redocks it, measures where that landed, and paints it straight back at `fromRect`
+ * with a transform — then lets that transform animate to none. A real flight between two
+ * real, measured positions, not the TRASE Design System demo's scripted coordinates.
+ */
+function flyEntryBarHome(fromRect) {
+  const dock = document.getElementById("entryBarDock");
+  if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+  const toRect = el.entryBar.getBoundingClientRect();
+  const dx = fromRect.left - toRect.left;
+  const dy = fromRect.top - toRect.top;
+  const sx = toRect.width ? fromRect.width / toRect.width : 1;
+  if (!dx && !dy && sx === 1) return;
+  el.entryBar.style.transition = "none";
+  el.entryBar.style.transformOrigin = "top left";
+  el.entryBar.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, 1)`;
+  // Forces the browser to paint that starting transform before the next one is queued —
+  // otherwise both writes can coalesce into a single frame and there is nothing to animate
+  // between.
+  void el.entryBar.offsetWidth;
+  requestAnimationFrame(() => {
+    el.entryBar.style.transition = "transform 0.5s cubic-bezier(.2,.8,.3,1)";
+    el.entryBar.style.transform = "none";
+  });
+  el.entryBar.addEventListener(
+    "transitionend",
+    () => {
+      el.entryBar.style.transition = "";
+      el.entryBar.style.transformOrigin = "";
+      el.entryBar.style.transform = "";
+    },
+    { once: true },
+  );
+}
+
+const ANALYZING_STEPS = ["Fetching the source", "Extracting claims", "Matching evidence"];
+
+/** Creates (once) the frosted scan-ring overlay used to bridge the shared-element flight —
+ * see `showAnalyzingOverlay`/`hideAnalyzingOverlay`. A single node appended to `<body>`
+ * rather than anywhere in the claims pane, so `setClaimsPaneHTML` rebuilding what's under it
+ * never touches it. */
+function analyzingOverlayEl() {
+  let overlay = document.getElementById("analyzingOverlay");
+  if (overlay) return overlay;
+  overlay = document.createElement("div");
+  overlay.id = "analyzingOverlay";
+  overlay.className = "analyzing-overlay";
+  overlay.setAttribute("aria-hidden", "true");
+  const steps = ANALYZING_STEPS.map(
+    (label, i) => `<div class="analyzing-step" data-step="${i}"><span class="analyzing-step-dot"></span>${escapeHTML(label)}</div>`,
+  ).join("");
+  overlay.innerHTML = `
+    <div class="analyzing-scan"><div class="analyzing-scan-core"></div></div>
+    <div class="analyzing-target" id="analyzingTarget"></div>
+    <div class="analyzing-steps">${steps}</div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+/**
+ * The TRASE Design System's "Chat to shell"/"Mobile Landing to Shell" analyzing beat: a
+ * frosted scan ring and a 3-step list, shown for the real (short, fixed-duration) span of
+ * the shared-element flight rather than the DS demo's scripted ~2.4s hold. There is no
+ * backend signal yet when this shows — the request hasn't even been sent — so unlike the
+ * demo, only the first step is ever marked active here; the second and third stay dim. The
+ * real per-stage progress (`dialVariant`/`stageText`) takes over inside the running card's
+ * own dial the moment this overlay fades out (`hideAnalyzingOverlay`, called from
+ * `runCheck`), which is honest about what this app can and can't tell the reader before a
+ * single byte has come back.
+ */
+function showAnalyzingOverlay(target) {
+  const overlay = analyzingOverlayEl();
+  document.getElementById("analyzingTarget").textContent = target ?? "";
+  overlay.querySelectorAll(".analyzing-step").forEach((stepEl, i) => {
+    stepEl.classList.toggle("active", i === 0);
+    stepEl.classList.remove("done");
+  });
+  overlay.classList.add("on");
+}
+
+/** Safe to call whether or not the overlay was ever shown — `showAnalyzingOverlay` is
+ * skipped entirely under reduced motion (see `playLandingExit`), and this is still called
+ * unconditionally from `runCheck` right after. */
+function hideAnalyzingOverlay() {
+  document.getElementById("analyzingOverlay")?.classList.remove("on");
 }
 
 /**
@@ -2104,10 +2250,13 @@ function renderChatPane({ newest = -1 } = {}) {
     // The TRASE Design System's "App shell — Landing" screen, which is what this app looks
     // like before anything has been pasted: no video column (see `updatePaneMode`), one card
     // filling the pane, and in it the full landing composition (`landingMarkup`).
-    el.claimsPane.innerHTML = `<div class="claim-card claim-empty">${landingMarkup()}</div>`;
+    setClaimsPaneHTML(`<div class="claim-card claim-empty">${landingMarkup()}</div>`);
+    // The markup above is on screen now, `#landingEntrySlot` included — this is what
+    // actually moves the real composer into it on a phone (see `syncLandingComposer`).
+    syncLandingComposer();
     return;
   }
-  el.claimsPane.innerHTML = `<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`;
+  setClaimsPaneHTML(`<div class="claim-card"><div class="thread chat-thread">${settled}${pending}</div></div>`);
   // Each answer's own markup carries `data-reveal` (see chatThreadHTML/revealAttrs) rather
   // than a baked-in `.in` class, same as renderResultCard's — so it needs the same call to
   // actually fade in instead of sitting at the `opacity: 0` `.claim-text`/`.thread-a` starts
@@ -2890,7 +3039,7 @@ function renderRunningCard() {
   setClaimsGridMode(null);
   // `run-enter`: the "Chat to shell" arrival beat (index.html's own comment on `.run-enter`
   // explains why it's safe to always apply — this function only ever runs once per check).
-  el.claimsPane.innerHTML = `
+  setClaimsPaneHTML(`
     <div class="claim-card run-enter">
       <div class="card-loading">
         ${irisMarkup()}
@@ -2900,7 +3049,7 @@ function renderRunningCard() {
         <div class="mini-progress wide"><div class="mini-progress-bar" id="runProgressBar"></div></div>
         <div class="live-sources" id="runSources"></div>
       </div>
-    </div>`;
+    </div>`);
   refreshTimeline();
   runProgress.start();
   runElapsed.start();
@@ -3161,14 +3310,15 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
   // only the settled one, matching the DS's "Chat to shell" screen.
-  el.claimsPane.innerHTML =
+  setClaimsPaneHTML(
     summaryCardHTML(claims) +
-    claimGridStatusHTML(stage) +
-    claims
-      .map((claim, i) =>
-        loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
-      )
-      .join("");
+      claimGridStatusHTML(stage) +
+      claims
+        .map((claim, i) =>
+          loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
+        )
+        .join(""),
+  );
   revealIn(el.claimsPane);
   refreshTimeline();
   runProgress.resync();
@@ -3259,12 +3409,12 @@ function errorCardText(message) {
 
 function renderErrorCard(entry) {
   setClaimsGridMode(null);
-  el.claimsPane.innerHTML = `
+  setClaimsPaneHTML(`
     <div class="claim-card" role="alert">
       <div class="eyebrow">Check failed</div>
       <p class="claim-text in">${escapeHTML(errorCardText(entry.error))}</p>
       <button type="button" class="retry-button" id="retryBtn">Try again</button>
-    </div>`;
+    </div>`);
   refreshTimeline();
   document.getElementById("retryBtn")?.addEventListener("click", () => runCheck(entry.url, entry.id));
 }
@@ -3766,11 +3916,12 @@ function updateSummaryCard(claims) {
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
     setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
-    el.claimsPane.innerHTML =
-      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup);
+    setClaimsPaneHTML(
+      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
+    );
   } else {
     setClaimsGridMode(null);
-    el.claimsPane.innerHTML = `
+    setClaimsPaneHTML(`
     ${linkBubbleHTML(entry)}
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
@@ -3781,7 +3932,7 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       ${actionRowHTML(entry.id, null)}
       ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
-    </div>`;
+    </div>`);
   }
   fillLinkBubbleIcon(entry, el.claimsPane);
   revealIn(el.claimsPane);
@@ -4045,17 +4196,29 @@ let pendingMediaReveal = false;
  * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
  * if the claims pane is still showing the landing card when a check begins, let it visibly
  * leave first — the whole card fades and scales back, the brand HUD's four pills fly
- * outward on top of that (`.claim-empty.leaving` in index.html) — rather than snapping
- * straight to the running card. A no-op once a check is already under way (nothing to
+ * outward on top of that (`.claim-empty.leaving` in index.html), the analyzing overlay
+ * fades in over it (`showAnalyzingOverlay`), and — on a phone, where the composer is
+ * currently embedded in the landing card rather than docked (`syncLandingComposer`) — the
+ * real composer flies back to its dock (`flyEntryBarHome`) instead of just snapping there
+ * the instant the card is torn down. A no-op once a check is already under way (nothing to
  * transition away from — a follow-up, a re-run, a retry) or under reduced motion, where the
  * running card's own entrance is left to carry "something happened" on its own.
  */
-async function playLandingExit() {
+async function playLandingExit(url) {
   const empty = el.claimsPane.querySelector(".claim-card.claim-empty");
   if (!empty || prefersReducedMotion()) return;
   pendingMediaReveal = true;
+  showAnalyzingOverlay(url);
   empty.classList.add("leaving");
   await new Promise((resolve) => setTimeout(resolve, 320));
+
+  // Measured now, at the exact moment the card it's embedded in is about to be torn down —
+  // not before the fade above, whose own `transform: scale(...)` would have made an earlier
+  // reading slightly wrong (`getBoundingClientRect` reflects the rendered, post-transform
+  // box). `runCheck`'s own render calls redock it a moment later regardless (see
+  // `setClaimsPaneHTML`); this is only what turns that redock into a flight.
+  const embedded = device.kind === "phone" && el.entryBar.parentElement?.id === "landingEntrySlot";
+  if (embedded) flyEntryBarHome(el.entryBar.getBoundingClientRect());
 }
 
 /**
@@ -4076,7 +4239,7 @@ async function runCheck(url, existingId, hint) {
   el.checkBtn.disabled = true;
   el.newCheckBtn.disabled = true;
 
-  await playLandingExit();
+  await playLandingExit(url);
 
   const id = existingId ?? crypto.randomUUID();
   const prompt = composeCheckPrompt(url);
@@ -4119,6 +4282,12 @@ async function runCheck(url, existingId, hint) {
   }
   renderRunningCard();
   updateComposerMode();
+  // The running card's own dial (just mounted, real stage-driven) is what takes over the
+  // "still working" narrative from here — see `showAnalyzingOverlay`'s own comment for why
+  // the overlay itself never has more than "Fetching the source" to say. Safe to call
+  // unconditionally: a no-op if the overlay was never shown (reduced motion, or a
+  // follow-up/retry with no landing card to leave in the first place).
+  setTimeout(hideAnalyzingOverlay, 260);
 
   const image = pendingImage;
   clearPendingImage();
