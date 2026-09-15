@@ -2769,6 +2769,11 @@
      wordmark — it reserves the row's free space so the settings button downstream of it
      stays packed against the trailing edge. */
   .topbar-meta { min-width: 0; margin-right: auto; }
+  /* Both phone-only (see the phone breakpoint, where one of the two is shown depending on
+     whether there is media under the bar). Hidden here rather than only shown there so a
+     tablet or desktop never paints either one for a frame. */
+  .topbar-brand { display: none; }
+  .media-title-block { display: none; }
   .topbar-title {
     font-family: var(--font-display); font-size: 13.5px; font-weight: 600; line-height: 1.25;
     background: linear-gradient(120deg, var(--ink) 30%, var(--accent) 85%);
@@ -2868,7 +2873,10 @@
          are lifted out of the flow so the strip is nothing but media. */
       position: relative;
       flex: 0 0 auto;
-      height: 24vh;
+      /* The DS's own 32vh, not the 24 this used to be: the bar and the check's title now
+         both live on this strip (see `[data-pane="split"] .topbar`), and at 24vh they had
+         the media pinched between them with nothing of the clip left to see. */
+      height: 32vh;
       padding: 0; margin: 0; border: 0; border-radius: 0;
       background: #000;
       overflow: hidden;
@@ -2939,10 +2947,95 @@
        *is* the evidence being read. */
     .video-thumb .video-media { object-fit: contain; }
 
+    /* ---------- The bar over the media, from "App shell — Mobile" ----------
+       With a clip on screen the top bar is not a bar: it floats over the media, its two
+       controls frosted so they read against whatever frame is behind them, and it carries
+       the app's mark and tagline rather than the check's title — the title has a better
+       home on the media's own bottom edge (`.media-title-block`). Taking it out of flow is
+       what lets the strip start at the top of the screen, which is the composition the DS
+       draws; `data-pane` (set by `updatePaneMode` in app.js) is how this knows there is a
+       strip to float over, since the bar is a sibling *before* the grid and cannot ask it.
+
+       The settings button is the one addition to the DS's row: this bar is the only place
+       on a phone it can live, so it gets the same frosted treatment as the drawer handle
+       rather than being dropped to stay verbatim. */
+    [data-pane="split"] .topbar {
+      position: absolute; top: 0; left: 0; right: 0; z-index: 4;
+      /* Right padding clears the expand chevron, which keeps the top-right corner the DS
+         gives it (see `.media-expand-btn`) — the brand line ellipsises before it reaches. */
+      padding: 12px 56px 12px 14px;
+      background: transparent;
+      border-bottom: 0;
+    }
+    /* Settings moves to sit beside the drawer handle rather than at the far right, which is
+       the chevron's. The DS's row has no settings button to place — this is the one thing
+       added to it, and putting it here is what keeps the rest of the row's geometry the
+       DS's own instead of fighting the control that was already in that corner. */
+    [data-pane="split"] .topbar .drawer-toggle { order: 0; }
+    [data-pane="split"] .topbar .settings-btn { order: 1; }
+    [data-pane="split"] .topbar-brand { order: 2; margin-right: auto; }
+    [data-pane="split"] .topbar::before { content: none; }
+    [data-pane="split"] .topbar .drawer-toggle,
+    [data-pane="split"] .topbar .settings-btn {
+      background: rgba(10,12,16,0.4);
+      backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: #fff;
+    }
+    [data-pane="split"] .topbar-meta { display: none; }
+    [data-pane="split"] .topbar-brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .topbar-brand-mark { width: 20px; height: 20px; flex-shrink: 0; }
+    .topbar-brand-mark svg { width: 100%; height: 100%; display: block; }
+    .topbar-brand-col { min-width: 0; }
+    .topbar-brand-name { font-family: var(--font-display); font-size: 14px; font-weight: 600; color: #fff; line-height: 1.2; }
+    .topbar-brand-tagline {
+      font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.03em;
+      color: rgba(255,255,255,0.65);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* What makes white text over an unknown frame readable, and the reason the title block
+       can be plain text rather than a plate: a dark wash at both ends of the strip, heavier
+       at the bottom where the title is. The DS puts this on its own `.video-thumb`. Under
+       the controls and the title (z-index 1) but over the media itself. */
+    [data-pane="split"] .video-thumb::after {
+      content: "";
+      position: absolute; inset: 0; z-index: 1;
+      pointer-events: none;
+      background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.15) 50%, rgba(0,0,0,0.35) 100%);
+    }
+    [data-pane="split"] .media-title-block {
+      display: block;
+      position: absolute; left: 0; right: 0; bottom: 18px; z-index: 2;
+      padding: 16px 16px 14px;
+      pointer-events: none;
+    }
+    .media-title {
+      font-family: var(--font-display); font-size: 19px; line-height: 1.25; font-weight: 700;
+      color: #fff; margin: 0 0 6px;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.4);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      /* Until a post resolves, this line *is* the pasted URL — one unbreakable token, which
+         a line clamp will happily run off the side of the screen rather than wrap. Same
+         reasoning as `.claim-title`'s own `word-break`. */
+      overflow-wrap: anywhere;
+    }
+    .media-sub {
+      font-size: 11px; color: rgba(255,255,255,0.75);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Expanded, the clip is the screen: the DS drops both the bar's brand row and the title
+       block so nothing is laid over a video the reader has just asked to see more of. The
+       two frosted controls stay — they are the way back. */
+    [data-media="expanded"] .topbar-brand,
+    [data-media="expanded"] .media-title-block { display: none; }
+    /* The link chip sat above the control bar to clear it; with a title block on the same
+       edge it would collide with the subtitle instead, so it moves up over it. */
+    [data-pane="split"] .video-link { bottom: auto; top: 58px; }
+
     /* Trades sheet height for video height. Sits over the media rather than in the flow —
-       the strip is 24vh and has no room for a control row of its own. */
+       the strip has no room for a control row of its own. */
     .media-expand-btn {
-      position: absolute; top: 10px; right: 10px; z-index: 2;
+      position: absolute; top: 12px; right: 12px; z-index: 5;
       width: 32px; height: 32px;
       display: flex; align-items: center; justify-content: center;
       border-radius: 50%;
@@ -3465,6 +3558,20 @@
              more than they need to be told which app they are in. `updateShellTopbar` in
              app.js fills both this and the desktop `.shell-topbar` from the same entry,
              and falls back to "New check" here when nothing is selected. -->
+        <!-- Two things can be in this row, and which one depends on whether there is a
+             clip on screen under it. With one (the DS's "App shell — Mobile"), the bar
+             floats over the media and carries the app's own mark and tagline, while the
+             check's title sits on the media's bottom edge in `.media-title-block` below —
+             the title belongs to the picture it names. With no clip (a page check, a plain
+             conversation, the idle shell) there is nothing to float over and nothing to put
+             a title on, so the bar goes back to being a bar and names the check itself. -->
+        <div class="topbar-brand" aria-hidden="true">
+          <span class="topbar-brand-mark"><svg viewBox="0 0 64 64" fill="none" aria-hidden="true"><circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/><line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/><circle cx="32" cy="32" r="6" fill="var(--accent)"/><rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/></svg></span>
+          <div class="topbar-brand-col">
+            <div class="topbar-brand-name">Trase</div>
+            <div class="topbar-brand-tagline">See the facts. Think deeper.</div>
+          </div>
+        </div>
         <div class="topbar-meta">
           <div class="topbar-title" id="topbarTitle">New check</div>
           <div class="topbar-sub" id="topbarSub">Paste a link to get started</div>
@@ -3511,6 +3618,16 @@
                     aria-label="Expand video" aria-expanded="false" title="Expand video">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
+
+            <!-- Phone only, and only with a clip to sit on: the DS's mobile shell titles the
+                 check over the bottom of its own media rather than in a bar above it, white
+                 on the gradient `.video-thumb::after` lays down for exactly this. Filled by
+                 `updateShellTopbar` (app.js) from the same entry as every other title line,
+                 and hidden with the top bar's brand row while the video is expanded. -->
+            <div class="media-title-block" aria-hidden="true">
+              <div class="media-title" id="mediaTitle"></div>
+              <div class="media-sub" id="mediaSub"></div>
+            </div>
 
             <!-- Ported from the TRASE Design System's VideoPlayer: a tap-anywhere overlay
                  (center play icon, hidden while playing — see the `play`/`pause` listeners

@@ -2209,7 +2209,13 @@ function statusLabel(entry) {
  */
 function updatePaneMode() {
   const entry = selectedId ? findEntry(selectedId) : null;
-  el.contentGrid.classList.toggle("single-pane", !entry || !entry.url);
+  const single = !entry || !entry.url;
+  el.contentGrid.classList.toggle("single-pane", single);
+  // The same fact on <html>, because the phone's top bar needs it and cannot ask for it:
+  // that bar is a sibling *before* the grid, so no selector reaches from the grid's own
+  // class to it, and with a clip on screen the bar floats over the media instead of sitting
+  // above it (see `[data-pane="split"]` in index.html).
+  document.documentElement.dataset.pane = single ? "single" : "split";
   updateShellTopbar(entry);
 }
 
@@ -2249,6 +2255,10 @@ function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
     el.topbarTitle.removeAttribute("title");
     setStatusText("topbarTitle", "New check");
     setStatusText("topbarSub", "Paste a link to get started");
+    // Nothing selected means nothing on the media edge either — and no media to put it on,
+    // since `updatePaneMode` has just made this the single-pane view.
+    setStatusText("mediaTitle", "");
+    setStatusText("mediaSub", "");
     return;
   }
   el.shellTopbar.hidden = false;
@@ -2263,6 +2273,11 @@ function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
   setStatusText("topbarTitle", entry.title);
   el.topbarTitle.title = entry.title;
   setStatusText("topbarSub", subtitle);
+  // The phone's third copy of the same two lines: over the media's bottom edge, which is
+  // where the DS's mobile shell names the check. Only one of it and `.topbar-meta` is ever
+  // on screen (see `[data-pane="split"]`), so this is not two titles at once.
+  setStatusText("mediaTitle", entry.title);
+  setStatusText("mediaSub", subtitle);
 }
 
 /**
