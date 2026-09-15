@@ -1462,6 +1462,10 @@
      can afford them, and the DS draws them that way for the same reason. The composition is
      deliberately not the "New chat" hero at a bigger size — see `.newchat-hero` below. */
   .landing {
+    /* One number sets the brand mark's size and, through it, how far the entry block
+       reaches back over it — see `.landing-hud` and `.landing-entry` below. Lives here
+       rather than on the HUD so both can read it. */
+    --hud-scale: 1.204;
     display: flex; flex-direction: column;
     flex: 1 1 auto; min-height: 0; width: 100%;
   }
@@ -1539,7 +1543,6 @@
      whole mark keeps one set of ring numbers true and the proportions with them; the
      wrapper carries the height, because a transform doesn't reserve any. */
   .landing-hud {
-    --hud-scale: 1.204;
     margin-top: 30px;
     height: calc(220px * var(--hud-scale));
     display: flex; justify-content: center;
@@ -1551,9 +1554,20 @@
   .landing-entry {
     display: flex; flex-direction: column; align-items: stretch;
     width: 100%; max-width: 560px;
-    margin-top: 28px; padding: 26px;
+    padding: 26px;
     border-radius: 18px;
     background: var(--surface); border: 1px solid var(--border);
+    /* Rides slightly over the brand mark rather than sitting in a column below it. Two
+       parts, so the overlap stays honest at any scale: `24px * var(--hud-scale)` cancels
+       the empty strip at the bottom of the HUD's own box (its box is 220 tall for a 196
+       cluster — see `.brand-hud`), which is dead space, not design; the 12px after it is
+       the actual bite taken out of the rings. The lower pills end well above that, so the
+       card overlaps the outer ring's bottom arc and never the pills themselves.
+
+       `position: relative` + `z-index` because the pills are absolutely positioned, and
+       would otherwise paint over this card's opaque background instead of under it. */
+    position: relative; z-index: 1;
+    margin-top: calc(-24px * var(--hud-scale) - 12px);
   }
   .landing-entry-title {
     font-family: var(--font-display); font-size: 22px; font-weight: 600; color: var(--ink);
@@ -1615,9 +1629,10 @@
     .brand-mark { width: 44px; height: 44px; margin-bottom: 10px; }
     .landing-wordmark { font-size: 32px; }
     .landing-tagline { font-size: 11px; margin-top: 10px; }
-    /* One number, and the wrapper's height follows it — see `.landing-hud` above. */
-    .landing-hud { --hud-scale: 1.035; margin-top: 24px; }
-    .landing-entry { margin-top: 20px; padding: 18px 16px; border-radius: 16px; }
+    /* One number, and both the wrapper's height and the entry block's overlap follow it. */
+    .landing { --hud-scale: 1.035; }
+    .landing-hud { margin-top: 24px; }
+    .landing-entry { padding: 18px 16px; border-radius: 16px; }
     .landing-entry-title { font-size: 17px; }
     .landing-entry-sub { font-size: 11.5px; margin-bottom: 14px; }
     .landing-actions, .landing-features { max-width: 100%; }

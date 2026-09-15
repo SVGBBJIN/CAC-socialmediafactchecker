@@ -533,3 +533,55 @@ tuned version of the same mark (see the `VerdictBadge`/`tokens.css` entries far 
 the pattern). If the DS's looser pill placement was intentional rather than an artifact of
 its wrap height, this is the wrong call and the fix is to widen `.brand-hud`'s pill offsets
 proportionally instead of the whole mark.
+
+## Same session — the entry block rides over the brand mark
+
+"Can we fix the landing pages to have the same overlay effect as they do in the DS" — which,
+after asking, meant: **the entry bar should sit slightly on top of the Matrix**, not in a
+column below it. Worth recording that the first three guesses were all wrong (the page's
+radial glow, the hero's missing phone gradient, the Matrix→MatrixLoader morph overlay), and
+that ruling them out was cheap while guessing would not have been: DS `tokens.css` is
+byte-identical to the product's `:root` on every colour, `styles.css` is nothing but
+`@import`s, and `Matrix.css` has no overlay of any kind. The glow was already there and
+correct.
+
+`.landing-entry`'s `margin-top` is now negative, in two named parts so the overlap stays
+honest at any scale:
+
+    margin-top: calc(-24px * var(--hud-scale) - 12px);
+
+- `24px * var(--hud-scale)` cancels the empty strip at the bottom of `.brand-hud`'s own box
+  (220 tall for a 196 cluster). That strip is slack in the mark's box, not design, and it was
+  the bulk of the **81px** that sat between the lower pills and the card.
+- The `12px` after it is the real overlap — the bite taken out of the outer ring's bottom
+  arc. Measured: the card's top lands 12px inside the rings at both breakpoints, and the
+  Facts/Clarity pills end 12px (desktop) / 9px (phone) *above* the card edge, so the overlap
+  only ever eats ring, never a pill.
+- `position: relative; z-index: 1`, because the pills are absolutely positioned and would
+  otherwise paint over the card's opaque background instead of disappearing behind it —
+  which is the whole effect.
+
+`--hud-scale` moved from `.landing-hud` up to `.landing` so the entry block can read the
+same number the mark is sized by. One value per breakpoint still (1.204 / 1.035) and the
+overlap follows it.
+
+**Also settled, retroactively**: the previous section's self-critique flagged that scaling
+the mark rather than reproducing the desktop card's literal 280x340 box might be the wrong
+call. It isn't. `cards/Screens-App Shell-Mobile-Landing.html` wraps `<Matrix />` in a
+**240x222** box, and `components/Matrix.css` is a 236x220 wrap around a 196 cluster with
+pills at `top:0`/`top:150` — i.e. exactly `.brand-hud`. Two of the DS's three landing-ish
+screens use the tuned component; only the desktop Landing card hand-rolls the larger, looser
+variant. The product now agrees with the majority, and the 280x340 box reads as that one
+card's own artifact.
+
+**Verification.** Per-block measurement again on both breakpoints — the card's top against
+the cluster's bottom and against each pill's bottom, which is the pair of numbers that says
+whether an overlap is deliberate or a collision. `npm test` — 629/629 — and the exit
+transition re-run from both screens, since the new `z-index` sits inside the subtree
+`.landing.leaving` fades.
+
+**Self-critique.** The 12px bite is a taste value with nothing behind it but that it looks
+deliberate at both breakpoints; it is the one number here a reader could reasonably want
+different, and it is a single edit. And the overlap is landing-only by nature — the "New
+chat" hero's composer is docked at the window's bottom edge, nowhere near its mark, so
+there is nothing there to overlap and that screen is unchanged.
