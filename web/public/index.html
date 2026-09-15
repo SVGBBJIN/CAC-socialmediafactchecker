@@ -514,11 +514,30 @@
     cursor: pointer;
   }
   .entry-bar #checkBtn:hover { filter: brightness(1.08); }
+  /* Running: the submit button is a stop button. Flat surface rather than the gradient —
+     it is no longer the affirmative action in the row — and the square is the shape
+     everything else that streams text uses for this, so it needs no label to be read. */
+  #checkBtn .stop-btn-icon { display: none; }
+  #checkBtn[data-mode="stop"] .check-btn-icon { display: none; }
+  #checkBtn[data-mode="stop"] .stop-btn-icon { display: block; }
+  .entry-bar #checkBtn[data-mode="stop"] {
+    background: var(--surface-raised);
+    border-color: var(--border);
+    color: var(--ink);
+  }
+  .entry-bar #checkBtn[data-mode="stop"]:hover { filter: none; border-color: var(--bad); color: var(--bad); }
+  /* A stop button that is disabled is a trap: the reader is watching something happen and
+     the one control that ends it is greyed out. It stays live for the whole turn — every
+     `disabled` the run paths used to set is now `setComposerRunning`'s business. */
+  .entry-bar #checkBtn[data-mode="stop"]:disabled { opacity: 1; cursor: pointer; }
   .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .entry-bar button:disabled { opacity: 0.5; cursor: default; }
   /* Dark ink on the gradient, the one place in the app where text sits *on* the accent
      rather than in it — `currentColor` on the glyph would otherwise inherit teal on teal. */
   .check-btn-icon { display: block; width: 18px; height: 18px; color: #06201d; }
+  /* `currentColor`, unlike the glyph above: the stop button is not on the gradient, so it
+     takes the button's own ink (and the `--bad` it turns on hover). */
+  .stop-btn-icon { width: 18px; height: 18px; color: currentColor; }
   .check-btn-label {
     position: absolute; width: 1px; height: 1px;
     overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
@@ -3747,11 +3766,20 @@
              EntryBar, where the submit button carries the same dashed-ring-and-dot logo as
              the sidebar's wordmark (Sidebar.jsx) rather than a generic checkmark glyph
              every other "confirm" button in the app could equally use. -->
+        <!-- One button, two jobs. While a turn is running it is the way to end it (
+             `data-mode="stop"`, set by `setComposerRunning` in app.js) — the same place the
+             reader just pressed to start it, which is where they look to take it back. The
+             two glyphs are both here rather than swapped in as markup so the switch is a
+             CSS toggle on an element that never leaves the DOM: no reflow of the composer
+             row, and no losing focus mid-turn for anyone driving this from the keyboard. -->
         <button type="button" id="checkBtn">
           <svg class="check-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <circle cx="12" cy="12" r="7.5" stroke="currentColor" stroke-width="1.8" stroke-dasharray="9 2 9 2" stroke-linecap="round"/>
             <circle cx="12" cy="12" r="2" fill="currentColor"/>
             <rect x="15.3" y="10.6" width="1.8" height="2.8" rx="0.5" fill="var(--accent-2)"/>
+          </svg>
+          <svg class="stop-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="7.5" y="7.5" width="9" height="9" rx="1.5" fill="currentColor"/>
           </svg>
           <span class="check-btn-label">Check</span>
         </button>

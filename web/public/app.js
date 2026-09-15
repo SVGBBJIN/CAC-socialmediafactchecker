@@ -246,6 +246,30 @@ const startedFresh = resumedFresh();
 // the "New chat" hero for one that has one.
 let selectedId = startedFresh ? null : (library[0]?.id ?? null);
 let inFlight = null;
+
+let stopRequested = false;
+
+/**
+ * Which of the three kinds of turn is running: "check", "chat" or "followup", or null.
+ *
+ * Only `startNewCheck` asks, and only for one reason — see its own comment. A check writes
+ * into a library entry and guards every draw on still being the selected one, so clearing
+ * the pane leaves it running happily. A chat or a follow-up writes into the pane's own
+ * conversation state, which is exactly what "new chat" throws away, so those are stopped
+ * rather than left writing into a thread that no longer exists.
+ */
+let inFlightKind = null;
+
+/**
+ * What a turn the reader stopped says afterwards.
+ *
+ * Deliberately in the same place a failure's message goes rather than a status of its own:
+ * the two want the identical treatment from every part of the app that reads one — the
+ * sidebar row, the pane, the "Try again" button — and they differ only in the sentence.
+ * Naming it as something the reader did, not something that went wrong, is the whole
+ * difference between the two.
+ */
+const STOPPED_MESSAGE = "Stopped.";
 // Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
 // videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
 // lib/tiktok.js and lib/instagram.js), so caching it in localStorage would just persist a
@@ -2186,7 +2210,11 @@ function boltIcon() {
 
 function statusLabel(entry) {
   if (entry.status === "running") return "Checking…";
-  if (entry.status === "error") return "Failed";
+  // A stopped turn is carried as an error (see `runCheck`'s abort branch — the two want
+  // identical treatment everywhere except the sentence), so this is the one place that has
+  // to tell them apart: "Failed" for a turn that broke, the reader's own word for a turn
+  // they ended.
+  if (entry.status === "error") return entry.error === STOPPED_MESSAGE ? "Stopped" : "Failed";
   if (!entry.url) return entry.turns.length === 1 ? "1 message" : `${entry.turns.length} messages`;
   // Same reasoning as `verdictHTML`: an incomplete turn that never reached a verdict must
   // not be filed in the library under one. "Unclassified" would be a truthful label and a
@@ -2575,8 +2603,9 @@ async function runChat(question) {
 
   const controller = new AbortController();
   inFlight = controller;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  inFlightKind = "chat";
+  stopRequested = false;
+  setComposerRunning(true);
   let settled = false;
 
   try {
@@ -2632,7 +2661,9 @@ async function runChat(question) {
     renderLibrary(el.searchInput.value);
   } catch (error) {
     if (error.name === "AbortError") {
-      pendingChat = null;
+      // Kept, not dropped: the reader stopped the answer, not the question, and throwing
+      // their typing away is a worse outcome than the one they asked for.
+      pendingChat = { question, error: STOPPED_MESSAGE };
       return;
     }
     // Left as the pending item, with its error — not pushed into `chatThread`, since a
@@ -2643,8 +2674,8 @@ async function runChat(question) {
     chatElapsed.stop();
     if (settled) pendingChat = null;
     inFlight = null;
-    el.checkBtn.disabled = false;
-    el.newCheckBtn.disabled = false;
+    inFlightKind = null;
+    setComposerRunning(false);
     // True both before any turn has ever been saved (selectedId still null) and once one
     // has (selectedId now names the chat entry `runChat` just filed — see above), since
     // neither carries a `url`; false only if the reader switched to a real check mid-flight,
@@ -2661,8 +2692,26 @@ async function runChat(question) {
  * screen only works by remembering the no-space rule; this makes it a single click that
  * needs no rule at all.
  */
+/**
+ * Clears the pane back to the idle screen. No longer refuses while a check is running: a
+ * turn in flight writes only into the pane it started in, and every one of its callbacks
+ * already asks `selectedId === id` (or addresses a node by id that this render has just
+ * taken off the screen) before drawing anything — so the check carries on in the
+ * background, keeps its row in the sidebar saying "Checking…", and lands there when it is
+ * done. Which is what the button appeared to promise all along; refusing the click was the
+ * app protecting an invariant it had already stopped depending on.
+ *
+ * The composer stays a stop button throughout, because the running turn is still the turn
+ * this app is running — one at a time is still the rule, and it is now visible in the one
+ * control that would otherwise start a second.
+ */
 function startNewCheck() {
-  if (inFlight) return; // Same guard as switching library items mid-run.
+  // The one turn that cannot simply be left running: a chat or a follow-up writes into
+  // `chatThread`/`pendingFollowup`, which is the pane state this function is about to
+  // clear, so it would finish by drawing the conversation the reader just left on top of
+  // the blank screen they asked for. A check has a library entry of its own and draws
+  // nothing while it isn't selected, so it is left alone — see this function's own note.
+  if (inFlight && inFlightKind !== "check") stopRun();
   // "New chat" lives inside the drawer on a phone, and it hands focus to the composer
   // behind it — so the drawer has to be out of the way before that focus call lands.
   closeDrawer({ restoreFocus: false });
@@ -4954,8 +5003,9 @@ async function runCheck(url, existingId, hint) {
   // AbortController is created further down. Overwritten with that controller once it
   // exists; every other reader of `inFlight` only ever checks it for truthiness.
   inFlight = true;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  inFlightKind = "check";
+  stopRequested = false;
+  setComposerRunning(true);
 
   await playLandingExit(url);
 
@@ -5020,8 +5070,13 @@ async function runCheck(url, existingId, hint) {
 
   const controller = new AbortController();
   inFlight = controller;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  // Deliberately not resetting `stopRequested` here, unlike every other run path: the
+  // window this check has just spent leaving the landing screen is one the reader could
+  // have pressed stop in, and the press is only now actionable. Aborting before the first
+  // byte is sent is what makes the button honest during the one beat it has nothing to
+  // abort.
+  if (stopRequested) controller.abort();
+  setComposerRunning(true);
 
   // What the loading view currently shows, kept outside the callbacks below so
   // `onDelta` — which rebuilds the whole loading view from scratch the moment a new claim
@@ -5048,12 +5103,17 @@ async function runCheck(url, existingId, hint) {
         resolveAnalyzingHold();
         stage.text = stageText(frame);
         stage.variant = dialVariant(frame);
+        // Same reasoning as `onSources` below: carried forward either way, painted only
+        // while this check is the one on screen. `setDialVariant` in particular reaches for
+        // whichever dial it can find, which on another check's card would be the wrong one.
+        if (selectedId !== id) return;
         setStatusText("runStatus", stage.text);
         setDialVariant(stage.variant);
         runProgress.bump(frame?.stage);
       },
       onSearchCount: (n) => {
         stage.searchCount = n;
+        if (selectedId !== id) return;
         const counter = document.getElementById("runCounter");
         if (counter) counter.textContent = `Source ${n}`;
         // A growing source count is real, visible progress even between named stages —
@@ -5063,7 +5123,11 @@ async function runCheck(url, existingId, hint) {
       },
       onSources: (rows) => {
         liveSources = rows;
-        renderLiveSources(rows);
+        // Tracked whether or not it is on screen (the finished card needs the full ledger),
+        // but only drawn while this check still owns the pane — the reader may have pressed
+        // "New chat" and be looking at the idle screen, which this check has no business
+        // writing source pills into.
+        if (selectedId === id) renderLiveSources(rows);
       },
       // The model writes one `[[claim: …]]` marker per claim as it drafts the answer, and
       // closes each one with its own `VERDICT:` line before opening the next — there's no
@@ -5141,9 +5205,12 @@ async function runCheck(url, existingId, hint) {
       }
     }
   } catch (error) {
-    if (error.name === "AbortError") return;
+    // A stop is not a failure, but it does end the turn — and an entry left at `running`
+    // is one the library goes on calling "Checking…" until its heartbeat goes stale, which
+    // is the app claiming to be doing something it stopped doing. Recorded as ended, with
+    // the reader's own reason, and offering the same "Try again" a failure does.
     entry.status = "error";
-    entry.error = readerFacingError(error, "Check");
+    entry.error = error.name === "AbortError" ? STOPPED_MESSAGE : readerFacingError(error, "Check");
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) renderErrorCard(entry);
@@ -5160,8 +5227,8 @@ async function runCheck(url, existingId, hint) {
     runProgress.stop();
     runElapsed.stop();
     inFlight = null;
-    el.checkBtn.disabled = false;
-    el.newCheckBtn.disabled = false;
+    inFlightKind = null;
+    setComposerRunning(false);
     updateComposerMode();
   }
 }
@@ -5180,8 +5247,9 @@ async function runFollowup(entry, question) {
 
   const controller = new AbortController();
   inFlight = controller;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  inFlightKind = "followup";
+  stopRequested = false;
+  setComposerRunning(true);
   let settled = false;
 
   try {
@@ -5215,7 +5283,8 @@ async function runFollowup(entry, question) {
     settled = true;
   } catch (error) {
     if (error.name === "AbortError") {
-      pendingFollowup = null;
+      // Same reasoning as `runChat`'s: the question survives the answer being stopped.
+      pendingFollowup = { entryId: entry.id, question, error: STOPPED_MESSAGE };
       return;
     }
     // Left as the pending item, with its error — not pushed into `followups`, since a
@@ -5226,8 +5295,8 @@ async function runFollowup(entry, question) {
     followupElapsed.stop();
     if (settled) pendingFollowup = null;
     inFlight = null;
-    el.checkBtn.disabled = false;
-    el.newCheckBtn.disabled = false;
+    inFlightKind = null;
+    setComposerRunning(false);
     if (selectedId === entry.id) {
       renderResultCard(entry, {
         animateAnalysis: false,
@@ -5257,7 +5326,52 @@ function setCheckBtnLabel(label) {
   el.checkBtn.setAttribute("title", label);
 }
 
+/**
+ * A stop asked for before there was anything to stop.
+ *
+ * `runCheck` claims `inFlight` synchronously (as `true`) and only builds its real
+ * `AbortController` a beat later, after the landing screen has finished leaving — so a
+ * reader who presses stop inside that window has nothing to abort yet. This remembers the
+ * press; the controller aborts itself the moment it exists. Cleared by whichever run path
+ * is starting, so it can never leak into the next turn.
+ */
+
+
+/**
+ * Puts the composer into (or out of) its running state: the submit button becomes a stop
+ * button, and stays live while everything else that could disturb a turn in progress stays
+ * disabled.
+ *
+ * One function rather than the `el.checkBtn.disabled = true` lines this replaces, because
+ * "a turn is running" now means two different things to two controls in the same row and
+ * getting them out of step is what a reader would experience as a stuck button.
+ */
+function setComposerRunning(running) {
+  el.checkBtn.disabled = false;
+  if (running) el.checkBtn.dataset.mode = "stop";
+  else delete el.checkBtn.dataset.mode;
+  setCheckBtnLabel(running ? "Stop" : looksLikeFollowup(el.linkInput.value) ? "Ask" : "Check");
+}
+
+/**
+ * Ends the turn in flight, the way every streaming assistant's stop button does: what has
+ * already arrived stays on screen, and the turn is marked stopped rather than failed — see
+ * each run path's `AbortError` branch.
+ *
+ * Safe to call with nothing running, and safe to call twice.
+ */
+function stopRun() {
+  if (!inFlight) return;
+  stopRequested = true;
+  // `true` rather than a controller: the check is between claiming the turn and owning a
+  // signal (see `stopRequested`). Nothing to abort yet, and nothing more to do here.
+  if (typeof inFlight.abort === "function") inFlight.abort();
+}
+
 function updateComposerMode() {
+  // Never relabel the button out from under a running turn — it is a stop button until the
+  // turn ends, and this runs on every keystroke.
+  if (inFlight) return;
   const entry = selectedDoneEntry();
   const asking = looksLikeFollowup(el.linkInput.value);
   setCheckBtnLabel(asking ? "Ask" : "Check");
@@ -5597,6 +5711,11 @@ function initSpeechToText() {
 /* ---------------------------------------------------------------- wiring */
 
 el.checkBtn.addEventListener("click", () => {
+  // Same button, whichever job it is doing right now — see `setComposerRunning`.
+  if (inFlight) {
+    stopRun();
+    return;
+  }
   const entry = selectedDoneEntry();
   const raw = el.linkInput.value;
   const url = normalizeLink(raw);

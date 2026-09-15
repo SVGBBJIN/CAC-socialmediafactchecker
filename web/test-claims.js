@@ -242,3 +242,73 @@ test("citation cleanup leaves claim markers alone", () => {
   assert.equal(claims.length, 1);
   assert.equal(claims[0].verdictKey, "corroborated");
 });
+
+/* ---------------------------------------------------------------- formatting tolerance */
+
+// The prompt asks for a bare marker and a bare VERDICT line, and a compliant answer writes
+// them. These pin down the net underneath: a model drafting prose reaches for markdown
+// without being asked, and a claim losing its badge — or, worse, reading as unfinished to
+// `claimDiff` and shimmering forever — over a pair of asterisks is the app being pickier
+// than the fact it is rendering. What stays mandatory is tested at the bottom: the double
+// brackets, the word VERDICT, one of the four findings, and the line being last.
+
+test("splitVerdict accepts the label emphasised on either side of the colon", () => {
+  assert.equal(splitVerdict("x\n**VERDICT:** Contradicted").verdictKey, "contradicted");
+  assert.equal(splitVerdict("x\n**VERDICT: Contradicted**").verdictKey, "contradicted");
+  assert.equal(splitVerdict("x\nVERDICT: *Disputed*").verdictKey, "disputed");
+  assert.equal(splitVerdict("x\n__VERDICT__: Corroborated").verdictKey, "corroborated");
+});
+
+test("splitVerdict accepts a dash in place of the colon, and a bullet or hashes before it", () => {
+  assert.equal(splitVerdict("x\nVerdict — Corroborated.").verdictKey, "corroborated");
+  assert.equal(splitVerdict("x\nVerdict – Disputed").verdictKey, "disputed");
+  assert.equal(splitVerdict("x\n- VERDICT: Insufficient evidence").verdictKey, "insufficient");
+  assert.equal(splitVerdict("x\n### VERDICT: Contradicted").verdictKey, "contradicted");
+});
+
+test("splitVerdict takes the whole line with it, markdown included", () => {
+  const { text } = splitVerdict("The reading is below the limit.\n\n**VERDICT:** Contradicted");
+  assert.equal(text, "The reading is below the limit.");
+});
+
+test("splitClaims reads a marker that has been bolded, bulleted or numbered", () => {
+  const claims = splitClaims(
+    "**[[claim: A]]**\nbody\nVERDICT: Contradicted\n" +
+      "- [[claim: B]]\nbody\nVERDICT: Corroborated\n" +
+      "2. [[claim: C]]\nbody\nVERDICT: Disputed\n" +
+      "## [[claim: D]]\nbody\nVERDICT: Insufficient evidence",
+  );
+  assert.deepEqual(
+    claims.map((c) => [c.title, c.verdictKey]),
+    [
+      ["A", "contradicted"],
+      ["B", "corroborated"],
+      ["C", "disputed"],
+      ["D", "insufficient"],
+    ],
+  );
+});
+
+test("splitClaims tolerates spacing inside the marker", () => {
+  const claims = splitClaims("[[ claim : Spaced out ]]\nbody\nVERDICT: Disputed");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].title, "Spaced out");
+});
+
+test("a marker still being streamed is not a claim until its brackets close", () => {
+  assert.equal(splitClaims("[[claim: half a titl"), null);
+  const claims = splitClaims("[[claim: whole]]\nbody so far");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].verdictKey, null); // and unfinished until its verdict line lands
+});
+
+test("the brackets, the word VERDICT and the four findings all stay mandatory", () => {
+  // A line that merely looks like a claim is not one — this is the heuristic the app tore
+  // out, and hardening the marker must not quietly put it back.
+  assert.equal(splitClaims("Claim: the water is unsafe\nIt isn't."), null);
+  assert.equal(splitClaims("1. The water is unsafe."), null);
+  assert.equal(splitVerdict("x\nThe finding: Contradicted").verdictKey, null);
+  assert.equal(splitVerdict("x\nVERDICT: Probably fine").verdictKey, null);
+  // Not the last line in the block, so not this block's verdict.
+  assert.equal(splitVerdict("x\nVERDICT: Contradicted\nOne more thought.").verdictKey, null);
+});
