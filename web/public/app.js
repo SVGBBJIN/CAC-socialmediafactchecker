@@ -222,6 +222,21 @@ const el = {
   sidebarSignInBtn: document.getElementById("sidebarSignInBtn"),
 };
 
+// How stale a `running` entry's heartbeat has to be before this tab treats it as dead
+// rather than merely still in flight in *another* live tab. `runCheck` below touches
+// `heartbeatAt` on this cadence while a check is actually running; a tab that crashed or
+// was closed stops touching it immediately, so any real interruption clears this bar almost
+// as soon as the library is next read — while a check genuinely still running in a sibling
+// tab keeps re-arming it well inside the window. See `normalizeEntry`.
+const RUN_HEARTBEAT_MS = 3000;
+const RUN_STALE_MS = 4 * RUN_HEARTBEAT_MS;
+// Defined up here rather than down in the storage section with the rest of its family for
+// one blunt reason: `loadLibrary()` is called on the very next line, at module scope, and a
+// `const` is in its temporal dead zone until its own line runs. A stored entry with
+// `status: "running"` is all it took to reach that read, throw a ReferenceError out of
+// module evaluation, and take the whole of app.js down with it — leaving index.html's
+// static shell around a `#claimsPane` that nothing was ever going to fill.
+
 let library = loadLibrary();
 // Read before anything can call `markActive`, since that overwrites what this is reading.
 const startedFresh = resumedFresh();
@@ -560,16 +575,56 @@ function imagePayload(image) {
   return image ? { image: { mimeType: image.mimeType, data: image.data } } : {};
 }
 
+/** Shown in place of a card for an entry this tab can't draw: a check still running in
+ * another tab (see `normalizeEntry`, which spares a fresh heartbeat on purpose) or an
+ * entry whose status this version doesn't recognise. `renderErrorCard`'s "Try again" is
+ * the right offer either way — re-running the check is exactly what resolves both. */
+const RUNNING_ELSEWHERE_MESSAGE =
+  "This check is still running — in another tab, or it was left unfinished. Run it again to see the result here.";
+
 /* ---------------------------------------------------------------- storage */
 
-// How stale a `running` entry's heartbeat has to be before this tab treats it as dead
-// rather than merely still in flight in *another* live tab. `runCheck` below touches
-// `heartbeatAt` on this cadence while a check is actually running; a tab that crashed or
-// was closed stops touching it immediately, so any real interruption clears this bar almost
-// as soon as the library is next read — while a check genuinely still running in a sibling
-// tab keeps re-arming it well inside the window. See `loadLibrary`.
-const RUN_HEARTBEAT_MS = 3000;
-const RUN_STALE_MS = 4 * RUN_HEARTBEAT_MS;
+/**
+ * Brings one library entry up to the shape every render path assumes, in place. Returns
+ * true if it changed anything, so a caller can decide whether the change is worth writing
+ * back. Applied to *every* entry that enters `library`, from localStorage (`loadLibrary`)
+ * and from the cloud (`mergeCloudLibrary`) alike — a row that arrived over the network is
+ * no better formed than one that arrived from disk, and the cloud path used to splice
+ * `pullLibrary`'s rows straight in, skipping both guards below.
+ *
+ * Two fixes, and both of them are the difference between a card and a blank pane:
+ *
+ * - `followups`. `renderResultCard` and `runFollowup` both read this array without
+ *   checking it — every entry `runCheck` creates has one. An entry that reached storage
+ *   (or a cloud row) without it — an older schema, a hand-edited or partially-written row
+ *   — would crash the render of the whole pane on the click that opened it, which is a
+ *   worse outcome than a check with no follow-ups, and indistinguishable from a broken app
+ *   to the reader.
+ * - A stale `running`. Reaping unconditionally on `status === "running"` used to mean
+ *   opening a *second* tab while a check was genuinely still going in the first one
+ *   stamped it "interrupted" there, even though nothing had failed: a reader has no way to
+ *   tell "abandoned" from "in flight elsewhere" from status alone. A heartbeat does: an
+ *   entry only reads as interrupted once its heartbeat is older than a live check could
+ *   ever leave it, which a crashed-or-closed tab reaches almost immediately and a genuinely
+ *   running one never does. An entry with no heartbeat at all predates this field and is
+ *   treated the old way — there is nothing fresher to check it against. A cloud row is
+ *   always in the no-heartbeat case in practice: `heartbeatAt` was last touched on whatever
+ *   device ran the check, so a row that synced mid-run comes back `running` forever.
+ */
+function normalizeEntry(entry) {
+  if (!entry) return false;
+  let changed = false;
+  if (entry.url && !Array.isArray(entry.followups)) {
+    entry.followups = [];
+    changed = true;
+  }
+  if (entry.status !== "running") return changed;
+  const age = typeof entry.heartbeatAt === "number" ? Date.now() - entry.heartbeatAt : Infinity;
+  if (age <= RUN_STALE_MS) return changed; // still fresh — likely running in another open tab
+  entry.status = "error";
+  entry.error = "This check was interrupted — the page was closed or reloaded before it finished.";
+  return true;
+}
 
 function loadLibrary() {
   let parsed;
@@ -580,31 +635,10 @@ function loadLibrary() {
   }
   if (!Array.isArray(parsed)) return [];
 
-  // A `running` entry only means anything while the `runCheck` that set it is still
-  // alive, and that call dies with the page (or, now, stops refreshing `heartbeatAt` —
-  // see `RUN_HEARTBEAT_MS`). Reaping unconditionally on `status === "running"` used to
-  // mean opening a *second* tab while a check was genuinely still going in the first one
-  // stamped it "interrupted" there, even though nothing had failed: this tab has no way to
-  // tell "abandoned" from "in flight elsewhere" from status alone. A heartbeat does: an
-  // entry only reads as interrupted once its heartbeat is older than a live check could
-  // ever leave it, which a crashed-or-closed tab reaches almost immediately and a genuinely
-  // running one never does. An entry with no heartbeat at all predates this field and is
-  // treated the old way — there is nothing fresher to check it against.
+  // Every entry gets the same going-over a cloud row does — see `normalizeEntry`. Writing
+  // back only when something actually changed keeps a plain read off the storage quota.
   let reaped = false;
-  for (const entry of parsed) {
-    // `renderResultCard` and `runFollowup` both read this array without checking it — every
-    // entry `runCheck` creates has one. An entry that reached storage without it (an older
-    // schema, a hand-edited or partially-written row) would crash the render of the whole
-    // pane on the click that opened it, which is a worse outcome than a check with no
-    // follow-ups, and indistinguishable from a broken app to the reader.
-    if (entry && entry.url && !Array.isArray(entry.followups)) entry.followups = [];
-    if (entry?.status !== "running") continue;
-    const age = typeof entry.heartbeatAt === "number" ? Date.now() - entry.heartbeatAt : Infinity;
-    if (age <= RUN_STALE_MS) continue; // still fresh — likely running in another open tab
-    entry.status = "error";
-    entry.error = "This check was interrupted — the page was closed or reloaded before it finished.";
-    reaped = true;
-  }
+  for (const entry of parsed) if (normalizeEntry(entry)) reaped = true;
   if (reaped) {
     try {
       localStorage.setItem(LIBRARY_KEY, JSON.stringify(parsed));
@@ -2249,6 +2283,15 @@ function openEntryInPane(entry) {
   renderVideoPane(entry);
   if (entry.status === "done") renderResultCard(entry);
   else if (entry.status === "error") renderErrorCard(entry);
+  // Every other status — `running`, or anything a future schema adds — used to fall out of
+  // here having drawn the video pane and nothing else, leaving the claims pane holding
+  // whatever the last render left in it. At startup that is index.html's own empty
+  // `#claimsPane`, so the reader got the whole shell around a blank middle: no card, no
+  // message, no way to tell it apart from a broken app. `normalizeEntry` turns an abandoned
+  // `running` into an `error` before it can reach here, but it deliberately spares one that
+  // a sibling tab is still working on, and it can only fix the statuses it knows about — so
+  // this branch is what guarantees the pane says *something* whatever arrives.
+  else renderErrorCard({ ...entry, error: entry.error ?? RUNNING_ELSEWHERE_MESSAGE });
 }
 
 function selectEntry(id) {
@@ -4817,6 +4860,10 @@ async function mergeCloudLibrary() {
     console.warn("Couldn't load cloud history:", error.message);
     return;
   }
+  // `pullLibrary` hands back each row's stored `data` blob verbatim, so these rows have
+  // had none of the going-over `loadLibrary` gives a local one. Same treatment, same
+  // reasons — see `normalizeEntry`.
+  for (const entry of remote) normalizeEntry(entry);
   const localIds = new Set(library.map((entry) => entry.id));
   const remoteIds = new Set(remote.map((entry) => entry.id));
   const newFromRemote = remote.filter((entry) => !localIds.has(entry.id));
@@ -4836,6 +4883,14 @@ async function mergeCloudLibrary() {
   renderLibrary(el.searchInput.value);
   const startupEntry = selectedId ? findEntry(selectedId) : null;
   if (startupEntry) renderVideoPane(startupEntry);
+  // Which of the two idle screens belongs on the pane is decided by `library.length`
+  // (see `renderChatPane`), and this merge is the one thing that changes that length
+  // *after* the startup render has already run. Without this, signing in on a browser with
+  // no local history left the reader on the landing page — the screen for someone with
+  // nothing to go back to — while their whole cloud history sat in a sidebar the landing
+  // view has pushed off the screen. Only when nothing is selected and nothing is in flight:
+  // a re-render at any other moment would throw away the card the reader is looking at.
+  else if (!selectedId && !inFlight) renderChatPane();
 }
 
 /** Two-letter monogram for the profile avatar — first name's first letter, plus the last
