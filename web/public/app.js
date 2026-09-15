@@ -1855,11 +1855,46 @@ function analyzingOverlayEl() {
 function showAnalyzingOverlay(target) {
   const overlay = analyzingOverlayEl();
   document.getElementById("analyzingTarget").textContent = target ?? "";
-  overlay.querySelectorAll(".analyzing-step").forEach((stepEl, i) => {
-    stepEl.classList.toggle("active", i === 0);
-    stepEl.classList.remove("done");
-  });
+  setAnalyzingStep(0);
   overlay.classList.add("on");
+}
+
+/** Marks step `i` as the one under way and everything before it as done — the DS's own
+ * three-dot progression, driven here by what the turn has actually reported rather than by
+ * a timeline. Out of range (`i` past the last step) simply finishes them all, which is what
+ * the hand-off to the running card's dial looks like. */
+function setAnalyzingStep(i) {
+  const overlay = document.getElementById("analyzingOverlay");
+  if (!overlay) return;
+  overlay.querySelectorAll(".analyzing-step").forEach((stepEl, n) => {
+    stepEl.classList.toggle("active", n === i);
+    stepEl.classList.toggle("done", n < i);
+  });
+}
+
+/**
+ * How long the interstitial holds before the shell is revealed underneath it.
+ *
+ * The DS's demo holds a scripted 2.45s. This holds until the turn has something true to
+ * show for it — the first stage frame off the stream, which is the moment "fetching the
+ * source" stops being a guess — and no longer than `ANALYZING_MAX_HOLD_MS` whatever
+ * happens, so a slow or dead connection can never park a reader behind a frosted sheet.
+ * `resolveAnalyzingHold` is called from `runCheck`'s `onStage` and again in its `finally`,
+ * and both are safe to call when nothing is waiting.
+ */
+const ANALYZING_MAX_HOLD_MS = 1200;
+let resolveAnalyzingHold = () => {};
+
+function analyzingHold() {
+  return new Promise((resolve) => {
+    const done = () => {
+      resolveAnalyzingHold = () => {};
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, ANALYZING_MAX_HOLD_MS);
+    resolveAnalyzingHold = done;
+  });
 }
 
 /** Safe to call whether or not the overlay was ever shown — `showAnalyzingOverlay` is
@@ -4445,6 +4480,33 @@ function historyFor(entry) {
 let pendingMediaReveal = false;
 
 /**
+ * The shell arriving from under the interstitial — the last movement of "Mobile Landing to
+ * Shell". The media wipes down, the title bar rises into it and the sheet slides up from
+ * below (`[data-shell-enter]` in index.html); the claims pane's own contents are left to
+ * the morph landing on them.
+ *
+ * Phone only, because it is the phone flow that has something to reveal: at every other
+ * width the shell was never hidden — the panel flew across it in full view.
+ */
+function playShellEntrance() {
+  if (device.kind !== "phone" || prefersReducedMotion()) return;
+  // The video strip's own wipe, deferred to here rather than played in `runCheck` the way
+  // it is at other widths: on this flow it would otherwise have run and finished behind a
+  // frosted sheet, and the strip would simply be *there* when the sheet lifted.
+  const videoPane = document.querySelector(".video-pane");
+  if (pendingMediaReveal && videoPane) {
+    pendingMediaReveal = false;
+    videoPane.classList.add("media-reveal");
+    videoPane.addEventListener("animationend", () => videoPane.classList.remove("media-reveal"), { once: true });
+  }
+  const root = document.documentElement;
+  root.dataset.shellEnter = "";
+  // Cleared rather than left on: the rules it drives are `both`-filled entrance animations,
+  // and a class that outlives its own animation replays it on the next thing to match.
+  setTimeout(() => delete root.dataset.shellEnter, 800);
+}
+
+/**
  * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
  * if the claims pane is still showing the landing page when a check begins, let it visibly
  * leave first — the whole page fades and scales back, the brand HUD's four pills fly
@@ -4559,8 +4621,35 @@ function startMorph(hero) {
   // The same frame the clone starts carrying the mark, the real one stops — no cross-fade,
   // no two marks.
   cluster.style.opacity = "0";
-  morph = { layer, frame: layer.querySelector(".morph-frame"), wash: layer.querySelector(".morph-wash"), dial, cluster: clone, frameRect, dialRect, raf: 0, leg: Promise.resolve() };
+  morph = { layer, frame: layer.querySelector(".morph-frame"), wash: layer.querySelector(".morph-wash"), dial, cluster: clone, logo: null, frameRect, dialRect, raf: 0, leg: Promise.resolve() };
   paintMorph(frameRect, dialRect, 1);
+
+  // The brand mark's own leg, on the flow that has somewhere to fly it: the landing's
+  // wordmark mark travels into the middle of the analyzing ring, which is the DS's
+  // `.logo-fly`. Its second DS leg — on out to a small mark in the shell's title bar —
+  // has no destination in this app (the phone title bar carries the check's own title, not
+  // the brand), so it stays in the ring and leaves with it.
+  const mark = hero.querySelector(".landing-brand .brand-mark");
+  if (!mark || device.kind !== "phone") return;
+  const from = morphRect(mark);
+  const logo = document.createElement("div");
+  logo.className = "morph-logo";
+  logo.setAttribute("aria-hidden", "true");
+  logo.innerHTML = mark.innerHTML;
+  Object.assign(logo.style, { top: `${from.top}px`, left: `${from.left}px`, width: `${from.width}px`, height: `${from.height}px` });
+  document.body.append(logo);
+  mark.style.opacity = "0";
+  morph.logo = logo;
+}
+
+/** Sends the lifted brand mark to `to`, spinning as it goes. A plain transition, so the
+ * one required paint of the starting rect has to be forced first. */
+function flyLogo(to) {
+  if (!morph?.logo) return;
+  const logo = morph.logo;
+  void logo.offsetWidth;
+  logo.classList.add("spin");
+  Object.assign(logo.style, { top: `${to.top}px`, left: `${to.left}px`, width: `${to.width}px`, height: `${to.height}px` });
 }
 
 /** One leg of the flight, from wherever the clones currently are. Resolves when it lands;
@@ -4603,10 +4692,14 @@ function flyMorph({ frame, dial, to, duration }) {
 function endMorph() {
   if (!morph) return;
   cancelAnimationFrame(morph.raf);
-  const { layer } = morph;
+  const { layer, logo } = morph;
   morph = null;
   layer.classList.add("out");
   setTimeout(() => layer.remove(), 450);
+  if (logo) {
+    logo.classList.add("out");
+    setTimeout(() => logo.remove(), 400);
+  }
 }
 
 /**
@@ -4631,7 +4724,21 @@ async function finishMorph() {
   // `playLandingExit`); let it land before reading the destination, or the two legs fight
   // over the same clock. A no-op on every other width, where there was no first leg.
   await morph?.leg;
+  // …and then the interstitial holds, the way the DS's does, until the turn has something
+  // true to say for it (see `analyzingHold`). Only on the flow that has one.
+  const overlay = document.getElementById("analyzingOverlay");
+  if (overlay?.classList.contains("on")) {
+    setAnalyzingStep(1);
+    await analyzingHold();
+    setAnalyzingStep(2);
+  }
   hideAnalyzingOverlay();
+  overlay?.classList.remove("handoff");
+  // The mark stays in the ring and leaves with it — its second DS leg has no destination
+  // here (see `startMorph`) — while the cluster carries on down into the card's dial.
+  morph?.logo?.classList.add("out");
+  // What the interstitial was covering is revealed moving, not already arrived.
+  playShellEntrance();
   if (!morph) {
     card.classList.remove("morph-incoming");
     return;
@@ -4686,9 +4793,14 @@ async function playLandingExit(url) {
   // The overlay is the phone flow's own beat in the DS, and only the phone's: at any width
   // where the panel itself flies, a frosted sheet over the top would hide the flight it is
   // supposed to be covering for.
-  if (device.kind === "phone") showAnalyzingOverlay(url);
+  const phone = device.kind === "phone";
+  if (phone) showAnalyzingOverlay(url);
   landing.classList.add("leaving");
-  await new Promise((resolve) => setTimeout(resolve, 320));
+  // Long enough for the DS's staggered teardown to actually read on a phone — the last
+  // block in the column does not start leaving until 220ms in (see `.landing.leaving` in
+  // index.html). At every other width the idle screen is one box with one fade, and waiting
+  // on a stagger that isn't happening would just be dead time before the panel flies.
+  await new Promise((resolve) => setTimeout(resolve, phone ? 560 : 320));
 
   // Measured now, at the exact moment the page it's embedded in is about to be torn down —
   // not before the fade above, whose own `transform: scale(...)` would have made an earlier
@@ -4698,11 +4810,20 @@ async function playLandingExit(url) {
   const embedded = el.entryBar.parentElement?.id === "landingEntrySlot";
   if (embedded) flyEntryBarHome(el.entryBar.getBoundingClientRect());
 
-  // The phone's waypoint: the mark flies into the overlay's scan ring and holds there while
-  // the shell is built underneath, then `finishMorph` flies it on down into the card's dial.
-  // Not awaited — the pane swap should not wait on it; `finishMorph` awaits the leg instead.
-  const scan = device.kind === "phone" ? document.querySelector(".analyzing-scan") : null;
-  if (scan && morph) flyMorph({ dial: morphRect(scan), duration: MORPH_WAYPOINT_MS });
+  // The phone's waypoint: the brand mark lands in the middle of the analyzing ring and the
+  // HUD cluster closes around it, exactly the two flights the DS's "Mobile Landing to
+  // Shell" runs into its `.scan`. They hold there while the shell is built underneath, and
+  // `finishMorph` flies the cluster on down into the card's dial once the interstitial has
+  // had its beat. Not awaited — the pane swap should not wait on either; `finishMorph`
+  // awaits the leg instead.
+  const scan = phone ? document.querySelector(".analyzing-scan") : null;
+  if (!scan || !morph) return;
+  const ring = morphRect(scan);
+  // The ring yields its own core to the incoming mark rather than showing both.
+  document.getElementById("analyzingOverlay")?.classList.add("handoff");
+  const core = Math.round(ring.width * 0.42);
+  flyLogo({ top: ring.top + (ring.height - core) / 2, left: ring.left + (ring.width - core) / 2, width: core, height: core });
+  flyMorph({ dial: ring, duration: MORPH_WAYPOINT_MS });
 }
 
 /**
@@ -4751,7 +4872,9 @@ async function runCheck(url, existingId, hint) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
-  if (pendingMediaReveal) {
+  // Held back on the phone flow, where the strip is behind the interstitial right now and
+  // `playShellEntrance` is what reveals it — see its own comment.
+  if (pendingMediaReveal && !(morph && device.kind === "phone")) {
     pendingMediaReveal = false;
     // The phone video strip: `renderVideoPane` just made it visible for the first time
     // (`updatePaneMode` above already dropped `single-pane`), so this is the one moment to
@@ -4806,6 +4929,10 @@ async function runCheck(url, existingId, hint) {
       signal: controller.signal,
       clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
+        // The first stage frame is the moment the interstitial's "Fetching the source" stops
+        // being an assumption, so it is what ends its hold rather than a timer — see
+        // `analyzingHold`. A no-op on every turn that isn't waiting on one.
+        resolveAnalyzingHold();
         stage.text = stageText(frame);
         stage.variant = dialVariant(frame);
         setStatusText("runStatus", stage.text);
@@ -4913,6 +5040,10 @@ async function runCheck(url, existingId, hint) {
     // reader navigated away from mid-flight would otherwise leave the ticker running against
     // a bar that's no longer on screen.
     clearInterval(heartbeat);
+    // A turn that ended without ever reporting a stage — an immediate error, an abort —
+    // still has to release the interstitial, or it would sit over the result until its own
+    // cap ran out. Safe when nothing is waiting.
+    resolveAnalyzingHold();
     runProgress.stop();
     runElapsed.stop();
     inFlight = null;

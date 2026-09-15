@@ -1762,12 +1762,44 @@
      the landing, but it is the same brand block over the same HUD, and a check starting
      from it is the same event — so it flies its pills out too rather than blinking away
      while the landing gets a send-off. */
-  .landing.leaving,
+  /* The "New chat" hero is a box, and a box leaves as a box. */
   .newchat-hero.leaving {
     transition: opacity 0.32s ease, transform 0.32s ease;
     opacity: 0;
     transform: scale(0.97) translateY(-6px);
   }
+  /* The landing is a page, and the DS's "Mobile Landing to Shell" takes it apart rather
+     than dimming it: every block in the scroll column lifts, blurs and goes, one after the
+     next from the top, so the screen empties in the reading direction instead of all at
+     once. Same `.rise` elements the entrance staggers (see `.landing .rise` above), run the
+     other way — the delays here are the DS's own, and the topbar goes with the page since
+     it is not part of that column.
+
+     `filter: blur(1px)` is what makes this read as a dissolve rather than a slide: without
+     it the blocks simply move up and out, which at this speed looks like a scroll. */
+  .landing.leaving .lshell-topbar {
+    transition: opacity 0.35s ease;
+    opacity: 0;
+  }
+  .landing.leaving .lshell-scroll > .rise {
+    transition: opacity 0.45s ease, transform 0.55s cubic-bezier(.4,0,.2,1), filter 0.45s ease;
+    opacity: 0;
+    transform: translateY(-16px) scale(0.98);
+    filter: blur(1px);
+    /* The entrance animation is still on these elements and `both` holds its last frame,
+       which would pin opacity at 1 and beat every transition above. */
+    animation: none;
+  }
+  .landing.leaving .lshell-scroll > .rise:nth-child(1) { transition-delay: 0.02s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(2) { transition-delay: 0.06s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(3) { transition-delay: 0.10s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(4) { transition-delay: 0.14s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(5) { transition-delay: 0.18s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(6) { transition-delay: 0.22s; }
+  /* No exemption for the entry block, even though the composer is inside it: by the time
+     the block is far into its fade the real `#entryBar` node has already been moved out to
+     its dock and is flying there under its own transform (`flyEntryBarHome`), so what
+     dissolves here is the block's own chrome, not the control. */
   .landing.leaving .brand-hud-pill,
   .newchat-hero.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
   .landing.leaving .brand-hud-pill.sources,
@@ -1805,6 +1837,20 @@
     background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
   }
   .morph-dial { position: fixed; }
+  /* The brand mark's own leg, which on a phone is a separate flight from the HUD's: the DS
+     sends it into the middle of the analyzing ring while the cluster closes around it, so
+     the interstitial's core *is* the landing's mark rather than a new dot in its place. A
+     CSS transition rather than a frame of the rAF loop, exactly as the DS's `.logo-fly` is
+     — it has one leg with one destination and nothing to stay in step with. */
+  .morph-logo {
+    position: fixed; z-index: 42; pointer-events: none;
+    transition: top 0.62s cubic-bezier(.45,0,.15,1), left 0.62s cubic-bezier(.45,0,.15,1),
+                width 0.62s cubic-bezier(.45,0,.15,1), height 0.62s cubic-bezier(.45,0,.15,1),
+                opacity 0.35s ease;
+  }
+  .morph-logo svg { width: 100%; height: 100%; display: block; }
+  .morph-logo.spin svg { animation: brand-hud-spin-slow 6s linear infinite; }
+  .morph-logo.out { opacity: 0; }
   /* The clone keeps `.brand-hud-cluster`'s own 196px internals and is scaled about its top
      left corner to whatever size the flight is at — so its rings, ticks and core stay in
      proportion the whole way down instead of being re-laid-out per frame. Overrides the
@@ -1845,6 +1891,23 @@
     transition: opacity 0.45s ease;
   }
   .analyzing-overlay.on { opacity: 1; }
+  /* The DS's own staged entrance for this layer: the ring, then the target, then the step
+     list, each a beat behind the last, so the interstitial assembles instead of appearing.
+     Delays only apply on the way in — leaving, all three go with the layer's own fade. */
+  .analyzing-overlay .analyzing-scan,
+  .analyzing-overlay .analyzing-target,
+  .analyzing-overlay .analyzing-steps {
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.2,.8,.3,1);
+  }
+  .analyzing-overlay.on .analyzing-scan { opacity: 1; transform: none; transition-delay: 0.2s; }
+  .analyzing-overlay.on .analyzing-target { opacity: 1; transform: none; transition-delay: 0.3s; }
+  .analyzing-overlay.on .analyzing-steps { opacity: 1; transform: none; transition-delay: 0.4s; }
+  /* The scan ring is the flight's waypoint on a phone: the brand mark lands in its centre
+     and the HUD cluster closes around it, so the ring's own core would be a second mark in
+     the same spot. It yields while the flight is using it (`.analyzing-overlay.handoff`,
+     set by `startMorph`). */
+  .analyzing-overlay.handoff .analyzing-scan-core { opacity: 0; transition: opacity 0.2s ease; }
   .analyzing-scan {
     position: relative; width: 120px; height: 120px; border-radius: 50%;
     border: 1px solid var(--border);
@@ -2768,6 +2831,34 @@
       to   { clip-path: inset(0 0 0 0); }
     }
     .video-pane.media-reveal { animation: video-pane-reveal 0.5s cubic-bezier(.2,.8,.3,1); }
+    /* ---------- The shell arriving, from "Mobile Landing to Shell" ----------
+       The DS does not cut to the shell when the analyzing layer lifts: the media wipes down
+       (`.media-reveal` above, which is that same `clip-path` inset), the title bar rises
+       into it, and the sheet slides up from under the fold with its contents a beat behind.
+       `playShellEntrance` (app.js) adds this class the moment the interstitial starts to
+       go, so the first thing under it is already moving rather than already arrived.
+       Stamped on <html> rather than on any one container because the two things that move
+       are on opposite sides of the shell's markup (the title bar above, the sheet below)
+       and a sibling selector between them is the kind of thing a later markup edit breaks
+       silently. The claims pane's own contents are left alone: the running card is already
+       playing its own arrival as the morph lands on it (`.morph-land`), and a second
+       opacity animation over the top of that one would fight it for the same property. */
+    [data-shell-enter] .topbar-meta { animation: shell-enter-rise 0.45s cubic-bezier(.2,.8,.3,1) 0.3s both; }
+    [data-shell-enter] .claims-pane-wrap { animation: shell-enter-sheet 0.55s cubic-bezier(.2,.8,.3,1) 0.12s both; }
+    @keyframes shell-enter-sheet {
+      from { transform: translateY(26px); }
+      to   { transform: translateY(0); }
+    }
+    @keyframes shell-enter-rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [data-shell-enter] .topbar-meta,
+      [data-shell-enter] .claims-pane-wrap { animation: none; }
+    }
+    [data-motion="reduced"][data-shell-enter] .topbar-meta,
+    [data-motion="reduced"][data-shell-enter] .claims-pane-wrap { animation: none; }
     .video-thumb {
       width: 100%; height: 100%; max-height: none;
       /* The base rule's `aspect-ratio: 9/16` shapes the card at every other width; here the
