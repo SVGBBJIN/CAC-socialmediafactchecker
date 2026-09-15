@@ -30,6 +30,61 @@ import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } f
 import * as accounts from "./auth.js";
 
 const LIBRARY_KEY = "trase.library.v1";
+const ACTIVITY_KEY = "trase.activity.v1";
+/**
+ * How long away from the app counts as coming back to it fresh rather than picking up where
+ * you left off. Past this, a returning reader lands on the idle screen (the "New chat" hero,
+ * or the landing page proper when there is no library to hero against) instead of staring at
+ * whichever check they happened to have open a week ago, which by then is somebody else's
+ * question.
+ *
+ * Seven days is deliberately long: this only ever costs a reader the auto-reopen of one old
+ * check, and there is nothing worse than an app that forgets what you were doing over lunch.
+ */
+const IDLE_RESET_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * At most one write a minute. Every `pointerdown`/`keydown` in the app passes through here,
+ * and the value only has to be accurate to within far less than `IDLE_RESET_MS` for the
+ * comparison above to come out the same.
+ */
+const ACTIVITY_WRITE_MS = 60 * 1000;
+let activityWrittenAt = 0;
+
+/** When this browser last did anything in the app, or `null` if it has no record of ever. */
+function lastActiveAt() {
+  try {
+    const raw = Number(localStorage.getItem(ACTIVITY_KEY));
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when this browser is arriving fresh rather than resuming: either it has no record of
+ * the app at all (a first visit, cleared site data, a private window), or its last record is
+ * older than `IDLE_RESET_MS`. Both cases want the same thing — to be met by the app's front
+ * door rather than dropped back into a half-read check.
+ *
+ * Read exactly once, at startup, before `markActive` below overwrites the very value it
+ * reads.
+ */
+function resumedFresh() {
+  const last = lastActiveAt();
+  return last === null || Date.now() - last > IDLE_RESET_MS;
+}
+
+/** Throttled — see `ACTIVITY_WRITE_MS`. Storage being unavailable is not worth a broken app. */
+function markActive() {
+  const now = Date.now();
+  if (now - activityWrittenAt < ACTIVITY_WRITE_MS) return;
+  activityWrittenAt = now;
+  try {
+    localStorage.setItem(ACTIVITY_KEY, String(now));
+  } catch {
+    /* Private mode, or a full quota. The only cost is being greeted by the landing again. */
+  }
+}
 const PASSPHRASE_KEY = "trase.chat.pass"; // shared with the chat UI on purpose
 
 // How much faster than real time the video pane plays back. There's no server-side
@@ -168,7 +223,13 @@ const el = {
 };
 
 let library = loadLibrary();
-let selectedId = library[0]?.id ?? null;
+// Read before anything can call `markActive`, since that overwrites what this is reading.
+const startedFresh = resumedFresh();
+// Normally a reload reopens whatever was last being read. After a long enough gap it
+// deliberately doesn't (see `IDLE_RESET_MS`): `selectedId` stays null, which lands the
+// startup path below on the empty state — the landing page for a browser with no library,
+// the "New chat" hero for one that has one.
+let selectedId = startedFresh ? null : (library[0]?.id ?? null);
 let inFlight = null;
 // Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
 // videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
@@ -335,9 +396,10 @@ function applyDevice(next) {
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
   if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
   syncDrawerInert();
-  // A resize/rotate can cross the phone breakpoint while the landing page is on screen —
-  // widening out of phone width should hand the composer back to its dock, narrowing into
-  // it should embed it, and neither should wait for the next unrelated re-render to notice.
+  // The landing page embeds the composer at every width, so a resize no longer moves it —
+  // but this still has to run, because a re-render that happened while the device kind was
+  // changing could have left it at the dock with the slot on screen, and the call is a
+  // no-op whenever it is already where it belongs.
   syncLandingComposer();
 }
 
@@ -345,15 +407,46 @@ function isDrawerOpen() {
   return document.documentElement.getAttribute("data-drawer") === "open";
 }
 
+/** True while the landing page is the screen — see `setLandingView`. */
+function isLandingView() {
+  return document.documentElement.dataset.view === "landing";
+}
+
+/**
+ * The control that currently opens and closes the drawer. The phone top bar's
+ * `.drawer-toggle` normally, the landing page's own `#landingLibBtn` while that page is up
+ * (where the phone one is off-screen along with the rest of the shell's chrome). Both carry
+ * the same `aria-expanded`/`aria-label` state, set together by open/closeDrawer, since
+ * either can be the one a reader is looking at.
+ */
+function drawerHandle() {
+  const landingBtn = document.getElementById("landingLibBtn");
+  return landingBtn && isLandingView() ? landingBtn : el.drawerToggle;
+}
+
+/** Keeps both possible drawer handles (see `drawerHandle`) telling the same story. */
+function setDrawerHandleState(expanded) {
+  const label = expanded ? "Close library" : "Open library";
+  for (const btn of [el.drawerToggle, document.getElementById("landingLibBtn")]) {
+    if (!btn) continue;
+    btn.setAttribute("aria-expanded", String(expanded));
+    btn.setAttribute("aria-label", label);
+  }
+}
+
 function openDrawer() {
-  if (device.kind !== "phone") return;
+  // Normally the drawer is the phone layout's answer to having no room for a permanent
+  // sidebar column. The landing page creates the same situation at every width on purpose
+  // (`data-view="landing"` takes the sidebar off the screen — see index.html), so its
+  // `#landingLibBtn` handle has to be able to open the drawer from a desktop too, or the
+  // library and the sign-in button under it would be unreachable while it is up.
+  if (device.kind !== "phone" && !isLandingView()) return;
   document.documentElement.setAttribute("data-drawer", "open");
-  el.drawerToggle.setAttribute("aria-expanded", "true");
-  el.drawerToggle.setAttribute("aria-label", "Close library");
+  setDrawerHandleState(true);
   syncDrawerInert();
   // Focus has to move into the drawer for a keyboard user, but on a touchscreen landing
   // on the search field summons the on-screen keyboard over the very list the user just
-  // opened to browse. The "New check" button is the first control either way.
+  // opened to browse. The "New chat" button is the first control either way.
   if (device.touch) el.newCheckBtn.focus();
   else el.searchInput.focus();
 }
@@ -361,13 +454,15 @@ function openDrawer() {
 function closeDrawer({ restoreFocus = true } = {}) {
   if (!isDrawerOpen()) return;
   // Focus has to leave before the drawer becomes inert, or it lands on <body> and the
-  // next Tab restarts from the top of the document.
-  if (restoreFocus) el.drawerToggle.focus();
+  // next Tab restarts from the top of the document. Whichever handle opened it is the one
+  // to go back to: `.drawer-toggle` is `display: none` above the phone breakpoint, and
+  // focusing a hidden element drops focus on <body>, which is the bug this line exists to
+  // avoid in the first place.
+  if (restoreFocus) drawerHandle().focus();
   else if (el.sidebar.contains(document.activeElement)) document.activeElement.blur();
 
   document.documentElement.removeAttribute("data-drawer");
-  el.drawerToggle.setAttribute("aria-expanded", "false");
-  el.drawerToggle.setAttribute("aria-label", "Open library");
+  setDrawerHandleState(false);
   syncDrawerInert();
 }
 
@@ -1478,12 +1573,19 @@ const LANDING_FEATURES = [
 ];
 
 /**
- * The empty/landing state's full composition — brand block, the brand HUD
- * (`brandHudMarkup`), the invitation, and the TRASE Design System's own "App shell —
- * Landing"/"Mobile Landing" screens' action-tile row, feature row and footer line, ported
- * verbatim (copy included). One layout for both breakpoints — the phone media query in
- * index.html just tightens sizes, the way the rest of this pane's phone treatment already
- * does, rather than a second markup path to keep in sync.
+ * The landing page — the TRASE Design System's "App shell — Landing" screen, ported whole.
+ *
+ * Unlike everything else `.claimsPane` renders, this one is a *page*, not a pane. While it
+ * is up, `data-view="landing"` on <html> takes the sidebar, both topbars and the docked
+ * composer's slot off the screen entirely (see index.html), leaving the DS's own two-button
+ * `.lshell-topbar` above a centred scroll column. That is also why the composer sits inside
+ * `.landing-entry` here at *every* width rather than only on a phone the way it used to:
+ * with no shell around the page, there is no second position for it to be docked at, so the
+ * breakpoint that used to decide between the two has nothing left to decide.
+ *
+ * Shown only while the library is empty — a first visit, nothing checked yet. The moment
+ * there is anything to go back to, the same idle state is `newChatMarkup` inside the intact
+ * shell instead, which is the DS's separate "App shell — New Chat" screen.
  *
  * The action tiles (Video/Article/Search/Paste) have no distinct behavior to route to —
  * this app has one composer for every kind of link or question, not a mode per content
@@ -1507,35 +1609,95 @@ function landingMarkup() {
   ).join("");
   return `
     <div class="landing">
-      <div class="landing-brand">
-        <div class="landing-mark" aria-hidden="true">${BRAND_MARK_SVG}</div>
-        <div class="landing-wordmark">Trase</div>
-        <div class="landing-tagline">Trace the truth.<br>Understand what you see.</div>
+      <!-- The DS's landing topbar. The library is empty on this screen by definition, so
+           the left button is not a way back to anything — it opens the same drawer the
+           phone's drawer-toggle does, widened to every width by the landing view (the
+           sidebar is off-screen here at all of them), which is where signing in lives. The
+           right one opens the settings dialog the shell's own gear opens. Both are wired in
+           handleClaimsPaneClick, since this bar is rendered markup, not part of the static
+           shell. -->
+      <div class="lshell-topbar">
+        <button type="button" class="icon-btn-plain" id="landingLibBtn" aria-label="Open checks" title="Open checks">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <button type="button" class="icon-btn-plain" id="landingSettingsBtn" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9c.36.19.7.45 1 .76a1.65 1.65 0 001.51-1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
       </div>
-      ${brandHudMarkup()}
-      <p class="claim-empty-text">Paste a link or ask a question to get started.</p>
-      <!-- Phone only (see .landing-entry in index.html) — syncLandingComposer moves the
-           real composer into this slot right under the HUD, matching the DS's "Mobile
-           Landing" entry-block, instead of leaving it docked a full screen-height below.
-           Empty here on purpose: the composer is a live node with real listeners, so it's
-           moved in by JS after this markup lands, never re-created from a string. -->
-      <div class="landing-entry" id="landingEntrySlot">
-        <h2 class="landing-entry-title">Paste a link or ask anything</h2>
-        <p class="landing-entry-sub">Get a clear, evidence-based answer in seconds.</p>
+      <div class="lshell-scroll">
+        <div class="landing-brand rise">
+          <div class="brand-mark" aria-hidden="true">${BRAND_MARK_SVG}</div>
+          <div class="landing-wordmark">TRASE</div>
+          <div class="landing-tagline">Trace the truth. Understand what you see.</div>
+        </div>
+        <!-- Wrapper so the entrance animation and the size can stop fighting: the stagger
+             below rides on this, leaving transform free for the scale on .brand-hud
+             itself. An animation beats a plain declaration, and rise-in's last keyframe
+             sets transform to none, so a scale on the animated element is silently lost. It
+             also reserves the scaled height, which a transform alone never does. -->
+        <div class="landing-hud rise">${brandHudMarkup()}</div>
+        <!-- The DS's entry-block, and on this screen it is the composer's only home at any
+             width — syncLandingComposer moves the real #entryBar node in here once this
+             markup lands. Empty in the string on purpose: that node carries live listeners,
+             a typed value and focus, so it is moved, never re-created. -->
+        <div class="landing-entry rise" id="landingEntrySlot">
+          <h2 class="landing-entry-title">Paste a link or ask anything</h2>
+          <p class="landing-entry-sub">Get a clear, evidence-based answer in seconds.</p>
+        </div>
+        <div class="landing-actions rise">${actions}</div>
+        <div class="landing-features rise">${features}</div>
+        <div class="landing-footer-line rise">Curiosity leads to a brighter tomorrow.</div>
       </div>
-      <div class="landing-actions">${actions}</div>
-      <div class="landing-features">${features}</div>
-      <div class="landing-footer-line">Curiosity leads to a brighter tomorrow.</div>
     </div>`;
 }
 
 /**
- * On a phone, before any check has run, the real composer (`el.entryBar`) lives inside
- * `#landingEntrySlot` — a child of the landing page `landingMarkup` just rendered — rather
- * than at its normal dock (`#entryBarDock`, a static marker right before it in index.html).
- * Desktop/tablet never embed it: nothing there was reported broken, and the composer
- * staying reachable without scrolling at those widths is an existing, deliberate property
- * (see `.entry-bar`'s own "Desktop/tablet" comment) this isn't meant to touch.
+ * The idle state *inside* the shell — the TRASE Design System's "App shell — New Chat".
+ *
+ * Same moment as `landingMarkup` (nothing selected, nothing running) drawn for a different
+ * reader: someone who has checked something before and has just pressed "New chat", so the
+ * sidebar, the topbar and the docked composer are all still around them and this pane's
+ * only job is to say the shell is idle. Hence a hero *box* sitting in the pane — the
+ * bordered, radially-lit panel the DS draws — rather than the chrome-less full page the
+ * landing is. The two screens are deliberately not the same composition at two sizes: the
+ * landing has to introduce the app to someone who has never seen it, and this one has
+ * nothing to introduce.
+ */
+function newChatMarkup() {
+  return `
+    <div class="newchat-hero">
+      <div class="newchat-brand">
+        <div class="brand-mark" aria-hidden="true">${BRAND_MARK_SVG}</div>
+        <div class="newchat-wordmark">TRASE</div>
+        <div class="newchat-tagline">Trace the truth.<br>Understand what you see.</div>
+      </div>
+      ${brandHudMarkup()}
+    </div>`;
+}
+
+/**
+ * `data-view="landing"` on <html> is what makes the landing a page rather than a pane —
+ * every rule that hides the shell's chrome hangs off it (see index.html). Cleared by
+ * `setClaimsPaneHTML` on every pane replacement and re-set by `renderChatPane`'s landing
+ * branch immediately after, so no render path can leave the shell hidden behind a screen
+ * that is no longer up; the topbar is refreshed here because what it should say depends on
+ * which of the two idle screens is showing.
+ */
+function setLandingView(on) {
+  const root = document.documentElement;
+  if (on) root.dataset.view = "landing";
+  else if (root.dataset.view === "landing") delete root.dataset.view;
+  updateShellTopbar();
+}
+
+/**
+ * While the landing page is up, the real composer (`el.entryBar`) lives inside
+ * `#landingEntrySlot` — the DS's entry-block, a child of the page `landingMarkup` just
+ * rendered — rather than at its normal dock (`#entryBarDock`, a static marker in
+ * index.html). At every width, not just on a phone the way this used to work: the landing
+ * takes the whole shell off the screen, so there is no docked position left for the
+ * composer to keep. Every other screen, the "New chat" hero included, keeps the shell and
+ * therefore keeps the dock, and this hands the composer straight back to it.
  *
  * Called after every render that could have changed either the device kind or which markup
  * is on screen (`applyDevice`, and `renderChatPane`'s empty branch) so the composer is never
@@ -1544,7 +1706,7 @@ function landingMarkup() {
  * one focus/value state instead of two copies to keep in sync.
  */
 function syncLandingComposer() {
-  const slot = device.kind === "phone" ? document.getElementById("landingEntrySlot") : null;
+  const slot = document.getElementById("landingEntrySlot");
   if (slot) {
     if (el.entryBar.parentElement !== slot) slot.appendChild(el.entryBar);
     return;
@@ -1569,6 +1731,11 @@ function syncLandingComposer() {
 function setClaimsPaneHTML(html) {
   const dock = document.getElementById("entryBarDock");
   if (dock && el.entryBar.previousElementSibling !== dock) dock.after(el.entryBar);
+  // Same by-construction argument as the redock above, for the other piece of global state
+  // the landing page owns: whatever is about to be written here, the shell's chrome has to
+  // come back unless the caller is itself re-rendering the landing — and the one caller
+  // that is sets it again immediately (see `renderChatPane`).
+  setLandingView(false);
   el.claimsPane.innerHTML = html;
 }
 
@@ -1991,9 +2158,15 @@ function updatePaneMode() {
  */
 function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
   if (!entry) {
-    el.shellTopbar.hidden = true;
-    setStatusText("shellTitle", "");
-    setStatusText("shellSub", "");
+    // Only one of the two idle screens has a shell to put a title bar in. The landing is a
+    // page with its own `.lshell-topbar` and no shell chrome at all; the "New chat" hero
+    // sits inside the intact shell, where the DS's own screen gives this bar a name and a
+    // status line rather than leaving it blank the way an unselected shell used to.
+    const landing = document.documentElement.dataset.view === "landing";
+    el.shellTopbar.hidden = landing;
+    el.shellTitle.removeAttribute("title");
+    setStatusText("shellTitle", landing ? "" : "New chat");
+    setStatusText("shellSub", landing ? "" : "Nothing checked yet");
     // The phone bar is the only one at that width, so it stays on screen with nothing
     // selected and says what to do instead — the design system's "Chat to shell — Mobile"
     // screen opens on exactly this line.
@@ -2247,14 +2420,19 @@ function renderChatPane({ newest = -1 } = {}) {
 
   setClaimsGridMode(null);
   if (!settled && !pending) {
-    // The TRASE Design System's "App shell — Landing" screen, which is what this app looks
-    // like before anything has been pasted: no video column (see `updatePaneMode`), and the
-    // full landing composition (`landingMarkup`) as `.claimsPane`'s own direct content —
-    // not a card floating inside it. `.landing` (index.html) is what carries the fill-height
-    // and entrance treatment a wrapping `.claim-card` used to give this state.
-    setClaimsPaneHTML(landingMarkup());
-    // The markup above is on screen now, `#landingEntrySlot` included — this is what
-    // actually moves the real composer into it on a phone (see `syncLandingComposer`).
+    // The design system draws this one idle moment as two different screens, and which one
+    // a reader should get turns on whether they have ever checked anything: "App shell —
+    // Landing" introduces the app to someone with an empty library, and "App shell — New
+    // Chat" is what the shell looks like sitting idle once there is a library to go back to
+    // (pressing "New chat" is the usual way back here). No video column either way, see
+    // `updatePaneMode`.
+    const landing = library.length === 0;
+    setClaimsPaneHTML(landing ? landingMarkup() : newChatMarkup());
+    // `setClaimsPaneHTML` clears the landing view on every pane replacement, so this puts it
+    // back — synchronously, with no await between, so the shell chrome it hides is never
+    // painted in the gap. The markup is on screen by now, `#landingEntrySlot` included,
+    // which is what lets `syncLandingComposer` move the real composer into it.
+    setLandingView(landing);
     syncLandingComposer();
     return;
   }
@@ -2377,7 +2555,7 @@ async function runChat(question) {
  */
 function startNewCheck() {
   if (inFlight) return; // Same guard as switching library items mid-run.
-  // "New check" lives inside the drawer on a phone, and it hands focus to the composer
+  // "New chat" lives inside the drawer on a phone, and it hands focus to the composer
   // behind it — so the drawer has to be out of the way before that focus call lands.
   closeDrawer({ restoreFocus: false });
   selectedId = null;
@@ -3670,6 +3848,20 @@ async function handleClaimsPaneClick(event) {
     return;
   }
 
+  // The landing page's own topbar. It is inside the claims pane (the landing is a page
+  // rendered there, not part of index.html's static shell), so its two buttons are
+  // delegated here rather than bound once at startup like the shell's own copies.
+  if (event.target.closest("#landingLibBtn")) {
+    if (isDrawerOpen()) closeDrawer();
+    else openDrawer();
+    return;
+  }
+  if (event.target.closest("#landingSettingsBtn")) {
+    closeDrawer({ restoreFocus: false });
+    openSettingsDialog();
+    return;
+  }
+
   const chip = event.target.closest(".ts-chip[data-seek]");
   if (chip) {
     revealPlayer();
@@ -4207,7 +4399,11 @@ let pendingMediaReveal = false;
  * running card's own entrance is left to carry "something happened" on its own.
  */
 async function playLandingExit(url) {
-  const landing = el.claimsPane.querySelector(".landing");
+  // Either idle screen — the landing page, or the "New chat" hero inside the shell. They
+  // leave identically (see the shared `.leaving` rules in index.html); what differs is only
+  // that the landing also has the composer embedded in it, which the flight below handles
+  // by asking where the composer actually is rather than by asking which screen this was.
+  const landing = el.claimsPane.querySelector(".landing, .newchat-hero");
   if (!landing || prefersReducedMotion()) return;
   pendingMediaReveal = true;
   showAnalyzingOverlay(url);
@@ -4219,7 +4415,7 @@ async function playLandingExit(url) {
   // reading slightly wrong (`getBoundingClientRect` reflects the rendered, post-transform
   // box). `runCheck`'s own render calls redock it a moment later regardless (see
   // `setClaimsPaneHTML`); this is only what turns that redock into a flight.
-  const embedded = device.kind === "phone" && el.entryBar.parentElement?.id === "landingEntrySlot";
+  const embedded = el.entryBar.parentElement?.id === "landingEntrySlot";
   if (embedded) flyEntryBarHome(el.entryBar.getBoundingClientRect());
 }
 
@@ -5320,6 +5516,13 @@ watchDevice(window, applyDevice);
 initSpeechToText();
 
 renderLibrary();
+// Records this visit, and from here on every interaction refreshes it (throttled). Pointer
+// and key events on the capture phase so nothing that stops propagation can quietly make
+// the app look abandoned while it is being used.
+markActive();
+for (const type of ["pointerdown", "keydown"]) {
+  window.addEventListener(type, markActive, { capture: true, passive: true });
+}
 // `selectedId` comes from `library[0]`, so it names a real entry — but only as long as
 // the parse that produced `library` behaved. A truncated or hand-edited localStorage blob
 // yields entries without ids, and then every branch here was skipped and the claims pane
@@ -5334,7 +5537,9 @@ if (startupEntry) {
 }
 // The markup's own `single-pane` class on #contentGrid is only right for a first-ever
 // visit — a returning reader's `selectedId` can restore to a real entry right here (see
-// the comment above), which should show the shell immediately, not grow into it.
+// the comment above), which should show the shell immediately, not grow into it. A reader
+// coming back after `IDLE_RESET_MS` restores nothing (`startedFresh`), so they get the
+// grow-in the same as a first visit does.
 updatePaneMode();
 updateComposerMode();
 loadServerConfig();

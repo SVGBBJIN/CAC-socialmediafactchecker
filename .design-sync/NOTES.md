@@ -336,3 +336,252 @@ section shows the border is simply gone rather than relocated. The leave/flight/
 sequence from the previous section was re-run end to end against the renamed classes to
 confirm nothing there was riding on the old selector unnoticed. `npm test` — 629/629 —
 unaffected, as expected for a markup/CSS-only change.
+
+## Next session — splitting the idle state into the DS's two screens
+
+"Fix the new chat state to match app shell--new chat." The design system has *two* screens
+for the one moment this app had one of: `cards/Screens-App Shell-Landing.html` (ported in the
+sections above, and until now the only thing `renderChatPane`'s empty branch rendered) and
+`cards/Screens-App Shell-New Chat.html`, which nothing here had ever looked at. They are not
+the same composition at two sizes — the landing introduces the app to someone who has never
+seen it (brand block, HUD, entry block, action tiles, feature row, footer line), and the New
+Chat screen is the shell sitting idle with nothing to introduce (brand block, HUD, stop).
+
+The user's call on how they should map, asked before any of this was written: **split them**
+— landing while the library is empty, the New Chat hero once there is anything to go back
+to — and **rework the landing to be exactly like the design**, which they clarified means
+"in the landing we're removing the sidebar and entry bar." That clarification is what
+resolved the one apparent contradiction in the brief: the DS's `.newchat-hero` is a bordered
+box, which is precisely the border commit e2bc62f had just deliberately removed from the
+landing. It isn't a contradiction, because the two belong to different screens — the hero is
+a box *inside* a shell that stays, and the landing is a page with no shell at all.
+
+- **The landing is now a page, not a pane.** `data-view="landing"` on `<html>`
+  (`setLandingView` in app.js) takes the sidebar, both top bars and every ancestor's padding
+  off the screen; `landingMarkup` supplies the DS's own `.lshell-topbar` (hamburger +
+  settings) over `.lshell-scroll` instead. Sizes are the DS's rather than the shrunk-to-fit
+  card ones this state used to use: 52px mark, 42px wordmark, 12px tagline on one line (the
+  old markup broke it in two — that is the *New Chat* screen's treatment, not the landing's),
+  the HUD at its full 280x340 with a 236px cluster, `entry-block` at 26px padding and 560px
+  wide, 21px action-tile icons, a 760px feature row.
+- **The composer is embedded at every width now, not just on a phone.** Nothing clever: with
+  the shell gone there is no docked position left for it to be in, so the breakpoint that
+  used to choose between the two has nothing to choose. `syncLandingComposer` lost its
+  `device.kind === "phone"` test and became "is the slot on screen"; `playLandingExit`'s
+  flight test lost the same clause and now asks only where the composer actually is. The
+  desktop composer arrives wearing the raised-card treatment (`@media (min-width: 701px)` on
+  `.entry-bar`) that the phone one never had, so `.landing-entry .entry-bar` had to strip
+  border, radius, shadow and background as well as the old hairline — without that the
+  landing showed a card inside a card.
+- **The sidebar is off-screen, not absent.** `#landingLibBtn` opens it as the drawer, and
+  `openDrawer`'s `device.kind !== "phone"` guard is now `&& !isLandingView()` so that works
+  at a desktop too — otherwise the library and the sign-in button under it would be
+  unreachable while the page is up. `drawerHandle`/`setDrawerHandleState` keep whichever of
+  the two handles is on screen carrying the `aria-expanded`/`aria-label` state and taking
+  focus back on close (the phone's `.drawer-toggle` is `display: none` above 700px, and
+  focusing a hidden element drops focus on `<body>` — the exact bug that focus restore
+  exists to prevent).
+- **The shell topbar stops being blank.** `updateShellTopbar` hid `.shell-topbar` outright
+  with nothing selected; on the New Chat screen the DS gives it "New chat" / "Nothing checked
+  yet", so it now does, and stays hidden only on the landing, which has no shell to put it
+  in. The sidebar button is "New chat" too, both label and `aria-label`/`title`.
+- **Both screens leave the same way.** `playLandingExit` queries `.landing, .newchat-hero`
+  and the `.leaving` rules are shared: the hero is the same brand block over the same HUD,
+  and a check starting from it is the same event, so it flies its pills out rather than
+  blinking away while the landing gets a send-off.
+- **Removed**: `.claim-empty-text` (the invitation paragraph the DS's landing replaces with
+  `entry-block`'s own heading and subtext) and the whole phone-only `.landing-entry` block,
+  now that the embed is unconditional. `.landing` itself no longer animates — its children
+  stagger in via the DS's `rise-in` — so both reduced-motion overrides moved to
+  `.landing .rise, .landing .brand-hud` with it.
+
+**Two bugs the headless pass caught that a screenshot wouldn't have.** Both are the kind
+that look fine until you read the numbers:
+
+- `.lshell-scroll` is a column flex container, and a column flex container shrinks its items
+  to fit before it will overflow. The HUD was arriving **160px tall instead of 340**, its
+  absolutely-positioned rings quietly crushed together, on any viewport shorter than the
+  composition — which is every laptop. `.lshell-scroll > * { flex-shrink: 0 }` is what makes
+  `overflow-y: auto` above it mean anything.
+- The phone's HUD scale was written as `transform: scale(0.86)` the way the existing
+  `.brand-hud` phone rule does it — and silently did nothing, because `.brand-hud` is the one
+  element here carrying the `rise-in` animation, whose last keyframe is `transform: none`,
+  and an animation beats a plain declaration. Re-specified as real geometry (241x292 wrap,
+  1.035 cluster scale) instead. Worth remembering before reaching for `transform` on anything
+  in `.lshell-scroll`.
+
+**Verification.** Headless, reading live state rather than judging by eye, across both
+breakpoints and both screens: the view attribute, each chrome element's computed
+visibility and box, the composer's real `parentElement` at each stage, the rendered wordmark
+size, and the HUD's measured box (which is how both bugs above surfaced). The drawer was
+opened from `#landingLibBtn` at 1440px and closed from the scrim. The exit was driven through
+the real trigger from *both* screens — `/api/probe-link` stubbed, the intake confirm dialog
+answered the way a reader answers it — confirming `.landing.leaving` / `.newchat-hero.leaving`,
+the analyzing overlay, the composer landing back at its dock, and `flyEntryBarHome` running at
+desktop width for the first time (its `style.transform` is set, where an unrun flight leaves it
+empty). `npm test` — 629/629 — before and after; nothing in the suite touches this markup.
+
+**Self-critique.** Three things are worth naming rather than leaving to be discovered:
+
+- The phone top bar still says "New check" / "Paste a link to get started" while the sidebar
+  button next to it now says "New chat" and the desktop bar says "New chat" / "Nothing checked
+  yet". That is exactly what was asked for (the phone-copy option was offered and not picked),
+  but it is an inconsistency, and if it wasn't deliberate it is a two-line fix.
+- The split is on `library.length === 0`, so the landing is genuinely unreachable once you
+  have checked anything — clearing the library is the only way back to it. That follows from
+  the mapping that was chosen, but it does mean the screen most of the design effort went
+  into is the one almost nobody sees twice.
+- `#landingLibBtn` opens a library that is empty by definition on the screen it appears on.
+  It is in the DS's own landing topbar and it is the only route to sign-in while the page is
+  up, which is why it is wired rather than dropped, but "Open checks" opening an empty list is
+  a fair thing to call odd.
+
+## Same session — who gets the landing, and when
+
+Follow-up to the split above: "Make the landing page load for anyone without browser data
+and if they're inactive for a certain period." The first half already worked (an empty
+library is what routes to the landing), so the real change is the second. The user's calls:
+**7 days**, **checked at page load only**, and a reader returning after that gap gets the
+**New chat hero**, not the landing — the landing stays strictly for a browser with nothing
+in it.
+
+Those three together reduce to one mechanism, which is why it is small: **after a long
+enough gap, don't auto-reopen the last check.** `selectedId` has always initialised to
+`library[0]?.id`, so a reload dropped you straight back into whatever you were last reading;
+now `startedFresh` gates that, and a null `selectedId` falls through the startup path's
+existing empty-state branch, which already picks landing-vs-hero by `library.length`. No new
+screen, no new routing — the two screens from the section above just get a second way in.
+
+- `trase.activity.v1` holds one number, written by `markActive` on load and on every
+  `pointerdown`/`keydown` (capture phase, passive, throttled to one write a minute — the
+  value only needs to be right to within far less than seven days). Capture phase so nothing
+  that stops propagation can make a tab in active use look abandoned.
+- `resumedFresh()` is read **once**, at module scope, before `markActive` can overwrite the
+  value it reads. A missing record counts as fresh, which covers a first visit, cleared site
+  data, a private window — and, one time only, an existing reader upgrading into this
+  version, who has a library but no activity record yet. That one-off hero is the correct
+  answer for them rather than a bug to special-case.
+- Storage failures are swallowed: the only cost of a browser that won't persist this is
+  being greeted by the landing every time, which is the safe direction to fail in.
+
+**Verification.** Six startup states driven headlessly, each a fresh context with its
+localStorage seeded before the app loads: no browser data → landing; library + active 5
+minutes ago → the check reopens; + 6 days → still reopens (the boundary holds from below);
++ 8 days → New chat hero; library with no activity record → hero; no library + 8 days →
+landing. The stamp refreshes to "now" on all six. `npm test` — 629/629 — and the four-screen
+pass from the previous section re-run unchanged.
+
+**One test artifact worth writing down**, because it cost time and will again: seeding
+localStorage via Playwright's `addInitScript` *silently corrupts this particular test*. The
+app carries a static `<iframe id="videoEmbed">` with no `src`, so it is `about:blank` and
+same-origin, and an init script re-runs inside it — putting the seeded, stale timestamp back
+*after* app.js has already refreshed it. The activity stamp read as untouched on exactly the
+cases that had one seeded, which looks precisely like `markActive` never running. Guard any
+such seeding with `if (window.top !== window) return;`.
+
+**Self-critique.** Two things:
+
+- Inactivity is measured per browser, not per person — signed-in readers get no continuity
+  across devices, and clearing site data reads as seven days away. Consistent with how the
+  library itself works (localStorage, see `LIBRARY_KEY`), so this adds no new limitation, but
+  it does mean "inactive for 7 days" is really "this browser hasn't been used for 7 days."
+- The gap is only ever checked at load, as asked. A tab left open for a fortnight and
+  returned to still shows the check that was open, and only a reload moves it. That is the
+  conservative reading and nothing changes under a reader mid-look, but it does mean the
+  longest-idle case in practice — the always-open tab — is the one case this doesn't catch.
+
+## Same session — the HUD's spacing, reported as "slightly glitched"
+
+Both new screens had a spacing fault, and they turned out to be two faces of one mistake:
+the previous pass treated `.brand-hud`'s **box** and its **pill positions** as things to
+override per screen, when they are a single tuned arrangement — the four pills sit where
+they do *relative to the rings*, and the two lower ones deliberately ride over the rings'
+bottom third rather than floating clear of them.
+
+- **Landing**: the box was stretched to the DS's 280x340 while only the cluster inside it
+  was scaled, leaving **104px of empty box below the rings** on desktop (89 on a phone) with
+  Facts and Clarity stranded at the bottom of it. That band was the visible glitch.
+- **New chat hero**: the opposite end of the same thing. The HUD's Sources/Context pills sit
+  flush with its own top edge, so the hero's `gap: 6px` put them 6px under the tagline and
+  they read as collided with it.
+
+Fixed by scaling the whole mark as one piece instead — `transform: scale(var(--hud-scale))`
+on `.brand-hud`, one number per breakpoint (1.204 desktop, 1.035 phone), no box or pill
+overrides at all. Dead band below the rings is now 29px desktop / 24px phone, which is
+simply `.brand-hud`'s own 220-vs-196 proportion, the same as the running card has always
+shown. Hero gap 22px desktop / 16px phone.
+
+**This is the third time the `transform`-vs-animation conflict has bitten**, so it is now
+designed around rather than worked around: `landingMarkup` wraps the HUD in
+`<div class="landing-hud rise">`, the rise-in stagger rides on that wrapper, and `transform`
+on `.brand-hud` itself is left free. The wrapper also carries the scaled height
+(`calc(220px * var(--hud-scale))`), which a transform never reserves on its own. The earlier
+"apply it as real geometry instead" note in the section above is superseded — that was the
+workaround; this is the fix.
+
+**Verification.** Every block's measured top/bottom/height and the gap between each pair, on
+both screens at both breakpoints, plus the HUD's wrap-vs-cluster box and all four pill
+positions — which is the measurement that found the fault and the one that confirms it gone.
+Inter-block gaps now read exactly as declared (30/28/20/28/26 desktop). `npm test` —
+629/629 — and the exit transition re-run from both screens, since `.landing.leaving
+.brand-hud-pill` is a descendant selector that a new wrapper could have broken and didn't.
+
+**Self-critique.** The landing's HUD is now `.brand-hud`'s proportions scaled up rather than
+the DS's literal 280x340 box, so it is no longer a pixel match to that card — a deliberate
+divergence, and the second one in this file where the DS's own numbers lost to the product's
+tuned version of the same mark (see the `VerdictBadge`/`tokens.css` entries far above for
+the pattern). If the DS's looser pill placement was intentional rather than an artifact of
+its wrap height, this is the wrong call and the fix is to widen `.brand-hud`'s pill offsets
+proportionally instead of the whole mark.
+
+## Same session — the entry block rides over the brand mark
+
+"Can we fix the landing pages to have the same overlay effect as they do in the DS" — which,
+after asking, meant: **the entry bar should sit slightly on top of the Matrix**, not in a
+column below it. Worth recording that the first three guesses were all wrong (the page's
+radial glow, the hero's missing phone gradient, the Matrix→MatrixLoader morph overlay), and
+that ruling them out was cheap while guessing would not have been: DS `tokens.css` is
+byte-identical to the product's `:root` on every colour, `styles.css` is nothing but
+`@import`s, and `Matrix.css` has no overlay of any kind. The glow was already there and
+correct.
+
+`.landing-entry`'s `margin-top` is now negative, in two named parts so the overlap stays
+honest at any scale:
+
+    margin-top: calc(-24px * var(--hud-scale) - 12px);
+
+- `24px * var(--hud-scale)` cancels the empty strip at the bottom of `.brand-hud`'s own box
+  (220 tall for a 196 cluster). That strip is slack in the mark's box, not design, and it was
+  the bulk of the **81px** that sat between the lower pills and the card.
+- The `12px` after it is the real overlap — the bite taken out of the outer ring's bottom
+  arc. Measured: the card's top lands 12px inside the rings at both breakpoints, and the
+  Facts/Clarity pills end 12px (desktop) / 9px (phone) *above* the card edge, so the overlap
+  only ever eats ring, never a pill.
+- `position: relative; z-index: 1`, because the pills are absolutely positioned and would
+  otherwise paint over the card's opaque background instead of disappearing behind it —
+  which is the whole effect.
+
+`--hud-scale` moved from `.landing-hud` up to `.landing` so the entry block can read the
+same number the mark is sized by. One value per breakpoint still (1.204 / 1.035) and the
+overlap follows it.
+
+**Also settled, retroactively**: the previous section's self-critique flagged that scaling
+the mark rather than reproducing the desktop card's literal 280x340 box might be the wrong
+call. It isn't. `cards/Screens-App Shell-Mobile-Landing.html` wraps `<Matrix />` in a
+**240x222** box, and `components/Matrix.css` is a 236x220 wrap around a 196 cluster with
+pills at `top:0`/`top:150` — i.e. exactly `.brand-hud`. Two of the DS's three landing-ish
+screens use the tuned component; only the desktop Landing card hand-rolls the larger, looser
+variant. The product now agrees with the majority, and the 280x340 box reads as that one
+card's own artifact.
+
+**Verification.** Per-block measurement again on both breakpoints — the card's top against
+the cluster's bottom and against each pill's bottom, which is the pair of numbers that says
+whether an overlap is deliberate or a collision. `npm test` — 629/629 — and the exit
+transition re-run from both screens, since the new `z-index` sits inside the subtree
+`.landing.leaving` fades.
+
+**Self-critique.** The 12px bite is a taste value with nothing behind it but that it looks
+deliberate at both breakpoints; it is the one number here a reader could reasonably want
+different, and it is a single edit. And the overlap is landing-only by nature — the "New
+chat" hero's composer is docked at the window's bottom edge, nowhere near its mark, so
+there is nothing there to overlap and that screen is unchanged.
