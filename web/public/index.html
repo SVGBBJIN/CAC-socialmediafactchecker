@@ -1851,17 +1851,82 @@
   .morph-logo svg { width: 100%; height: 100%; display: block; }
   .morph-logo.spin svg { animation: brand-hud-spin-slow 6s linear infinite; }
   .morph-logo.out { opacity: 0; }
-  /* The clone keeps `.brand-hud-cluster`'s own 196px internals and is scaled about its top
-     left corner to whatever size the flight is at — so its rings, ticks and core stay in
-     proportion the whole way down instead of being re-laid-out per frame. Overrides the
-     `translateX(-50%)` centering the real cluster carries inside `.brand-hud`. */
-  .morph-dial .morph-cluster { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  /* The mark in flight, drawn the DS's way rather than cloned from either end of the trip.
+     Every dimension here is a percentage of the flying box, which is what lets the same
+     markup be a 196px brand HUD at the start and an 84px loading dial at the end with no
+     re-layout — and, more to the point, it is what makes the two *the same drawing*: the
+     rings, ticks, core and nodes are at the same proportions in both, so the flight can
+     interpolate between the HUD's values and the dial's instead of scaling one and cutting
+     to the other. The from-values below are the brand HUD's; `paintMorph` (app.js) walks
+     them to the dial's over the flight.
+
+     A clone of the real cluster cannot do this: `.brand-hud-cluster`'s geometry is in px
+     against a 196px box, so scaled down it stays the HUD's drawing at the dial's size and
+     the handoff reads as a pop. */
+  .morph-parts { position: relative; width: 100%; height: 100%; }
+  .mm-ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+  .mm-ring.r1 { inset: 0; border: 1px solid var(--border); }
+  .mm-ring.r2 {
+    inset: 11%; border: 1.5px dashed color-mix(in oklab, var(--warn) 45%, var(--border));
+    animation: brand-hud-spin-slow 40s linear infinite;
+  }
+  .mm-ring.r3 { inset: 21%; border: 1px solid color-mix(in oklab, var(--accent-2) 50%, var(--border)); }
+  .mm-ticks { position: absolute; inset: 0; }
+  .mm-ticks i { position: absolute; top: 0; left: calc(50% - 1px); width: 2px; height: 50%; transform-origin: 50% 100%; }
+  .mm-ticks i b {
+    position: absolute; top: 2%; left: 0; width: 2px; height: 4%; display: block;
+    background: color-mix(in oklab, var(--accent) 50%, var(--border));
+  }
+  .mm-core { position: absolute; top: 50%; left: 50%; width: 30%; height: 30%; margin: -15% 0 0 -15%; }
+  .mm-core svg { width: 100%; height: 100%; display: block; }
+  .mm-node { position: absolute; width: 5%; height: 5%; border-radius: 50%; }
+  .mm-node.n1 { top: 24%; left: 18%; background: var(--good); }
+  .mm-node.n2 { top: 64%; left: 78%; background: var(--bad); }
+  .mm-node.n3 { top: 14%; left: 70%; background: var(--accent-2); }
+  /* The mark waiting in the analyzing ring on a phone: the DS spins up its dashed ring and
+     lights an arc around it, so the thing that just landed reads as working rather than as
+     parked. Only that flow has a wait to fill. */
+  .morph-dial .mm-arc {
+    position: absolute; inset: -2px; border-radius: 50%;
+    border: 3px solid transparent; border-top-color: var(--accent);
+    opacity: 0; transition: opacity 0.4s ease;
+  }
+  .morph-dial.loading .mm-arc { opacity: 1; animation: analyzing-scan-spin 1.1s linear infinite; }
+  .morph-dial.loading .mm-ring.r2 { animation-duration: 2.4s; }
   /* The destination holds still and empty while the clone is in the air, then catches it —
      the same handoff the DS does with `.card-morph`/`.morph-land`. `animation: none`
      suppresses `.run-enter`'s own entrance, which would otherwise play (and finish) behind
      the flight and have nothing left to show on arrival. */
   .claim-card.morph-incoming { opacity: 0 !important; animation: none !important; }
   .claim-card.morph-land { animation: morph-land-in 0.6s ease both; }
+  /* The rest of the DS's arrival, which the flight is only half of: the video column rises
+     in under the panel while it is still travelling, and the title bar's new text fades in
+     late — after the mark has landed, so the screen finishes assembling rather than being
+     fully written the moment the pane swaps. The DS's own durations and delays.
+     `[data-shell-enter]` is set by `playShellEntrance` (app.js); the phone's own version of
+     this arrival is in the phone breakpoint further down, since down there the shell comes
+     out from under an interstitial instead of being watched the whole way. */
+  @media (min-width: 701px) {
+    [data-shell-enter] .video-pane { animation: shell-col-in 1.3s cubic-bezier(.2,.7,.2,1) 0.35s both; }
+    [data-shell-enter] .shell-topbar-meta,
+    [data-shell-enter] .topbar-meta { animation: shell-fade-late 1s ease 1.35s both; }
+  }
+  @keyframes shell-col-in {
+    from { opacity: 0; transform: translateY(16px) scale(0.97); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes shell-fade-late {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-shell-enter] .video-pane,
+    [data-shell-enter] .shell-topbar-meta,
+    [data-shell-enter] .topbar-meta { animation: none; }
+  }
+  [data-motion="reduced"][data-shell-enter] .video-pane,
+  [data-motion="reduced"][data-shell-enter] .shell-topbar-meta,
+  [data-motion="reduced"][data-shell-enter] .topbar-meta { animation: none; }
   @keyframes morph-land-in { from { opacity: 0; } to { opacity: 1; } }
   @media (prefers-reduced-motion: reduce) {
     .claim-card.morph-land { animation: none; opacity: 1; }
@@ -2843,6 +2908,9 @@
        silently. The claims pane's own contents are left alone: the running card is already
        playing its own arrival as the morph lands on it (`.morph-land`), and a second
        opacity animation over the top of that one would fight it for the same property. */
+    /* The phone's own title-bar arrival (the late fade above is desktop-only): under an
+       interstitial the title bar is revealed rather than watched being written, so it rises
+       with the sheet instead of arriving a beat after a flight the reader never saw. */
     [data-shell-enter] .topbar-meta { animation: shell-enter-rise 0.45s cubic-bezier(.2,.8,.3,1) 0.3s both; }
     [data-shell-enter] .claims-pane-wrap { animation: shell-enter-sheet 0.55s cubic-bezier(.2,.8,.3,1) 0.12s both; }
     @keyframes shell-enter-sheet {

@@ -4480,21 +4480,27 @@ function historyFor(entry) {
 let pendingMediaReveal = false;
 
 /**
- * The shell arriving from under the interstitial — the last movement of "Mobile Landing to
- * Shell". The media wipes down, the title bar rises into it and the sheet slides up from
- * below (`[data-shell-enter]` in index.html); the claims pane's own contents are left to
- * the morph landing on them.
+ * The shell arriving around the flight — the movement both DS screens end on. On a phone
+ * that is "Mobile Landing to Shell"'s reveal: the media wipes down, the sheet slides up and
+ * the title bar rises with it. At every other width it is "Chat to shell"'s: the video
+ * column rises in under the travelling panel and the title bar's text fades in after the
+ * mark has landed. Either way the claims pane's own contents are left to the morph landing
+ * on them.
  *
- * Phone only, because it is the phone flow that has something to reveal: at every other
- * width the shell was never hidden — the panel flew across it in full view.
+ * Both flows, with different choreography (see `[data-shell-enter]` in index.html): at
+ * desktop width the reader watched the panel fly across the shell, so what arrives late is
+ * the title bar's text; on a phone the shell comes out from under the interstitial, so the
+ * sheet and the media strip are what move.
  */
+let shellEnterTimer = 0;
+
 function playShellEntrance() {
-  if (device.kind !== "phone" || prefersReducedMotion()) return;
-  // The video strip's own wipe, deferred to here rather than played in `runCheck` the way
-  // it is at other widths: on this flow it would otherwise have run and finished behind a
-  // frosted sheet, and the strip would simply be *there* when the sheet lifted.
+  if (prefersReducedMotion()) return;
+  // The video strip's own wipe, deferred to here rather than played in `runCheck`: on the
+  // phone flow it would otherwise have run and finished behind a frosted sheet, and the
+  // strip would simply be *there* when the sheet lifted.
   const videoPane = document.querySelector(".video-pane");
-  if (pendingMediaReveal && videoPane) {
+  if (pendingMediaReveal && videoPane && device.kind === "phone") {
     pendingMediaReveal = false;
     videoPane.classList.add("media-reveal");
     videoPane.addEventListener("animationend", () => videoPane.classList.remove("media-reveal"), { once: true });
@@ -4502,8 +4508,10 @@ function playShellEntrance() {
   const root = document.documentElement;
   root.dataset.shellEnter = "";
   // Cleared rather than left on: the rules it drives are `both`-filled entrance animations,
-  // and a class that outlives its own animation replays it on the next thing to match.
-  setTimeout(() => delete root.dataset.shellEnter, 800);
+  // and a class that outlives its own animation replays it on the next thing to match. Long
+  // enough for the latest of them (the title bar's late fade, 1.35s in) to finish.
+  clearTimeout(shellEnterTimer);
+  shellEnterTimer = setTimeout(() => delete root.dataset.shellEnter, 2500);
 }
 
 /**
@@ -4535,8 +4543,27 @@ function playShellEntrance() {
  * and an 84px card dial are the same drawing at two sizes rather than two re-layouts.
  */
 const MORPH_DIAL_BASE = 196;
-const MORPH_FLIGHT_MS = 900;
+/* The DS's own numbers for this screen: the idle screen holds for 600ms while it leaves,
+ * then the flight runs 1800ms on an `easeOutCubic`, which front-loads the travel and lets
+ * the last third be the mark settling rather than still crossing the pane. Shortening it
+ * was the thing that made this read as a swap with a slide in front of it. */
+const MORPH_HERO_OUT_MS = 600;
+const MORPH_FLIGHT_MS = 1800;
+/* The phone's last leg is the DS's other screen and its other number: "Mobile Landing to
+ * Shell" moves its mark in 0.8s, because there the mark has already had its long beat
+ * waiting in the analyzing ring and the shell it is dropping into was just revealed — a
+ * 1.8s descent on top of that is the reader waiting twice for the same arrival. */
+const MORPH_FLIGHT_PHONE_MS = 800;
 const MORPH_WAYPOINT_MS = 420;
+/* The two ends of every value the mark interpolates, brand HUD → loading dial, exactly as
+ * the DS's "Chat to shell" card lists them. The rings darken and thicken, the ticks grow
+ * from stubs to the dial's full marks, and the core turns twice and stops. */
+const MORPH_PARTS = {
+  r1: { from: "var(--border)", to: "color-mix(in oklab, var(--ink-dim) 45%, var(--border))", width: [1, 1.5] },
+  r2: { from: "color-mix(in oklab, var(--warn) 45%, var(--border))", to: "color-mix(in oklab, var(--warn) 70%, var(--border))" },
+  r3: { from: "color-mix(in oklab, var(--accent-2) 50%, var(--border))", to: "color-mix(in oklab, var(--accent-2) 75%, var(--border))", width: [1, 1.5] },
+  tick: { from: "color-mix(in oklab, var(--accent) 50%, var(--border))", to: "color-mix(in oklab, var(--accent) 75%, var(--border))", height: [4, 16] },
+};
 
 /** The in-flight morph, or `null` when there isn't one. Every function below is a no-op
  * without it, which is what lets `runCheck` call `finishMorph()` unconditionally on a path
@@ -4563,18 +4590,32 @@ function lerpRect(from, to, e) {
   };
 }
 
-/** Writes one frame of the flight. The wash — the hero's radial lighting, the one part of
- * the panel that belongs to the idle screen rather than to a card — fades out across the
- * middle of the trip, so what lands is already a plain card face. */
-function paintMorph(frameRect, dialRect, wash) {
+/** `color-mix` between two colors that may themselves be `color-mix`es or custom
+ * properties — which is why this composes a string rather than interpolating channels: the
+ * from- and to-values are the design system's tokens, and resolving them here would bake in
+ * one theme's numbers. */
+const mixColor = (from, to, pct) => `color-mix(in oklab, ${to} ${pct}%, ${from} ${100 - pct}%)`;
+
+/**
+ * Writes one frame of the flight: the panel's box, the mark's box, and — this is the part
+ * that makes it a morph rather than a scaled clone sliding — the mark's own internals,
+ * walked from the brand HUD's values to the loading dial's on the same clock.
+ *
+ * `parts` is the eased progress of that internal morph, held separately from the rects
+ * because the phone's first leg (into the analyzing ring) travels without it: the mark
+ * arrives there still a brand mark, and only becomes a dial on the leg into the card.
+ */
+function paintMorph(frameRect, dialRect) {
   if (morph.frame && frameRect) {
     Object.assign(morph.frame.style, {
       top: `${frameRect.top}px`,
       left: `${frameRect.left}px`,
       width: `${frameRect.width}px`,
       height: `${frameRect.height}px`,
+      // The hero's 18px corners to the card's 14px, the DS's own two values.
+      borderRadius: `${lerp(18, 14, morph.parts)}px`,
     });
-    morph.wash.style.opacity = wash;
+    morph.wash.style.opacity = 1 - clamp01((morph.parts - 0.25) / 0.55);
   }
   Object.assign(morph.dial.style, {
     top: `${dialRect.top}px`,
@@ -4582,7 +4623,28 @@ function paintMorph(frameRect, dialRect, wash) {
     width: `${dialRect.width}px`,
     height: `${dialRect.height}px`,
   });
-  morph.cluster.style.transform = `scale(${dialRect.width / MORPH_DIAL_BASE})`;
+
+  const pct = morph.parts * 100;
+  const { r1, r2, r3, ticks, core } = morph.parts$;
+  if (r1) {
+    r1.style.borderColor = mixColor(MORPH_PARTS.r1.from, MORPH_PARTS.r1.to, pct);
+    r1.style.borderWidth = `${lerp(...MORPH_PARTS.r1.width, morph.parts)}px`;
+  }
+  if (r2) r2.style.borderColor = mixColor(MORPH_PARTS.r2.from, MORPH_PARTS.r2.to, pct);
+  if (r3) {
+    r3.style.borderColor = mixColor(MORPH_PARTS.r3.from, MORPH_PARTS.r3.to, pct);
+    r3.style.borderWidth = `${lerp(...MORPH_PARTS.r3.width, morph.parts)}px`;
+  }
+  // Each tick a hair behind the one before it, so the marks grow around the ring rather
+  // than all lengthening at once — the DS's own 1.12 overshoot and 0.006-per-tick offset.
+  ticks.forEach((tick, i) => {
+    const t = easeOutCubic(clamp01(morph.partsRaw * 1.12 - i * 0.006));
+    tick.style.background = mixColor(MORPH_PARTS.tick.from, MORPH_PARTS.tick.to, t * 100);
+    tick.style.height = `${lerp(...MORPH_PARTS.tick.height, t)}%`;
+  });
+  // Two turns on the same eased clock, so it decelerates to a clean stop exactly as the
+  // mark settles instead of being caught mid-spin.
+  if (core) core.style.transform = `rotate(${morph.parts * 720}deg)`;
 }
 
 /**
@@ -4612,17 +4674,45 @@ function startMorph(hero) {
   if (frameRect) layer.innerHTML = `<div class="morph-frame"><div class="morph-wash"></div></div>`;
   const dial = document.createElement("div");
   dial.className = "morph-dial";
-  const clone = cluster.cloneNode(true);
-  clone.className = "brand-hud-cluster morph-cluster";
-  dial.append(clone);
+  const ticks = Array.from({ length: 12 }, (_, i) => `<i style="transform:rotate(${i * 30}deg)"><b></b></i>`).join("");
+  dial.innerHTML = `
+    <div class="morph-parts">
+      <div class="mm-ring r1"></div><div class="mm-ring r2"></div><div class="mm-ring r3"></div>
+      <div class="mm-ticks">${ticks}</div>
+      <div class="mm-core">${BRAND_MARK_SVG}</div>
+      <div class="mm-node n1"></div><div class="mm-node n2"></div><div class="mm-node n3"></div>
+      <div class="mm-arc"></div>
+    </div>`;
   layer.append(dial);
   document.body.append(layer);
 
-  // The same frame the clone starts carrying the mark, the real one stops — no cross-fade,
-  // no two marks.
+  // The same frame the drawing starts carrying the mark, the real one stops — no
+  // cross-fade, no two marks.
   cluster.style.opacity = "0";
-  morph = { layer, frame: layer.querySelector(".morph-frame"), wash: layer.querySelector(".morph-wash"), dial, cluster: clone, logo: null, frameRect, dialRect, raf: 0, leg: Promise.resolve() };
-  paintMorph(frameRect, dialRect, 1);
+  morph = {
+    layer,
+    frame: layer.querySelector(".morph-frame"),
+    wash: layer.querySelector(".morph-wash"),
+    dial,
+    logo: null,
+    frameRect,
+    dialRect,
+    // How far along the brand-HUD → loading-dial interpolation the mark's internals are,
+    // eased and raw (the tick stagger wants the raw clock). Advanced only by the leg that
+    // is actually doing that morph — see `flyMorph`.
+    parts: 0,
+    partsRaw: 0,
+    parts$: {
+      r1: dial.querySelector(".mm-ring.r1"),
+      r2: dial.querySelector(".mm-ring.r2"),
+      r3: dial.querySelector(".mm-ring.r3"),
+      core: dial.querySelector(".mm-core"),
+      ticks: [...dial.querySelectorAll(".mm-ticks i b")],
+    },
+    raf: 0,
+    leg: Promise.resolve(),
+  };
+  paintMorph(frameRect, dialRect);
 
   // The brand mark's own leg, on the flow that has somewhere to fly it: the landing's
   // wordmark mark travels into the middle of the analyzing ring, which is the DS's
@@ -4664,7 +4754,7 @@ function flyLogo(to) {
  * destination is gone" and ends the leg early — reported back as `false` so the caller
  * knows not to play an arrival.
  */
-function flyMorph({ frame, dial, to, duration }) {
+function flyMorph({ frame, dial, to, parts, duration }) {
   if (!morph) return Promise.resolve(false);
   cancelAnimationFrame(morph.raf);
   const fromFrame = morph.frameRect;
@@ -4679,7 +4769,12 @@ function flyMorph({ frame, dial, to, duration }) {
       const e = easeOutCubic(raw);
       if (target.frame && fromFrame) morph.frameRect = lerpRect(fromFrame, target.frame, e);
       morph.dialRect = lerpRect(fromDial, target.dial, e);
-      paintMorph(morph.frameRect, morph.dialRect, 1 - clamp01((e - 0.25) / 0.55));
+      // Only the leg that lands on the dial turns the mark into one — see `morph.parts`.
+      if (parts) {
+        morph.parts = e;
+        morph.partsRaw = raw;
+      }
+      paintMorph(morph.frameRect, morph.dialRect);
       if (raw < 1) morph.raf = requestAnimationFrame(step);
       else resolve(true);
     };
@@ -4735,8 +4830,10 @@ async function finishMorph() {
   hideAnalyzingOverlay();
   overlay?.classList.remove("handoff");
   // The mark stays in the ring and leaves with it — its second DS leg has no destination
-  // here (see `startMorph`) — while the cluster carries on down into the card's dial.
+  // here (see `startMorph`) — while the drawing carries on down into the card's dial, done
+  // waiting and so done showing the arc it waited behind.
   morph?.logo?.classList.add("out");
+  morph?.dial.classList.remove("loading");
   // What the interstitial was covering is revealed moving, not already arrived.
   playShellEntrance();
   if (!morph) {
@@ -4752,7 +4849,8 @@ async function finishMorph() {
   }
   const landed = await flyMorph({
     to: () => (card.isConnected ? { frame: morphRect(card), dial: morphRect(dial) } : null),
-    duration: MORPH_FLIGHT_MS,
+    parts: true,
+    duration: device.kind === "phone" ? MORPH_FLIGHT_PHONE_MS : MORPH_FLIGHT_MS,
   });
   card.classList.remove("morph-incoming");
   // No arrival to play if the card left while the clone was still in the air — the clone
@@ -4796,11 +4894,11 @@ async function playLandingExit(url) {
   const phone = device.kind === "phone";
   if (phone) showAnalyzingOverlay(url);
   landing.classList.add("leaving");
-  // Long enough for the DS's staggered teardown to actually read on a phone — the last
-  // block in the column does not start leaving until 220ms in (see `.landing.leaving` in
-  // index.html). At every other width the idle screen is one box with one fade, and waiting
-  // on a stagger that isn't happening would just be dead time before the panel flies.
-  await new Promise((resolve) => setTimeout(resolve, phone ? 560 : 320));
+  // The DS holds the idle screen for this long before the flight starts, at every width:
+  // long enough for the phone's staggered teardown to read (its last block does not begin
+  // leaving until 220ms in — see `.landing.leaving` in index.html), and, on the hero, long
+  // enough that the pills are actually gone before the panel they were orbiting moves.
+  await new Promise((resolve) => setTimeout(resolve, MORPH_HERO_OUT_MS));
 
   // Measured now, at the exact moment the page it's embedded in is about to be torn down —
   // not before the fade above, whose own `transform: scale(...)` would have made an earlier
@@ -4823,7 +4921,7 @@ async function playLandingExit(url) {
   document.getElementById("analyzingOverlay")?.classList.add("handoff");
   const core = Math.round(ring.width * 0.42);
   flyLogo({ top: ring.top + (ring.height - core) / 2, left: ring.left + (ring.width - core) / 2, width: core, height: core });
-  flyMorph({ dial: ring, duration: MORPH_WAYPOINT_MS });
+  flyMorph({ dial: ring, duration: MORPH_WAYPOINT_MS }).then(() => morph?.dial.classList.add("loading"));
 }
 
 /**
