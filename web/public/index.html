@@ -1084,26 +1084,39 @@
      vocabulary everything else does (`VERDICTS` in public/claims.js). */
   .summary-card {
     grid-column: 1 / -1;
-    padding: 11px 13px;
+    padding: 18px 20px;
     border-radius: 14px;
     border: 1px solid var(--border);
     background: var(--surface);
-    box-shadow: inset 0 1px 0 rgba(240,237,230,0.04);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ink) 4%, transparent);
   }
-  .summary-title { font-family: var(--font-display); font-size: 12.5px; font-weight: 600; color: var(--ink); margin: 0; }
-  .summary-sub { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
-  .summary-stats { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
-  .summary-stat { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .summary-title { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--ink); margin: 0; }
+  .summary-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .summary-stats { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 14px; }
+  .summary-stat { display: flex; align-items: center; gap: 9px; min-width: 0; }
   .summary-count {
     flex-shrink: 0;
-    width: 18px; height: 18px; border-radius: 50%;
+    width: 26px; height: 26px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
-    font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+    font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; color: #fff;
   }
-  .summary-count.bad   { background: color-mix(in oklab, var(--bad) 20%, transparent);   color: var(--bad); }
-  .summary-count.warn  { background: color-mix(in oklab, var(--warn) 20%, transparent);  color: var(--warn); }
-  .summary-count.good  { background: color-mix(in oklab, var(--good) 20%, transparent);  color: var(--good); }
-  .summary-count.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); }
+  .summary-count.bad   { background: color-mix(in oklab, var(--bad) 82%, black 18%); }
+  .summary-count.warn  { background: color-mix(in oklab, var(--warn) 78%, black 22%); }
+  .summary-count.good  { background: color-mix(in oklab, var(--good) 78%, black 22%); }
+  .summary-count.muted { background: color-mix(in oklab, var(--muted) 68%, black 32%); }
+  /* The DS's `compact` modifier, and the only size this app ever draws the card at: the
+     summary is a strip over a grid of claim boxes here, not a page-heading card, and at the
+     base size above it reads as a fifth claim. Kept as a modifier rather than folded into
+     the base rule so the card stays the DS's component — `summaryCardHTML` (app.js) writes
+     the class, and the two halves can be diffed against `components/SummaryCard.css`
+     line for line. */
+  .summary-card.compact { padding: 11px 13px; }
+  .summary-card.compact .summary-title { font-size: 12px; }
+  .summary-card.compact .summary-sub { font-size: 10px; margin-top: 1px; }
+  .summary-card.compact .summary-stats { gap: 5px 12px; margin-top: 8px; }
+  .summary-card.compact .summary-stat { gap: 5px; }
+  .summary-card.compact .summary-count { width: 18px; height: 18px; font-size: 9.5px; }
+  .summary-card.compact .summary-label { font-size: 10px; }
   /* Ported from the TRASE Design System's SummaryCard (`AnimatedNumber`): a count that just
      went up rolls in from above instead of silently swapping digits — `updateSummaryCard`
      (app.js) is what decides "just went up" and adds/removes this class per bump. Never
@@ -1118,7 +1131,7 @@
   /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
      and disappears as counts change would make the card a different shape on every check. */
   .summary-stat[data-count="0"] { opacity: 0.45; }
-  .summary-label { font-size: 10.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .summary-label { font-size: 12.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* ---------- Claim skeleton (loading grid) ---------- */
   /* `renderClaimSkeletons` (app.js) — a placeholder box for a claim the model has named but
@@ -1710,6 +1723,10 @@
     gap: 22px;
     padding: 32px;
     border-radius: 18px; border: 1px solid var(--border);
+    /* Both halves, as the DS writes them: the flat `--bg` fill is what the radial highlight
+       is lit against, and without it the pane's own surface shows through the gradient's
+       transparent end and the panel stops reading as a panel. */
+    background-color: var(--bg);
     background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
     opacity: 0;
     animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
@@ -1726,14 +1743,10 @@
     font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
     text-transform: uppercase; color: var(--muted); margin-top: 10px; line-height: 1.7;
   }
-  @media (max-width: 520px) {
-    /* The phone has one pane and a video strip to share it with, so the hero gives up its
-       border the same way `.claim-card` does at this width (see that rule's own comment)
-       and just centres what it holds. */
-    .newchat-hero { padding: 16px 8px; gap: 16px; border: 0; border-radius: 0; background-image: none; }
-    .newchat-wordmark { font-size: 26px; }
-    .newchat-tagline { font-size: 10px; }
-  }
+  /* No phone override any more, and none is reachable: every phone gets the landing page as
+     its idle screen (see `renderChatPane`), and the phone breakpoint (700px) is wider than
+     this rule's own, so what used to live here could only ever have applied to a screen
+     that no longer renders at that width. */
   @media (prefers-reduced-motion: reduce) { .newchat-hero { animation: none; opacity: 1; } }
   [data-motion="reduced"] .newchat-hero { animation: none; opacity: 1; }
 
@@ -1765,6 +1778,49 @@
   .newchat-hero.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
   .landing.leaving .brand-hud-pill.clarity,
   .newchat-hero.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
+
+  /* ---------- Chat to shell: the shared-element morph ----------
+     The other half of the DS's "Chat to shell" screen, and the part that was missing here:
+     the idle screen doesn't only fade, it *travels*. A clone of the hero panel and of the
+     brand HUD's cluster is lifted out of the page into a fixed layer (`startMorph` in
+     app.js) at the moment the pills fly out, and flown on one rAF clock into the running
+     card's own footprint and its loading dial (`finishMorph`). Clones rather than the real
+     nodes because the pane underneath is torn down and rebuilt between the two halves of
+     the flight — the source no longer exists by the time the destination does.
+
+     Sizes are driven from JS (`paintMorph`), so there is nothing here but the paint: the
+     frame's chrome, the radial wash it carries out of the hero, and the `transform-origin`
+     the cluster clone is scaled about. Above the analyzing overlay (z-index 40) for the
+     same reason the DS's own `.hud-fly` sits above its analyzing layer: on a phone the
+     flight's waypoint *is* that overlay's scan ring. */
+  .morph-layer { position: fixed; inset: 0; z-index: 41; pointer-events: none; transition: opacity 0.4s ease; }
+  .morph-layer.out { opacity: 0; }
+  .morph-frame {
+    position: fixed; box-sizing: border-box; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 16px; background: var(--surface);
+  }
+  .morph-wash {
+    position: absolute; inset: 0;
+    background: var(--bg);
+    background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
+  }
+  .morph-dial { position: fixed; }
+  /* The clone keeps `.brand-hud-cluster`'s own 196px internals and is scaled about its top
+     left corner to whatever size the flight is at — so its rings, ticks and core stay in
+     proportion the whole way down instead of being re-laid-out per frame. Overrides the
+     `translateX(-50%)` centering the real cluster carries inside `.brand-hud`. */
+  .morph-dial .morph-cluster { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  /* The destination holds still and empty while the clone is in the air, then catches it —
+     the same handoff the DS does with `.card-morph`/`.morph-land`. `animation: none`
+     suppresses `.run-enter`'s own entrance, which would otherwise play (and finish) behind
+     the flight and have nothing left to show on arrival. */
+  .claim-card.morph-incoming { opacity: 0 !important; animation: none !important; }
+  .claim-card.morph-land { animation: morph-land-in 0.6s ease both; }
+  @keyframes morph-land-in { from { opacity: 0; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .claim-card.morph-land { animation: none; opacity: 1; }
+  }
+  [data-motion="reduced"] .claim-card.morph-land { animation: none; opacity: 1; }
 
   /* ---------- Analyzing interstitial: bridges the shared-element flight ----------
      Ported from the TRASE Design System's "Chat to shell"/"Mobile Landing to Shell"

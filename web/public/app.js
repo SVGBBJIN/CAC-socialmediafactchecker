@@ -411,6 +411,13 @@ function applyDevice(next) {
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
   if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
   syncDrawerInert();
+  // Which of the two idle screens is the right one depends on the device kind (a phone only
+  // ever gets the landing — see `renderChatPane`), so crossing that boundary while an idle
+  // screen is up has to redraw it. Guarded on the kind actually changing and on the pane
+  // actually showing one of them: every other render path calls `renderChatPane` itself
+  // when it needs to, and re-entering it from here mid-check would tear down a running
+  // card.
+  if (next.kind !== previousKind && el.claimsPane.querySelector(".landing, .newchat-hero")) renderChatPane();
   // The landing page embeds the composer at every width, so a resize no longer moves it —
   // but this still has to run, because a re-render that happened while the device kind was
   // changing could have left it at the dock with the slot on screen, and the call is a
@@ -2469,7 +2476,15 @@ function renderChatPane({ newest = -1 } = {}) {
     // Chat" is what the shell looks like sitting idle once there is a library to go back to
     // (pressing "New chat" is the usual way back here). No video column either way, see
     // `updatePaneMode`.
-    const landing = library.length === 0;
+    //
+    // A phone only ever gets the landing. The DS's mobile flow is two screens, not three —
+    // "App shell — Mobile Landing" straight into "App shell — Mobile" (the two ends of
+    // "Mobile Landing to Shell") — and the "New chat" hero is the composition that doesn't
+    // survive the narrowing: with the sidebar behind a drawer and the topbar reduced to two
+    // icons, there is no shell left around it for a bordered hero *box* to sit inside, so
+    // it reads as a worse-cropped landing page rather than as a different screen. Landing
+    // → chat window is the whole of the phone's idle path.
+    const landing = library.length === 0 || device.kind === "phone";
     setClaimsPaneHTML(landing ? landingMarkup() : newChatMarkup());
     // `setClaimsPaneHTML` clears the landing view on every pane replacement, so this puts it
     // back — synchronously, with no await between, so the shell chrome it hides is never
@@ -4101,7 +4116,7 @@ function summaryCardHTML(claims) {
     })
     .join("");
   return `
-    <div class="summary-card">
+    <div class="summary-card compact">
       <h2 class="summary-title">Fact check summary</h2>
       <div class="summary-sub">${claims.length} claim${claims.length === 1 ? "" : "s"} analysed</div>
       <div class="summary-stats">${stats}</div>
@@ -4441,6 +4456,224 @@ let pendingMediaReveal = false;
  * transition away from — a follow-up, a re-run, a retry) or under reduced motion, where the
  * running card's own entrance is left to carry "something happened" on its own.
  */
+/* ---------- The shared-element morph ----------
+ *
+ * The centre of the DS's "Chat to shell": the idle screen does not cut to the running card,
+ * it becomes it. The hero panel's own box flies into the card's box while the brand HUD's
+ * cluster — the same rings, ticks and core the loading dial is drawn from — shrinks into
+ * that card's dial, both on one rAF clock so they arrive together.
+ *
+ * Clones, in a fixed layer on `<body>`, rather than the real nodes: the flight spans a full
+ * teardown of the claims pane (`renderRunningCard` replaces its `innerHTML`), so the source
+ * elements stop existing halfway through it. The real cluster is hidden the same frame its
+ * clone takes over its exact pixels, so there is never two of it.
+ *
+ * `MORPH_DIAL_BASE` is `.brand-hud-cluster`'s intrinsic px size (index.html): the clone
+ * keeps that internal layout and is scaled about its top-left corner, so a 196px hero mark
+ * and an 84px card dial are the same drawing at two sizes rather than two re-layouts.
+ */
+const MORPH_DIAL_BASE = 196;
+const MORPH_FLIGHT_MS = 900;
+const MORPH_WAYPOINT_MS = 420;
+
+/** The in-flight morph, or `null` when there isn't one. Every function below is a no-op
+ * without it, which is what lets `runCheck` call `finishMorph()` unconditionally on a path
+ * (a follow-up, a retry, reduced motion) where no morph was ever started. */
+let morph = null;
+
+const easeOutCubic = (t) => 1 - (1 - t) ** 3;
+const clamp01 = (t) => Math.min(1, Math.max(0, t));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/** A viewport-relative box, which is the coordinate space a `position: fixed` clone lives
+ * in — so no scroll offsets or containing-block corrections are needed anywhere below. */
+function morphRect(node) {
+  const r = node.getBoundingClientRect();
+  return { top: r.top, left: r.left, width: r.width, height: r.height };
+}
+
+function lerpRect(from, to, e) {
+  return {
+    top: lerp(from.top, to.top, e),
+    left: lerp(from.left, to.left, e),
+    width: lerp(from.width, to.width, e),
+    height: lerp(from.height, to.height, e),
+  };
+}
+
+/** Writes one frame of the flight. The wash — the hero's radial lighting, the one part of
+ * the panel that belongs to the idle screen rather than to a card — fades out across the
+ * middle of the trip, so what lands is already a plain card face. */
+function paintMorph(frameRect, dialRect, wash) {
+  if (morph.frame && frameRect) {
+    Object.assign(morph.frame.style, {
+      top: `${frameRect.top}px`,
+      left: `${frameRect.left}px`,
+      width: `${frameRect.width}px`,
+      height: `${frameRect.height}px`,
+    });
+    morph.wash.style.opacity = wash;
+  }
+  Object.assign(morph.dial.style, {
+    top: `${dialRect.top}px`,
+    left: `${dialRect.left}px`,
+    width: `${dialRect.width}px`,
+    height: `${dialRect.height}px`,
+  });
+  morph.cluster.style.transform = `scale(${dialRect.width / MORPH_DIAL_BASE})`;
+}
+
+/**
+ * Lifts the clones out of `hero` and parks them exactly over the originals. No motion yet —
+ * `flyMorph` is what moves them, once there is somewhere to move them to.
+ *
+ * Measured before the caller adds `.leaving`: that class scales the hero, and
+ * `getBoundingClientRect` reports the rendered, post-transform box, so a reading taken
+ * afterwards would start the flight from slightly the wrong place.
+ *
+ * Only the "New chat" hero flies a panel, because it is the only idle screen that *is* one:
+ * a bordered, radially-lit box sitting inside the shell, the same shape as the card it is
+ * about to become. The landing is a whole page — flying its rect would drag a lit panel
+ * across the sidebar and the title bar on its way to a box in the middle of the pane — so
+ * there only the mark travels, which is exactly what the DS's "Mobile Landing to Shell"
+ * flies (`.hud-fly`).
+ */
+function startMorph(hero) {
+  const cluster = hero.querySelector(".brand-hud-cluster");
+  if (!cluster || morph) return;
+  const dialRect = morphRect(cluster);
+  const frameRect = hero.classList.contains("newchat-hero") ? morphRect(hero) : null;
+
+  const layer = document.createElement("div");
+  layer.className = "morph-layer";
+  layer.setAttribute("aria-hidden", "true");
+  if (frameRect) layer.innerHTML = `<div class="morph-frame"><div class="morph-wash"></div></div>`;
+  const dial = document.createElement("div");
+  dial.className = "morph-dial";
+  const clone = cluster.cloneNode(true);
+  clone.className = "brand-hud-cluster morph-cluster";
+  dial.append(clone);
+  layer.append(dial);
+  document.body.append(layer);
+
+  // The same frame the clone starts carrying the mark, the real one stops — no cross-fade,
+  // no two marks.
+  cluster.style.opacity = "0";
+  morph = { layer, frame: layer.querySelector(".morph-frame"), wash: layer.querySelector(".morph-wash"), dial, cluster: clone, frameRect, dialRect, raf: 0, leg: Promise.resolve() };
+  paintMorph(frameRect, dialRect, 1);
+}
+
+/** One leg of the flight, from wherever the clones currently are. Resolves when it lands;
+ * the current rects are updated every frame rather than only at the end, so a leg that is
+ * interrupted (`cancelAnimationFrame` below) leaves the next one a correct starting point
+ * instead of snapping back.
+ *
+ * `to` is re-read every frame rather than measured once, because the destination is a node
+ * in a live pane: a check that fails in the first second replaces the running card outright
+ * (`renderResultCard`'s error branch), and a flight aimed at a rect the detached node used
+ * to have lands in the corner of the screen. Returning `null` from it means "the
+ * destination is gone" and ends the leg early — reported back as `false` so the caller
+ * knows not to play an arrival.
+ */
+function flyMorph({ frame, dial, to, duration }) {
+  if (!morph) return Promise.resolve(false);
+  cancelAnimationFrame(morph.raf);
+  const fromFrame = morph.frameRect;
+  const fromDial = morph.dialRect;
+  morph.leg = new Promise((resolve) => {
+    const start = performance.now();
+    const step = (now) => {
+      if (!morph) return resolve(false);
+      const target = to ? to() : { frame, dial };
+      if (!target) return resolve(false);
+      const raw = Math.min(1, (now - start) / duration);
+      const e = easeOutCubic(raw);
+      if (target.frame && fromFrame) morph.frameRect = lerpRect(fromFrame, target.frame, e);
+      morph.dialRect = lerpRect(fromDial, target.dial, e);
+      paintMorph(morph.frameRect, morph.dialRect, 1 - clamp01((e - 0.25) / 0.55));
+      if (raw < 1) morph.raf = requestAnimationFrame(step);
+      else resolve(true);
+    };
+    morph.raf = requestAnimationFrame(step);
+  });
+  return morph.leg;
+}
+
+/** Takes the layer down. Safe at any point, including mid-leg and including twice. */
+function endMorph() {
+  if (!morph) return;
+  cancelAnimationFrame(morph.raf);
+  const { layer } = morph;
+  morph = null;
+  layer.classList.add("out");
+  setTimeout(() => layer.remove(), 450);
+}
+
+/**
+ * The second half of the flight, called by `runCheck` the moment the running card exists —
+ * which is the first moment there is a destination to measure. The card is held blank while
+ * the clone is in the air and catches it on arrival (`.morph-incoming`/`.morph-land`), so
+ * the mark is never drawn twice and never missing.
+ *
+ * Deliberately not awaited by `runCheck`: the request is already in flight underneath this
+ * and nothing about the check waits on an animation.
+ */
+async function finishMorph() {
+  if (!morph) return;
+  const card = el.claimsPane.querySelector(".claim-card.run-enter");
+  const dial = card?.querySelector(".iris-wrap");
+  if (!card || !dial) {
+    endMorph();
+    return;
+  }
+  card.classList.add("morph-incoming");
+  // On a phone the first leg is still flying into the analyzing overlay's scan ring (see
+  // `playLandingExit`); let it land before reading the destination, or the two legs fight
+  // over the same clock. A no-op on every other width, where there was no first leg.
+  await morph?.leg;
+  hideAnalyzingOverlay();
+  if (!morph) {
+    card.classList.remove("morph-incoming");
+    return;
+  }
+  // Two frames so the just-mounted card has been laid out — a rect read on the same frame
+  // as the `innerHTML` swap can still be the pane's pre-swap geometry.
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (!morph) {
+    card.classList.remove("morph-incoming");
+    return;
+  }
+  const landed = await flyMorph({
+    to: () => (card.isConnected ? { frame: morphRect(card), dial: morphRect(dial) } : null),
+    duration: MORPH_FLIGHT_MS,
+  });
+  card.classList.remove("morph-incoming");
+  // No arrival to play if the card left while the clone was still in the air — the clone
+  // just fades where it is, and whatever replaced the card (an error, most likely) is
+  // already on screen in its own right.
+  if (landed) {
+    card.classList.add("morph-land");
+    setTimeout(() => card.classList.remove("morph-land"), 700);
+  }
+  endMorph();
+}
+
+/**
+ * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
+ * if the claims pane is still showing an idle screen when a check begins, let it visibly
+ * leave first — the whole page fades and scales back, the brand HUD's four pills fly
+ * outward on top of that (`.landing.leaving` in index.html), a clone of the hero panel and
+ * of its brand mark lifts out of the page to be flown into the running card
+ * (`startMorph`/`finishMorph` — the morph proper), and, on a phone, the analyzing overlay
+ * fades in as that flight's waypoint the way the DS's "Mobile Landing to Shell" does. The
+ * composer, which on the landing is embedded in the page rather than docked
+ * (`syncLandingComposer`), flies back to its dock at the same time (`flyEntryBarHome`)
+ * instead of snapping there the instant the page is torn down.
+ *
+ * A no-op once a check is already under way (nothing to transition away from — a follow-up,
+ * a re-run, a retry) or under reduced motion, where the running card's own entrance is left
+ * to carry "something happened" on its own.
+ */
 async function playLandingExit(url) {
   // Either idle screen — the landing page, or the "New chat" hero inside the shell. They
   // leave identically (see the shared `.leaving` rules in index.html); what differs is only
@@ -4449,7 +4682,11 @@ async function playLandingExit(url) {
   const landing = el.claimsPane.querySelector(".landing, .newchat-hero");
   if (!landing || prefersReducedMotion()) return;
   pendingMediaReveal = true;
-  showAnalyzingOverlay(url);
+  startMorph(landing);
+  // The overlay is the phone flow's own beat in the DS, and only the phone's: at any width
+  // where the panel itself flies, a frosted sheet over the top would hide the flight it is
+  // supposed to be covering for.
+  if (device.kind === "phone") showAnalyzingOverlay(url);
   landing.classList.add("leaving");
   await new Promise((resolve) => setTimeout(resolve, 320));
 
@@ -4460,6 +4697,12 @@ async function playLandingExit(url) {
   // `setClaimsPaneHTML`); this is only what turns that redock into a flight.
   const embedded = el.entryBar.parentElement?.id === "landingEntrySlot";
   if (embedded) flyEntryBarHome(el.entryBar.getBoundingClientRect());
+
+  // The phone's waypoint: the mark flies into the overlay's scan ring and holds there while
+  // the shell is built underneath, then `finishMorph` flies it on down into the card's dial.
+  // Not awaited — the pane swap should not wait on it; `finishMorph` awaits the leg instead.
+  const scan = device.kind === "phone" ? document.querySelector(".analyzing-scan") : null;
+  if (scan && morph) flyMorph({ dial: morphRect(scan), duration: MORPH_WAYPOINT_MS });
 }
 
 /**
@@ -4526,9 +4769,15 @@ async function runCheck(url, existingId, hint) {
   // The running card's own dial (just mounted, real stage-driven) is what takes over the
   // "still working" narrative from here — see `showAnalyzingOverlay`'s own comment for why
   // the overlay itself never has more than "Fetching the source" to say. Safe to call
-  // unconditionally: a no-op if the overlay was never shown (reduced motion, or a
+  // unconditionally: a no-op if there was no morph and no overlay (reduced motion, or a
   // follow-up/retry with no landing page to leave in the first place).
-  setTimeout(hideAnalyzingOverlay, 260);
+  //
+  // The card is the flight's destination, and this is the first moment it exists to be
+  // measured — hence here rather than inside `playLandingExit`. Not awaited: nothing about
+  // the check waits on the animation, and the overlay is taken down by `finishMorph` itself
+  // once the mark has left it (on a phone, it is the flight's waypoint).
+  if (morph) finishMorph();
+  else setTimeout(hideAnalyzingOverlay, 260);
 
   const image = pendingImage;
   clearPendingImage();
