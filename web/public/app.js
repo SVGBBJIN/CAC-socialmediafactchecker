@@ -30,6 +30,61 @@ import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } f
 import * as accounts from "./auth.js";
 
 const LIBRARY_KEY = "trase.library.v1";
+const ACTIVITY_KEY = "trase.activity.v1";
+/**
+ * How long away from the app counts as coming back to it fresh rather than picking up where
+ * you left off. Past this, a returning reader lands on the idle screen (the "New chat" hero,
+ * or the landing page proper when there is no library to hero against) instead of staring at
+ * whichever check they happened to have open a week ago, which by then is somebody else's
+ * question.
+ *
+ * Seven days is deliberately long: this only ever costs a reader the auto-reopen of one old
+ * check, and there is nothing worse than an app that forgets what you were doing over lunch.
+ */
+const IDLE_RESET_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * At most one write a minute. Every `pointerdown`/`keydown` in the app passes through here,
+ * and the value only has to be accurate to within far less than `IDLE_RESET_MS` for the
+ * comparison above to come out the same.
+ */
+const ACTIVITY_WRITE_MS = 60 * 1000;
+let activityWrittenAt = 0;
+
+/** When this browser last did anything in the app, or `null` if it has no record of ever. */
+function lastActiveAt() {
+  try {
+    const raw = Number(localStorage.getItem(ACTIVITY_KEY));
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when this browser is arriving fresh rather than resuming: either it has no record of
+ * the app at all (a first visit, cleared site data, a private window), or its last record is
+ * older than `IDLE_RESET_MS`. Both cases want the same thing — to be met by the app's front
+ * door rather than dropped back into a half-read check.
+ *
+ * Read exactly once, at startup, before `markActive` below overwrites the very value it
+ * reads.
+ */
+function resumedFresh() {
+  const last = lastActiveAt();
+  return last === null || Date.now() - last > IDLE_RESET_MS;
+}
+
+/** Throttled — see `ACTIVITY_WRITE_MS`. Storage being unavailable is not worth a broken app. */
+function markActive() {
+  const now = Date.now();
+  if (now - activityWrittenAt < ACTIVITY_WRITE_MS) return;
+  activityWrittenAt = now;
+  try {
+    localStorage.setItem(ACTIVITY_KEY, String(now));
+  } catch {
+    /* Private mode, or a full quota. The only cost is being greeted by the landing again. */
+  }
+}
 const PASSPHRASE_KEY = "trase.chat.pass"; // shared with the chat UI on purpose
 
 // How much faster than real time the video pane plays back. There's no server-side
@@ -168,7 +223,13 @@ const el = {
 };
 
 let library = loadLibrary();
-let selectedId = library[0]?.id ?? null;
+// Read before anything can call `markActive`, since that overwrites what this is reading.
+const startedFresh = resumedFresh();
+// Normally a reload reopens whatever was last being read. After a long enough gap it
+// deliberately doesn't (see `IDLE_RESET_MS`): `selectedId` stays null, which lands the
+// startup path below on the empty state — the landing page for a browser with no library,
+// the "New chat" hero for one that has one.
+let selectedId = startedFresh ? null : (library[0]?.id ?? null);
 let inFlight = null;
 // Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
 // videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
@@ -5450,6 +5511,13 @@ watchDevice(window, applyDevice);
 initSpeechToText();
 
 renderLibrary();
+// Records this visit, and from here on every interaction refreshes it (throttled). Pointer
+// and key events on the capture phase so nothing that stops propagation can quietly make
+// the app look abandoned while it is being used.
+markActive();
+for (const type of ["pointerdown", "keydown"]) {
+  window.addEventListener(type, markActive, { capture: true, passive: true });
+}
 // `selectedId` comes from `library[0]`, so it names a real entry — but only as long as
 // the parse that produced `library` behaved. A truncated or hand-edited localStorage blob
 // yields entries without ids, and then every branch here was skipped and the claims pane
@@ -5464,7 +5532,9 @@ if (startupEntry) {
 }
 // The markup's own `single-pane` class on #contentGrid is only right for a first-ever
 // visit — a returning reader's `selectedId` can restore to a real entry right here (see
-// the comment above), which should show the shell immediately, not grow into it.
+// the comment above), which should show the shell immediately, not grow into it. A reader
+// coming back after `IDLE_RESET_MS` restores nothing (`startedFresh`), so they get the
+// grow-in the same as a first visit does.
 updatePaneMode();
 updateComposerMode();
 loadServerConfig();

@@ -435,3 +435,57 @@ empty). `npm test` — 629/629 — before and after; nothing in the suite touche
   It is in the DS's own landing topbar and it is the only route to sign-in while the page is
   up, which is why it is wired rather than dropped, but "Open checks" opening an empty list is
   a fair thing to call odd.
+
+## Same session — who gets the landing, and when
+
+Follow-up to the split above: "Make the landing page load for anyone without browser data
+and if they're inactive for a certain period." The first half already worked (an empty
+library is what routes to the landing), so the real change is the second. The user's calls:
+**7 days**, **checked at page load only**, and a reader returning after that gap gets the
+**New chat hero**, not the landing — the landing stays strictly for a browser with nothing
+in it.
+
+Those three together reduce to one mechanism, which is why it is small: **after a long
+enough gap, don't auto-reopen the last check.** `selectedId` has always initialised to
+`library[0]?.id`, so a reload dropped you straight back into whatever you were last reading;
+now `startedFresh` gates that, and a null `selectedId` falls through the startup path's
+existing empty-state branch, which already picks landing-vs-hero by `library.length`. No new
+screen, no new routing — the two screens from the section above just get a second way in.
+
+- `trase.activity.v1` holds one number, written by `markActive` on load and on every
+  `pointerdown`/`keydown` (capture phase, passive, throttled to one write a minute — the
+  value only needs to be right to within far less than seven days). Capture phase so nothing
+  that stops propagation can make a tab in active use look abandoned.
+- `resumedFresh()` is read **once**, at module scope, before `markActive` can overwrite the
+  value it reads. A missing record counts as fresh, which covers a first visit, cleared site
+  data, a private window — and, one time only, an existing reader upgrading into this
+  version, who has a library but no activity record yet. That one-off hero is the correct
+  answer for them rather than a bug to special-case.
+- Storage failures are swallowed: the only cost of a browser that won't persist this is
+  being greeted by the landing every time, which is the safe direction to fail in.
+
+**Verification.** Six startup states driven headlessly, each a fresh context with its
+localStorage seeded before the app loads: no browser data → landing; library + active 5
+minutes ago → the check reopens; + 6 days → still reopens (the boundary holds from below);
++ 8 days → New chat hero; library with no activity record → hero; no library + 8 days →
+landing. The stamp refreshes to "now" on all six. `npm test` — 629/629 — and the four-screen
+pass from the previous section re-run unchanged.
+
+**One test artifact worth writing down**, because it cost time and will again: seeding
+localStorage via Playwright's `addInitScript` *silently corrupts this particular test*. The
+app carries a static `<iframe id="videoEmbed">` with no `src`, so it is `about:blank` and
+same-origin, and an init script re-runs inside it — putting the seeded, stale timestamp back
+*after* app.js has already refreshed it. The activity stamp read as untouched on exactly the
+cases that had one seeded, which looks precisely like `markActive` never running. Guard any
+such seeding with `if (window.top !== window) return;`.
+
+**Self-critique.** Two things:
+
+- Inactivity is measured per browser, not per person — signed-in readers get no continuity
+  across devices, and clearing site data reads as seven days away. Consistent with how the
+  library itself works (localStorage, see `LIBRARY_KEY`), so this adds no new limitation, but
+  it does mean "inactive for 7 days" is really "this browser hasn't been used for 7 days."
+- The gap is only ever checked at load, as asked. A tab left open for a fortnight and
+  returned to still shows the check that was open, and only a reload moves it. That is the
+  conservative reading and nothing changes under a reader mid-look, but it does mean the
+  longest-idle case in practice — the always-open tab — is the one case this doesn't catch.
