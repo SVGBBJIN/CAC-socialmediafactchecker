@@ -1630,7 +1630,12 @@ function landingMarkup() {
           <div class="landing-wordmark">TRASE</div>
           <div class="landing-tagline">Trace the truth. Understand what you see.</div>
         </div>
-        ${brandHudMarkup()}
+        <!-- Wrapper so the entrance animation and the size can stop fighting: the stagger
+             below rides on this, leaving transform free for the scale on .brand-hud
+             itself. An animation beats a plain declaration, and rise-in's last keyframe
+             sets transform to none, so a scale on the animated element is silently lost. It
+             also reserves the scaled height, which a transform alone never does. -->
+        <div class="landing-hud rise">${brandHudMarkup()}</div>
         <!-- The DS's entry-block, and on this screen it is the composer's only home at any
              width — syncLandingComposer moves the real #entryBar node in here once this
              markup lands. Empty in the string on purpose: that node carries live listeners,

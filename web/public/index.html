@@ -1014,12 +1014,10 @@
   @media (prefers-reduced-motion: reduce) {
     .claim-card { transition: none; }
     .claim-card.run-enter,
-    .landing .rise,
-    .landing .brand-hud { animation: none; opacity: 1; }
+    .landing .rise { animation: none; opacity: 1; }
   }
   [data-motion="reduced"] .claim-card.run-enter,
-  [data-motion="reduced"] .landing .rise,
-  [data-motion="reduced"] .landing .brand-hud { animation: none; opacity: 1; }
+  [data-motion="reduced"] .landing .rise { animation: none; opacity: 1; }
   /* The soft violet highlight that follows the pointer during the tilt above — positioned
      by `handleCardTilt` setting a `radial-gradient(...)` background inline, centered on the
      cursor. Sits as the card's first child (see `tiltGlare` in app.js) so it paints under
@@ -1507,10 +1505,9 @@
     from { opacity: 0; transform: translateY(12px); }
     to { opacity: 1; transform: none; }
   }
-  .landing .rise,
-  .landing .brand-hud { animation: rise-in 0.55s cubic-bezier(.2,.7,.2,1) both; }
+  .landing .rise { animation: rise-in 0.55s cubic-bezier(.2,.7,.2,1) both; }
   .landing-brand { animation-delay: 0s; }
-  .landing .brand-hud { animation-delay: 0.08s; }
+  .landing-hud { animation-delay: 0.08s; }
   .landing-entry { animation-delay: 0.2s; }
   .landing-actions { animation-delay: 0.26s; }
   .landing-features { animation-delay: 0.32s; }
@@ -1531,17 +1528,23 @@
     text-transform: uppercase; color: var(--muted); margin-top: 12px; line-height: 1.7;
   }
 
-  /* The DS's landing draws the HUD at its full 280x340 with a 236px cluster; `.brand-hud`'s
-     own geometry (a 196px cluster in a 236x220 box) is the smaller copy the running card
-     and the "New chat" hero use. Scaled rather than re-specified, so there stays one set of
-     ring numbers to keep true — the same move the phone breakpoint already makes on it —
-     and the two lower pills move out to the taller box's corners, where the DS puts them. */
-  .landing .brand-hud { width: 280px; height: 340px; margin: 30px auto 0; }
-  .landing .brand-hud-cluster {
-    transform: translateX(-50%) scale(1.204); transform-origin: top center;
+  /* The landing draws the HUD bigger than the running card and the "New chat" hero do.
+     Scaled as one piece, deliberately: `.brand-hud` is a tuned arrangement — where the four
+     pills sit relative to the rings is the whole composition, and the two lower ones ride
+     *over* the rings' bottom third rather than floating clear of them.
+
+     The first attempt stretched the box to the DS's 280x340 and scaled only the cluster
+     inside it, which left 104px of empty box below the rings (89 on a phone) with the lower
+     pills stranded at the bottom of it — the visible gap that read as broken. Scaling the
+     whole mark keeps one set of ring numbers true and the proportions with them; the
+     wrapper carries the height, because a transform doesn't reserve any. */
+  .landing-hud {
+    --hud-scale: 1.204;
+    margin-top: 30px;
+    height: calc(220px * var(--hud-scale));
+    display: flex; justify-content: center;
   }
-  .landing .brand-hud-pill.facts { top: auto; bottom: 0; left: 14px; }
-  .landing .brand-hud-pill.clarity { top: auto; bottom: 0; right: 14px; }
+  .landing .brand-hud { transform: scale(var(--hud-scale)); transform-origin: top center; }
 
   /* The DS's `entry-block`. On this screen it is the composer's only home at any width —
      `syncLandingComposer` (app.js) moves the real `#entryBar` node in here. */
@@ -1612,12 +1615,8 @@
     .brand-mark { width: 44px; height: 44px; margin-bottom: 10px; }
     .landing-wordmark { font-size: 32px; }
     .landing-tagline { font-size: 11px; margin-top: 10px; }
-    /* The same 0.86 the rest of this breakpoint pulls things in by, but applied as real
-       geometry rather than a `transform`: `.brand-hud` is the one element here carrying the
-       rise-in animation, whose final keyframe is `transform: none`, and an animation beats a
-       plain declaration — so a transform on it would simply be dropped. */
-    .landing .brand-hud { width: 241px; height: 292px; margin-top: 24px; }
-    .landing .brand-hud-cluster { transform: translateX(-50%) scale(1.035); }
+    /* One number, and the wrapper's height follows it — see `.landing-hud` above. */
+    .landing-hud { --hud-scale: 1.035; margin-top: 24px; }
     .landing-entry { margin-top: 20px; padding: 18px 16px; border-radius: 16px; }
     .landing-entry-title { font-size: 17px; }
     .landing-entry-sub { font-size: 11.5px; margin-bottom: 14px; }
@@ -1691,7 +1690,9 @@
   .newchat-hero {
     flex: 1 1 auto; min-height: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 6px;
+    /* The HUD's Sources/Context pills sit flush with its own top edge, so this is the real
+       distance between them and the tagline — at 6px they read as collided with it. */
+    gap: 22px;
     padding: 32px;
     border-radius: 18px; border: 1px solid var(--border);
     background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
@@ -1714,7 +1715,7 @@
     /* The phone has one pane and a video strip to share it with, so the hero gives up its
        border the same way `.claim-card` does at this width (see that rule's own comment)
        and just centres what it holds. */
-    .newchat-hero { padding: 16px 8px; border: 0; border-radius: 0; background-image: none; }
+    .newchat-hero { padding: 16px 8px; gap: 16px; border: 0; border-radius: 0; background-image: none; }
     .newchat-wordmark { font-size: 26px; }
     .newchat-tagline { font-size: 10px; }
   }

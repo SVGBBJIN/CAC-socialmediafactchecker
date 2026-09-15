@@ -489,3 +489,47 @@ such seeding with `if (window.top !== window) return;`.
   returned to still shows the check that was open, and only a reload moves it. That is the
   conservative reading and nothing changes under a reader mid-look, but it does mean the
   longest-idle case in practice — the always-open tab — is the one case this doesn't catch.
+
+## Same session — the HUD's spacing, reported as "slightly glitched"
+
+Both new screens had a spacing fault, and they turned out to be two faces of one mistake:
+the previous pass treated `.brand-hud`'s **box** and its **pill positions** as things to
+override per screen, when they are a single tuned arrangement — the four pills sit where
+they do *relative to the rings*, and the two lower ones deliberately ride over the rings'
+bottom third rather than floating clear of them.
+
+- **Landing**: the box was stretched to the DS's 280x340 while only the cluster inside it
+  was scaled, leaving **104px of empty box below the rings** on desktop (89 on a phone) with
+  Facts and Clarity stranded at the bottom of it. That band was the visible glitch.
+- **New chat hero**: the opposite end of the same thing. The HUD's Sources/Context pills sit
+  flush with its own top edge, so the hero's `gap: 6px` put them 6px under the tagline and
+  they read as collided with it.
+
+Fixed by scaling the whole mark as one piece instead — `transform: scale(var(--hud-scale))`
+on `.brand-hud`, one number per breakpoint (1.204 desktop, 1.035 phone), no box or pill
+overrides at all. Dead band below the rings is now 29px desktop / 24px phone, which is
+simply `.brand-hud`'s own 220-vs-196 proportion, the same as the running card has always
+shown. Hero gap 22px desktop / 16px phone.
+
+**This is the third time the `transform`-vs-animation conflict has bitten**, so it is now
+designed around rather than worked around: `landingMarkup` wraps the HUD in
+`<div class="landing-hud rise">`, the rise-in stagger rides on that wrapper, and `transform`
+on `.brand-hud` itself is left free. The wrapper also carries the scaled height
+(`calc(220px * var(--hud-scale))`), which a transform never reserves on its own. The earlier
+"apply it as real geometry instead" note in the section above is superseded — that was the
+workaround; this is the fix.
+
+**Verification.** Every block's measured top/bottom/height and the gap between each pair, on
+both screens at both breakpoints, plus the HUD's wrap-vs-cluster box and all four pill
+positions — which is the measurement that found the fault and the one that confirms it gone.
+Inter-block gaps now read exactly as declared (30/28/20/28/26 desktop). `npm test` —
+629/629 — and the exit transition re-run from both screens, since `.landing.leaving
+.brand-hud-pill` is a descendant selector that a new wrapper could have broken and didn't.
+
+**Self-critique.** The landing's HUD is now `.brand-hud`'s proportions scaled up rather than
+the DS's literal 280x340 box, so it is no longer a pixel match to that card — a deliberate
+divergence, and the second one in this file where the DS's own numbers lost to the product's
+tuned version of the same mark (see the `VerdictBadge`/`tokens.css` entries far above for
+the pattern). If the DS's looser pill placement was intentional rather than an artifact of
+its wrap height, this is the wrong call and the fix is to widen `.brand-hud`'s pill offsets
+proportionally instead of the whole mark.
