@@ -12,6 +12,7 @@ import {
   auditCorroboration,
   claimSpecifics,
   normalize,
+  claimConfirmed,
   sourceConfirms,
   sourceEvidenceText,
 } from "./lib/corroboration.js";
@@ -476,4 +477,93 @@ test("the audit checks what a source is about, not whether it entails the claim"
     snippet: "Measles cases across the European region increased more than thirtyfold in 2023.",
   };
   assert.equal(sourceConfirms("Measles was eradicated in Europe in 2023", rose).confirms, true);
+});
+
+/* ------------------------------------------- evidence split across the cited sources */
+
+// The real regression this covers: a compound claim — two figures — whose sources carry one
+// figure each. Asked one at a time, every source fails and the claim is downgraded with a
+// note naming a figure one of the cited pages is printing in its own headline.
+const PIPELINE_LENGTH = {
+  title: "East–West Crude Oil Pipeline",
+  url: "https://en.wikipedia.org/wiki/East%E2%80%93West_Crude_Oil_Pipeline",
+  snippet: "The East-West pipeline spans approximately 750 miles (1,200 kilometres) across Saudi Arabia.",
+};
+const PIPELINE_VOLUME = {
+  title: "Saudi Arabia shuts East-West oil pipeline",
+  url: "https://www.energyintel.com/east-west-pipeline-volumes",
+  snippet: "The pipeline moved between 4 million and 5 million barrels of oil daily.",
+};
+
+test("claimConfirmed lets two sources cover a compound claim between them", () => {
+  const claim = "The East-West pipeline is 750 miles long and carries 4 million barrels a day";
+  // Neither source carries the whole claim on its own...
+  assert.equal(sourceConfirms(claim, PIPELINE_LENGTH).confirms, false);
+  assert.equal(sourceConfirms(claim, PIPELINE_VOLUME).confirms, false);
+  // ...and together they do.
+  assert.equal(claimConfirmed(claim, [PIPELINE_LENGTH, PIPELINE_VOLUME]).confirms, true);
+});
+
+test("auditCorroboration keeps a compound claim whose cited sources cover it between them", () => {
+  const answer = answerOf(
+    "The East-West pipeline is 750 miles long and carries 4 million barrels a day",
+    "Length [1], and daily volume [2].",
+    "Corroborated",
+  );
+  assert.equal(auditCorroboration(answer, ledgerOf(PIPELINE_LENGTH, PIPELINE_VOLUME)).changed, false);
+});
+
+test("a figure no cited source carries still downgrades the claim", () => {
+  const claim = "The East-West pipeline is 750 miles long and carries 9 million barrels a day";
+  const result = claimConfirmed(claim, [PIPELINE_LENGTH, PIPELINE_VOLUME]);
+  assert.equal(result.confirms, false);
+  assert.ok(result.missing.includes("9"));
+});
+
+test("pages that only share the topic still confirm nothing, however many there are", () => {
+  const claim = "Rishi Sunak is the current Prime Minister of the United Kingdom";
+  assert.equal(claimConfirmed(claim, [GENERIC_PM, MINISTERS]).confirms, false);
+});
+
+/* ------------------------------------------------------- figures: rounding and ranges */
+
+const ROUNDED = {
+  title: "Pipeline throughput",
+  url: "https://example.com/throughput",
+  snippet: "The line carried 4.2 million barrels per day last year.",
+};
+
+test("a claim's figure is confirmed by a source that states it more precisely", () => {
+  assert.equal(sourceConfirms("The line carries 4 million barrels a day", ROUNDED).confirms, true);
+});
+
+test("a claim's figure is not confirmed by a source that is only close to it", () => {
+  // 2024 and 2025 are 0.05% apart; a percentage tolerance would call them the same year.
+  const source = {
+    title: "Appointment",
+    url: "https://example.com/a",
+    snippet: "Keir Starmer became Prime Minister in 2024.",
+  };
+  assert.equal(
+    sourceConfirms("Keir Starmer became Prime Minister in 2025", source).confirms,
+    false,
+  );
+});
+
+test("a claim's figure is confirmed by a range the source announces as one", () => {
+  const source = {
+    title: "Throughput",
+    url: "https://example.com/r",
+    snippet: "The pipeline moved between 4 million and 5 million barrels daily.",
+  };
+  assert.equal(sourceConfirms("The pipeline moves 4.5 million barrels daily", source).confirms, true);
+});
+
+test("two figures joined by 'and' are not read as a range", () => {
+  const source = {
+    title: "Elections",
+    url: "https://example.com/e",
+    snippet: "Votes were held in 2020 and 2024.",
+  };
+  assert.equal(sourceConfirms("A vote was held in 2022", source).confirms, false);
 });

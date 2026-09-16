@@ -199,6 +199,59 @@ function numeric(token) {
 }
 
 /**
+ * A figure a page states as a range the claim's figure falls inside.
+ *
+ * "between 4 million and 5 million barrels" settles a claim about 4.5 million, and the
+ * token test cannot see it: neither endpoint is the claim's figure. Only a range the page
+ * announces as one counts — a signal word ("between", "from", "ranges") within the three
+ * words before the low end — because two numbers joined by "and" are far more often two
+ * separate facts ("in 2020 and 2024") than an interval, and reading those as a range would
+ * hand a claim about everything in between a confirmation nobody wrote.
+ */
+function statedRanges(evidence) {
+  const ranges = [];
+  const pattern = /(\d+(?:\.\d+)?)((?:\s+[a-z]+){0,2})\s+(?:to|and|through)\s+((?:[a-z]+\s+){0,2})(\d+(?:\.\d+)?)/g;
+  for (const match of evidence.matchAll(pattern)) {
+    const before = evidence.slice(0, match.index).trim().split(/\s+/).slice(-3);
+    if (!before.some((word) => /^(between|from|range|ranges|ranged|ranging|somewhere)$/.test(word))) continue;
+    const low = Number(match[1]);
+    const high = Number(match[4]);
+    if (Number.isFinite(low) && Number.isFinite(high) && low < high) ranges.push([low, high]);
+  }
+  return ranges;
+}
+
+/**
+ * Does this source carry the claim's figure?
+ *
+ * Exact first. Then rounding, at the claim's own precision: a clip saying 4 million
+ * barrels is confirmed by a page reporting 4.2 million, because 4.2 rounds to 4 and "4
+ * million" is how anyone says that out loud. The tolerance is half of the claim's last
+ * significant digit and no more, which is what keeps the obvious disaster out — 2024 and
+ * 2025 are 0.05% apart and a percentage tolerance would call them the same year, while
+ * this one does not, since the claim's precision there is a whole unit. It is one-way on
+ * purpose: a claim that says 4.2 is *not* confirmed by a page that only says "about 4",
+ * because the page never carried the precision the claim is asserting.
+ */
+function numberCovered(number, evidence) {
+  if (evidence.tokens.has(number)) return true;
+  const claimValue = Number(number);
+  if (!Number.isFinite(claimValue)) return false;
+  const decimals = number.includes(".") ? number.split(".")[1].length : 0;
+  const step = 10 ** -decimals;
+  for (const token of evidence.tokens) {
+    const figure = numeric(token);
+    if (figure === null) continue;
+    const value = Number(figure);
+    if (Number.isFinite(value) && Math.abs(value - claimValue) < step / 2) return true;
+  }
+  for (const [low, high] of evidence.ranges) {
+    if (claimValue >= low && claimValue <= high) return true;
+  }
+  return false;
+}
+
+/**
  * The claim's specifics: the named entities and the numbers it turns on.
  *
  * These are what make a claim a claim rather than a subject heading. "Prime Minister of the
@@ -330,46 +383,76 @@ function entityCovered(evidence, evidenceTokens, entity) {
 }
 
 /**
- * Does this source confirm this claim, or is it just about the same subject?
+ * Does this one source confirm this claim, or is it just about the same subject?
  *
- * Every name the claim gives and every figure it turns on has to appear in what the source
- * actually said — all of them, not a majority. A page that has the office but not the
- * officeholder, or the year but not the figure, is precisely the page that produced the bug
- * this file is named for. The claim's remaining words are required on the sliding scale
- * described at the bottom of the function, which is where the reasoning for it lives.
- *
- * A claim with nothing specific in it at all — no name, no figure, no substantial word —
- * cannot be checked this way, and is left alone rather than guessed at.
- *
- * @returns `{confirms, missing}` — `missing` is what the source never mentioned, which is
- *   what makes a downgrade explainable rather than mysterious.
+ * The single-source case of `claimConfirmed` below, which is where the rules live. Kept as
+ * its own name because "does *this page* carry the claim" is the question worth asking of
+ * one source on its own.
  */
 export function sourceConfirms(claim, entry) {
+  return claimConfirmed(claim, [entry]);
+}
+
+/** A source's text prepared once, in the three forms the coverage tests read it in. */
+function evidenceOf(entry) {
+  const text = sourceEvidenceText(entry);
+  if (!text) return null;
+  const tokens = new Set();
+  for (const token of tokenise(text)) {
+    tokens.add(token);
+    const figure = numeric(token);
+    if (figure) tokens.add(figure);
+  }
+  return { text, tokens, ranges: statedRanges(text) };
+}
+
+/**
+ * Do the sources a claim cites, taken together, confirm it?
+ *
+ * Together is the operative word, and it is the one thing this check got wrong for longer
+ * than it should have. A claim carries as many specifics as it likes — "the pipeline is 750
+ * miles long and carries 4 million barrels a day" has two figures — and the sources that
+ * settle it are routinely one apiece: a geography reference for the length, an energy
+ * report for the volume. Asking each source in turn whether it carries *all* of them meant
+ * every source failed, the claim was downgraded, and the note named a figure ("none of them
+ * mentions 4") that one of the cited pages was printing in its headline. The claim was
+ * true, its citations were right, and the app called it unsettled anyway.
+ *
+ * So each specific is looked for across the whole cited set, and the claim is confirmed
+ * when nothing is left unmentioned by all of them. This is not a loosening of what counts
+ * as confirmation: every name and every figure is still required to appear, under the same
+ * rules, and a set of pages that are merely about the subject still carries none of them.
+ * What changed is only that the evidence is allowed to be split across the citations the
+ * model actually wrote, which is how a compound claim gets checked by a person too.
+ *
+ * @returns `{confirms, missing}` — `missing` is what *no* cited source mentioned, which is
+ *   what makes a downgrade explainable rather than mysterious.
+ */
+export function claimConfirmed(claim, entries) {
   const { entities, numbers, terms } = claimSpecifics(claim);
   if (entities.length === 0 && numbers.length === 0 && terms.length === 0) {
     return { confirms: true, missing: [] };
   }
 
-  const evidence = sourceEvidenceText(entry);
-  if (!evidence) return { confirms: false, missing: [...entities, ...numbers, ...terms] };
-  const evidenceTokens = new Set();
-  for (const token of tokenise(evidence)) {
-    evidenceTokens.add(token);
-    const figure = numeric(token);
-    if (figure) evidenceTokens.add(figure);
+  const evidences = (entries ?? []).map(evidenceOf).filter(Boolean);
+  if (evidences.length === 0) {
+    return { confirms: false, missing: [...entities, ...numbers, ...terms] };
   }
 
-  const missingEntities = entities.filter((entity) => !entityCovered(evidence, evidenceTokens, entity));
-  const missingNumbers = numbers.filter((number) => !evidenceTokens.has(number));
-  const missingTerms = terms.filter((term) => !wordPresent(term, evidenceTokens));
+  const somewhere = (test) => evidences.some(test);
+  const missingEntities = entities.filter(
+    (entity) => !somewhere((ev) => entityCovered(ev.text, ev.tokens, entity)),
+  );
+  const missingNumbers = numbers.filter((number) => !somewhere((ev) => numberCovered(number, ev)));
+  const missingTerms = terms.filter((term) => !somewhere((ev) => wordPresent(term, ev.tokens)));
 
-  // Names and figures are required outright. Nothing else in a claim is as hard: a page
-  // that never mentions the officeholder, the year, the sum or the person quoted is a page
-  // about the subject, which is the whole failure this file exists to catch.
+  // Names and figures are required outright. Nothing else in a claim is as hard: a set of
+  // pages that never mentions the officeholder, the year, the sum or the person quoted is
+  // a set of pages about the subject, which is the whole failure this file exists to catch.
   //
   // The claim's other words are required on a sliding scale, because what they are worth as
-  // evidence depends on what else already matched. A source that has matched two or more of
-  // the claim's names and figures is demonstrably about this claim and not merely its
+  // evidence depends on what else already matched. Sources that have matched two or more of
+  // the claim's names and figures are demonstrably about this claim and not merely its
   // topic, and the remaining wording is then mostly the claim's phrasing: INPE reports
   // "11,568 km2 in the Brazilian Amazon" for a claim about square kilometres of rainforest,
   // and that is the same fact, differently written. Requiring the words there would
@@ -382,7 +465,7 @@ export function sourceConfirms(claim, entry) {
   // that measles cases rose contains every name and figure of a claim that measles was
   // eradicated, and no amount of word-matching sees the contradiction. That is the model's
   // job, and the prompt says so; this pass is the backstop for the narrower failure it can
-  // actually detect — a source that is not about this claim at all.
+  // actually detect — sources that are not about this claim at all.
   const anchors = entities.length + numbers.length;
   const termsNeeded = anchors >= 2 ? 0 : anchors === 1 ? Math.ceil(terms.length / 2) : terms.length;
   const termsShort = terms.length - missingTerms.length < termsNeeded;
@@ -471,18 +554,11 @@ export function auditCorroboration(answer, ledger) {
     // The claim says confirmed and points at nothing. Whatever it rests on, it is not a
     // source this turn retrieved — which is the one thing this app is willing to call
     // evidence.
-    let missing = [];
-    let confirmed = false;
-    for (const n of cited) {
-      const result = sourceConfirms(claim.title, ledger.sources[n - 1]);
-      if (result.confirms) {
-        confirmed = true;
-        break;
-      }
-      // Reported from the source that came closest, so the note names the fewest things.
-      if (missing.length === 0 || result.missing.length < missing.length) missing = result.missing;
-    }
-    if (confirmed) continue;
+    const { confirms, missing } = claimConfirmed(
+      claim.title,
+      cited.map((n) => ledger.sources[n - 1]),
+    );
+    if (confirms) continue;
 
     downgrades.push({ title: claim.title, cited, missing });
     edits.push({
