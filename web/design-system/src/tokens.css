@@ -1,24 +1,34 @@
-/* Ported verbatim from web/public/index.html's :root block — do not fork these values,
-   this file is meant to stay byte-identical to the product's tokens. The one thing the
-   product states differently is *how* the two faces below are fetched: index.html uses
-   <link rel="stylesheet"> in its <head>, this file the @import the design system's own
-   tokens.css uses, since a consumer of this package has no head to put a link in. */
+/* Ported verbatim from web/public/index.html's :root and [data-theme="light"] blocks — do
+   not fork these values, this file is meant to stay byte-identical to the product's tokens.
+   It drifted once (the whole palette was lifted for contrast in 142a0cd and this file was
+   not updated for two days), so if you touch either block in the product, touch this one in
+   the same commit. .design-sync/PUSH-REFERENCE.md tracks what the remote still owes.
+
+   The one thing this file states differently is *how* the two faces below are fetched:
+   index.html uses <link rel="stylesheet"> in its <head>, this file the @import the design
+   system's own tokens.css uses, since a consumer of this package has no head to put a
+   link in. */
 @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 :root {
   --bg: #12151A;
   --surface: #1B1F26;
-  --surface-raised: #232833;
-  --border: #2A2F39;
-  --ink: #F0EDE6;
-  --ink-dim: #A9AFBB;
-  --muted: #8A93A3;
-  --accent: #4FD1C5;
-  /* Secondary accent — violet, used sparingly (claim-card top edge, iris blades) so the
-     palette reads as considered, not a second brand color competing with teal. */
-  --accent-2: #9C8CF0;
-  --good: #6FA98A;
-  --warn: #D6A84A;
-  --bad: #C1594F;
+  --surface-raised: #262C37;
+  --border: #3A4150;
+  --ink: #F4F1EB;
+  --ink-dim: #C3C9D5;
+  --muted: #A2AAB9;
+  --accent: #5DDCD0;
+  /* Secondary accent — violet, used sparingly (claim-card top edge, the loading dial's and
+     brand HUD's own third ring/node/core accent) so the palette reads as considered, not a
+     second brand color competing with teal. */
+  --accent-2: #AE9EFF;
+  /* Ink drawn *on* the accent gradient rather than in it (the primary button). Has to be a
+     token, not a literal: the gradient is bright here and dark under [data-theme="light"],
+     so the ink inverts with it. */
+  --on-accent: #06201d;
+  --good: #56C08D;
+  --warn: #E8B54B;
+  --bad: #E8756A;
 
   /* Body and mono are the design system's own faces; display keeps the product's serif —
      the deliberate divergence documented in web/public/index.html's token block. */
@@ -34,15 +44,16 @@
   --bg: #F6F4EF;
   --surface: #FFFFFF;
   --surface-raised: #EFEBE2;
-  --border: #DDD7C8;
+  --border: #C9C2AF;
 
-  --ink: #1C1B18;
-  --ink-dim: #55524A;
-  --muted: #857F71;
+  --ink: #17160F;
+  --ink-dim: #46443D;
+  --muted: #6E695D;
 
-  --accent: #1C8C81;
-  --accent-2: #6952C4;
-  --good: #3F7A57;
-  --warn: #966327;
-  --bad: #A6402F;
+  --accent: #12766C;
+  --accent-2: #5942B0;
+  --good: #2F6B47;
+  --warn: #855318;
+  --bad: #952F20;
+  --on-accent: #F6F4EF;
 }

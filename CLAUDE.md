@@ -33,7 +33,13 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 629 tests; `worker/`'s is 5.
+this writing the whole suite is 644 tests; `worker/`'s is 5.
+
+Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
+request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
+for pushing to the Trase design-system project. If you change anything under `web/public/`,
+see `.design-sync/PUSH-REFERENCE.md` — it is the standing answer to "what does the design
+system now owe, or owe us", and the mirror goes stale silently otherwise.
 
 `test-page-shapes.js` is the one suite backed by files rather than inline HTML: `web/fixtures/`
 holds one page per *shape* (front page, story, paywalled, JS shell, AMP copy, link-heavy
