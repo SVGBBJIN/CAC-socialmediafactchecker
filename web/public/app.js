@@ -1938,27 +1938,14 @@ function hideAnalyzingOverlay() {
  * rather than the grid growing a row to fit it or the pane growing a scrollbar of its own.
  */
 
-/** Column count for a given claim count — one column for a single claim (nothing to
- * arrange), two above that. Capped at two even well past four: widening to three or more
- * columns crammed every row into whatever height was left in the pane (see the old
- * `grid-auto-rows: 1fr` comment this replaces), so five-plus claims read as a shrinking
- * grid of unreadably short boxes instead of a normal 2×2 that just keeps growing downward.
- * `.claims-pane.claim-grid`'s own `grid-auto-rows: minmax(...)` is what makes that growth
- * scroll instead of squeeze — see its CSS comment — so capping the column count here is
- * the other half of "about four visible, the rest a scroll away". */
-function claimGridColumns(count) {
-  return count <= 1 ? 1 : 2;
-}
-
 /** Stamps (or clears) the grid layout on the claims pane itself. `null` is every other view
  * the pane renders — the empty state, an error card, the free-standing chat thread, a
  * whole-answer check with no `[[claim: …]]` markers — none of which are a set of same-shape
  * boxes to arrange. `"grid-loading"` adds a full-width first row for the status strip
  * (`claimGridStatusHTML`) that `"grid"` (the finished result) has no use for. */
-function setClaimsGridMode(mode, cols) {
+function setClaimsGridMode(mode) {
   el.claimsPane.classList.toggle("claim-grid", mode === "grid" || mode === "grid-loading");
   el.claimsPane.classList.toggle("claim-grid-loading", mode === "grid-loading");
-  if (cols) el.claimsPane.style.setProperty("--claim-cols", cols);
 }
 
 /** Shows or hides the down-arrow chip over the claims pane, from the pane's own scroll
@@ -3412,7 +3399,7 @@ el.claimsPane.addEventListener("mouseout", (e) => {
  *
  * The DS component drives this from React state with a hand-picked pixel layout per stage
  * (1/2/4 claims, its demo's fixed ceiling); nothing here knows in advance how many claims a
- * real check will find or what `claimGridColumns` will lay them out as. So instead of
+ * real check will find. So instead of
  * pre-computing target rects, this reads whatever the grid's own CSS actually put on screen
  * before and after a rebuild and animates the difference — the standard "FLIP" technique
  * (First, Last, Invert, Play): measure every `.claim-card`'s rect, let `render` replace the
@@ -3584,7 +3571,7 @@ function loadingClaimHTML(claim, index, sources, seekable) {
  * marker in the text streaming in — the model writes one per claim well before the full
  * answer (and its citations) are finished. There's no separate "how many claims" signal to
  * wait for; the marker *is* the count, arriving incrementally, so the grid is built the same
- * way the finished result reads it (see `claimGridColumns`/`claimPanesHTML`), just with each
+ * way the finished result reads it (see `claimPanesHTML`), just with each
  * box showing its title over a shimmer where the analysis and verdict will land.
  *
  * Boxes that have *already* settled by the time a later marker forces this redraw keep their
@@ -3592,9 +3579,10 @@ function loadingClaimHTML(claim, index, sources, seekable) {
  * version that runs when no redraw is needed.
  */
 function renderClaimSkeletons(claims, stage, sources, seekable) {
-  const count = claims.length;
-  const cols = claimGridColumns(count);
-  setClaimsGridMode("grid-loading", cols);
+  // Whether the reader is currently reading the bottom of the stack, measured *before* the
+  // rebuild — see `stickToNewestClaim`.
+  const atBottom = claimsPaneAtBottom();
+  setClaimsGridMode("grid-loading");
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
   // only the settled one, matching the DS's "Chat to shell" screen.
@@ -3608,9 +3596,36 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
         .join(""),
   );
   revealIn(el.claimsPane);
+  stickToNewestClaim(atBottom);
   refreshTimeline();
   runProgress.resync();
   runElapsed.resync();
+}
+
+/** Whether the claims pane is scrolled to (or very near) its own bottom. The slack is for
+ * sub-pixel rounding and for the few pixels a reader loses to a trackpad's inertia, not a
+ * guess at intent. */
+function claimsPaneAtBottom() {
+  const pane = el.claimsPane;
+  return pane.scrollHeight - pane.clientHeight - pane.scrollTop < 80;
+}
+
+/**
+ * Keeps the newest claim in view as the stack grows, which is what the DS's ClaimStack does
+ * when a check finds another claim — but only for a reader who was already at the bottom.
+ *
+ * The DS component scrolls to the end unconditionally; it is a demo with nothing to
+ * interrupt. Here a claim can land while the reader is halfway up the stack reading an
+ * earlier one, and yanking them to the bottom mid-sentence is the one thing an
+ * auto-scrolling list must not do. So this is the standard stick-to-bottom rule: follow the
+ * stream while they are following it, and leave them alone the moment they scroll away.
+ */
+function stickToNewestClaim(wasAtBottom) {
+  if (!wasAtBottom) return;
+  el.claimsPane.scrollTo({
+    top: el.claimsPane.scrollHeight,
+    behavior: prefersReducedMotion() ? "auto" : "smooth",
+  });
 }
 
 /**
@@ -4100,7 +4115,6 @@ function threadHTML(entry, newestIndex) {
  */
 function claimPanesHTML(entry, animate, newestFollowup) {
   const { claims } = entry;
-  const cols = claimGridColumns(claims.length);
   return claims
     .map((claim, index) => {
       const isLast = index === claims.length - 1;
@@ -4221,7 +4235,7 @@ function updateSummaryCard(claims) {
 
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
-    setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
+    setClaimsGridMode("grid");
     setClaimsPaneHTML(
       // No bubble echoing the link back: the post is already on screen in the video pane,
       // and its title is already in the shell's own title bar — a third copy of the same
