@@ -17,17 +17,44 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <style>
+  /* Kept in step with public/index.html's own :root by hand — this page is served on its
+     own and shares no stylesheet with the app, so the values below are a copy, not a
+     reference. They drifted once already (this block sat on the pre-lift palette while the
+     app moved on), which is the failure the push reference in .design-sync exists to catch. */
   :root {
     --bg: #12151A;
     --surface: #1B1F26;
-    --border: #2A2F39;
-    --ink: #F0EDE6;
-    --ink-dim: #A9AFBB;
-    --muted: #8A93A3;
-    --accent: #4FD1C5;
+    --surface-raised: #262C37;
+    --border: #3A4150;
+    --ink: #F4F1EB;
+    --ink-dim: #C3C9D5;
+    --muted: #A2AAB9;
+    --accent: #5DDCD0;
+    --accent-2: #AE9EFF;
+    --on-accent: #06201d;
     --font-display: ui-serif, "New York", Georgia, "Times New Roman", serif;
     --font-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  /* The app's light theme applies to this page too — a reader who set it shouldn't hit a
+     black 404. Values match public/index.html's [data-theme="light"]; the tiny script at
+     the end of <body> is what reads the saved setting, since this page has no app.js. */
+  [data-theme="light"] {
+    --bg: #F6F4EF;
+    --surface: #FFFFFF;
+    --surface-raised: #EFEBE2;
+    --border: #C9C2AF;
+    --ink: #17160F;
+    --ink-dim: #46443D;
+    --muted: #6E695D;
+    --accent: #12766C;
+    --accent-2: #5942B0;
+    --on-accent: #F6F4EF;
+  }
+  [data-theme="light"] body {
+    background: var(--bg);
+    background-image: radial-gradient(circle at 50% 0%, #FFFFFF 0%, var(--bg) 60%);
   }
   html, body { height: 100%; margin: 0; }
   body {
@@ -43,7 +70,12 @@
     animation: wrap-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
   }
   @keyframes wrap-in { to { opacity: 1; transform: translateY(0); } }
-  .iris-wrap { width: 72px; height: 72px; opacity: 0.7; color: var(--muted); }
+  .iris-wrap { width: 72px; height: 72px; opacity: 0.7; }
+  /* The design system's card fills alternating blades with the two brand colours; this page
+     had them all on `currentColor` off `--muted`, which rendered the mark as a flat grey
+     asterisk with no brand in it at all. */
+  .blade { fill: var(--accent); }
+  .blade:nth-child(even) { fill: var(--accent-2); }
   .iris-wrap svg { width: 100%; height: 100%; }
   /* A one-shot settle rather than the app's own loading-iris breathe — this mark isn't
      working on anything, it's just arriving. Each blade eases into its resting rotation a
@@ -66,6 +98,10 @@
     .wrap { animation: none; opacity: 1; transform: none; }
     .blade { animation: none; opacity: 1; transform: rotate(var(--rot)); }
   }
+  .bolt-bg { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .bolt-bg svg { position: absolute; opacity: 0.1; }
+  .bolt-bg svg:nth-child(1) { top: 8%; left: 10%; width: 64px; height: 64px; transform: rotate(-8deg); }
+  .bolt-bg svg:nth-child(2) { bottom: 12%; right: 12%; width: 96px; height: 96px; transform: rotate(12deg); }
   .eyebrow {
     font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
     text-transform: uppercase; color: var(--muted);
@@ -75,27 +111,34 @@
   a.back {
     display: inline-flex; align-items: center; gap: 6px;
     margin-top: 8px; padding: 9px 16px;
-    border-radius: 9px; border: 1px solid var(--accent);
-    background: rgba(79,209,197,0.12); color: var(--accent);
+    border-radius: 9px; border: 1px solid transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: var(--on-accent);
     font-size: 13px; font-weight: 600; text-decoration: none;
-    transition: background 0.15s ease;
+    transition: filter 0.15s ease;
   }
-  a.back:hover { background: rgba(79,209,197,0.2); }
+  a.back:hover { filter: brightness(1.08); }
   a.back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   a.back svg { width: 14px; height: 14px; }
 </style>
 </head>
 <body>
+  <!-- The design system's own 404 backdrop: two lightning motifs at a tenth opacity,
+       mirroring assets/motif-lightning.svg. Decorative, hence aria-hidden. -->
+  <div class="bolt-bg" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" fill="var(--accent)"/></svg>
+    <svg viewBox="0 0 24 24" fill="none"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" fill="var(--accent-2)"/></svg>
+  </div>
   <div class="wrap">
     <div class="iris-wrap">
       <svg viewBox="0 0 100 100">
         <g>
-          <rect class="blade" fill="currentColor" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" fill="currentColor" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" fill="currentColor" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" fill="currentColor" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" fill="currentColor" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
-          <rect class="blade" fill="currentColor" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:0deg"   x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:60deg"  x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:120deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:180deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:240deg" x="46" y="10" width="8" height="34" rx="4"/>
+          <rect class="blade" style="--rot:300deg" x="46" y="10" width="8" height="34" rx="4"/>
         </g>
       </svg>
     </div>
@@ -107,5 +150,15 @@
       Back to Trase
     </a>
   </div>
+  <script>
+    // Mirrors applySettings() in public/app.js for the one setting that matters here.
+    // Wrapped because storage can throw in a private window; a throw just leaves the
+    // page dark, which is the safe direction to fail in.
+    try {
+      if (JSON.parse(localStorage.getItem("trase.settings.v1") || "{}").theme === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    } catch {}
+  </script>
 </body>
 </html>

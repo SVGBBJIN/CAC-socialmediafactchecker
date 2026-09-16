@@ -27,12 +27,33 @@ rather than inventing new colors:
 | `--ink` / `--ink-dim` / `--muted` | primary text → secondary text → placeholder/meta text |
 | `--accent` | the one accent color (teal) — links, focus rings, the active/primary affordance |
 | `--good` / `--warn` / `--bad` | the three non-neutral verdict colors (`corroborated` / `disputed`+`disagreement` / `contradicted`) |
-| `--font-display` | serif, for claim titles and analysis prose (`ClaimCard`) |
+| `--font-display` | serif, for claim titles and analysis prose (`ClaimCard`) — see the note below |
 | `--font-body` | sans, for UI chrome — buttons, inputs, labels |
 | `--font-mono` | monospace, for the eyebrow labels, timestamps, source-pill domains |
 
-There are no light-mode tokens — this system is dark-only by design (`--bg: #12151A`).
-Don't invent a light variant.
+Dark is the default and the register everything was designed in (`--bg: #12151A`). A light
+theme exists alongside it as **token overrides only** — set `data-theme="light"` on `<html>`
+(or any ancestor) and every component follows, because they all read the same `var()`s. It
+is not a flat inversion: surfaces are warm off-white, and the accent and verdict hues are
+*darkened* from their dark-mode values to hold contrast on them.
+
+One token exists solely because of that flip. `--on-accent` is the ink that sits **on** the
+accent gradient rather than in it — the primary button. A constant cannot work: the gradient
+is bright in dark mode and wants near-black on it, and dark in light mode and wants
+near-white. Use `--on-accent` for any text or glyph drawn on `--accent`/`--accent-2` fill,
+and never a literal.
+
+The product also ships a `data-contrast="high"` mode on top of either theme. It is
+product-only and has no component-level contract here — build against the tokens and it
+follows for free.
+
+### One known divergence in the type stack
+
+`--font-display` is a **serif** here and in the product (`ui-serif, "New York", Georgia, …`),
+while the design system's own `tokens.css` and README set it to the same grotesque as
+`--font-body`. The product's serif is deliberate and permanent: what a claim card holds is
+prose to be read, not UI copy, and the serif is what says so. Build against the token and
+this resolves itself either way.
 
 ## The verdict vocabulary is closed
 
@@ -40,6 +61,10 @@ Don't invent a light variant.
 `contradicted` (`--bad`), `disputed` (`--warn`), `corroborated` (`--good`), `insufficient`
 (`--muted`). Never introduce a fifth — every consumer of a verdict (badges, status dots,
 claim cards) reads this same closed set.
+
+**`disputed` is the real spelling.** Older material in this project says *Misleading* for the
+same verdict, and some `VerdictBadge` variants carry `misleading`/`false`/`true` as extra
+keys. Those are drift, not vocabulary: the product's four are the ones above.
 
 ## Where the truth lives
 
