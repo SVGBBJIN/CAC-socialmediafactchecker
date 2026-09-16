@@ -133,8 +133,11 @@ this catches is a claim marked *Corroborated* whose cited pages are about the cl
 subject without confirming it — the Wikipedia article for an office and a gov.uk list of
 ministers, cited for who currently holds that office. `lib/corroboration.js` runs over the
 finished answer, before `cleanCitations`, and asks one question per `[[claim: …]]` block the
-model marked Corroborated: do the pages it cited contain the claim's own specifics? Names
-and figures are required outright; the claim's other words are required on a scale that
+model marked Corroborated: do the pages it cited, **taken together**, contain the claim's own
+specifics? The set is read as a whole — a two-part claim carried by two sources, one part
+each, is confirmed, which asking each source for everything got wrong. Names
+and figures are required outright (a figure matches a source that rounds to it or states a
+range around it); the claim's other words are required on a scale that
 loosens as more names and figures match, because a source that has matched two of them is
 demonstrably about *this claim* and the rest is wording (see the note in `sourceConfirms`).
 A claim nothing confirms is rewritten to **Insufficient evidence** with one app-voiced line
