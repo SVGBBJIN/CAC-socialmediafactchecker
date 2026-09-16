@@ -4582,7 +4582,7 @@ const MORPH_DIAL_BASE = 196;
  * then the flight runs 1800ms on an `easeOutCubic`, which front-loads the travel and lets
  * the last third be the mark settling rather than still crossing the pane. Shortening it
  * was the thing that made this read as a swap with a slide in front of it. */
-const MORPH_HERO_OUT_MS = 700;
+const MORPH_HERO_OUT_MS = 600;
 const MORPH_FLIGHT_MS = 1800;
 /* The phone's last leg is the DS's other screen and its other number: "Mobile Landing to
  * Shell" moves its mark in 0.8s, because there the mark has already had its long beat
@@ -4945,10 +4945,15 @@ async function playLandingExit(url) {
   const phone = device.kind === "phone";
   if (phone) showAnalyzingOverlay(url);
   landing.classList.add("leaving");
-  // The DS holds the idle screen for this long before the flight starts, at every width:
-  // long enough for the phone's staggered teardown to read (its last block does not begin
-  // leaving until 220ms in — see `.landing.leaving` in index.html), and, on the hero, long
-  // enough that the pills are actually gone before the panel they were orbiting moves.
+  // The DS holds the idle screen for this long before the flight starts, at every width,
+  // and the hold is not a pause: it is exactly the length of the pill pan (0.5s opacity,
+  // 0.6s transform — see `.brand-hud-pill` under `.leaving` in index.html), so the four
+  // pills are still opening outward for every frame of it and are gone by the time the
+  // mark they were orbiting moves. On the phone the staggered column teardown runs under
+  // the same clock (its last block does not begin leaving until 220ms in). Whatever else
+  // changes here, something has to be *moving* for these 600ms — with the pills swallowed
+  // by their own parent's fade, as they were, this read as the mark freezing before the
+  // flight, because that is precisely what it was.
   await new Promise((resolve) => setTimeout(resolve, MORPH_HERO_OUT_MS));
 
   // Measured now, at the exact moment the page it's embedded in is about to be torn down —

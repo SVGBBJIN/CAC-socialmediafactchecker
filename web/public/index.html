@@ -1741,11 +1741,18 @@
      the landing, but it is the same brand block over the same HUD, and a check starting
      from it is the same event — so it flies its pills out too rather than blinking away
      while the landing gets a send-off. */
-  /* The "New chat" hero is a box, and a box leaves as a box. */
-  .newchat-hero.leaving {
-    transition: opacity 0.32s ease, transform 0.32s ease;
+  /* The hero *box* does not leave, and that is the DS's own `.hero-out`: the panel is what
+     the morph clone flies (`startMorph`), so fading it here would be fading the flight's
+     own subject out from under it. What leaves is what the clone doesn't carry — the brand
+     block's wordmark and tagline, on the DS's 0.4s. The box itself is taken off screen by
+     the pane swap a beat later, by which time the clone is already in the air over it.
+     (The fade that used to be here never actually ran: `.newchat-hero`'s `card-in`
+     entrance is `forwards`, and a held final keyframe beats a plain declaration, so the
+     box sat at opacity 1 regardless.) */
+  .newchat-hero.leaving .newchat-brand {
+    transition: opacity 0.4s ease, transform 0.4s ease;
     opacity: 0;
-    transform: scale(0.97) translateY(-6px);
+    transform: scale(0.92) translateY(-8px);
   }
   /* The landing is a page, and the DS's "Mobile Landing to Shell" takes it apart rather
      than dimming it: every block in the scroll column lifts, blurs and goes, one after the
@@ -1760,7 +1767,16 @@
     transition: opacity 0.35s ease;
     opacity: 0;
   }
-  .landing.leaving .lshell-scroll > .rise {
+  /* `:not(.landing-hud)` is the pills' exemption, and the reason the pill flight was
+     invisible on this screen: the HUD block is a `.rise` like every other, so it was being
+     faded to nothing on the same clock as the pan below — and a parent's opacity multiplies
+     its children's, so four pills panning 46px inside a block already at opacity 0.2 is
+     four pills that simply vanished with the column. In the DS the pills *are* the beat
+     that covers the hold before the flight (`.hero-out .matrix-pill`), so this block keeps
+     its opacity and lets them leave on their own; what's left behind is an empty box (the
+     cluster inside it is blanked by `startMorph` the same frame the clone takes over) that
+     the pane swap removes. */
+  .landing.leaving .lshell-scroll > .rise:not(.landing-hud) {
     transition: opacity 0.45s ease, transform 0.55s cubic-bezier(.4,0,.2,1), filter 0.45s ease;
     opacity: 0;
     transform: translateY(-16px) scale(0.98);
@@ -1779,16 +1795,27 @@
      the block is far into its fade the real `#entryBar` node has already been moved out to
      its dock and is flying there under its own transform (`flyEntryBarHome`), so what
      dissolves here is the block's own chrome, not the control. */
+  /* The pills pan outward and fade, and these are the DS's own numbers (`.matrix-pill` /
+     `.hero-out .matrix-pill` on the "Chat to shell" card): 0.5s on opacity, 0.6s on a
+     transform that starts slow and lets go, and 46x30 rather than the 28x18 that was here
+     — at the shorter distance the four of them read as a twitch rather than the cluster
+     opening up. This is the whole of what fills `MORPH_HERO_OUT_MS`, which is why it runs
+     for as long as that hold does. */
   .landing.leaving .brand-hud-pill,
-  .newchat-hero.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
+  .newchat-hero.leaving .brand-hud-pill { transition: opacity 0.5s ease, transform 0.6s cubic-bezier(.45,0,.15,1); }
   .landing.leaving .brand-hud-pill.sources,
-  .newchat-hero.leaving .brand-hud-pill.sources { opacity: 0; transform: translate(-28px, -18px); }
+  .newchat-hero.leaving .brand-hud-pill.sources { opacity: 0; transform: translate(-46px, -30px); }
   .landing.leaving .brand-hud-pill.context,
-  .newchat-hero.leaving .brand-hud-pill.context { opacity: 0; transform: translate(28px, -18px); }
+  .newchat-hero.leaving .brand-hud-pill.context { opacity: 0; transform: translate(46px, -30px); }
   .landing.leaving .brand-hud-pill.facts,
-  .newchat-hero.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
+  .newchat-hero.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-46px, 30px); }
   .landing.leaving .brand-hud-pill.clarity,
-  .newchat-hero.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
+  .newchat-hero.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(46px, 30px); }
+  /* The pan is the one moment anything on this page is wider than the column, and
+     `overflow-y: auto` makes the other axis `auto` too — so on a narrow window the
+     outbound pills would flash a horizontal scrollbar into existence on their way off.
+     Only while leaving: the steady-state scroll behaviour is untouched. */
+  .landing.leaving .lshell-scroll { overflow: hidden; }
 
   /* ---------- Chat to shell: the shared-element morph ----------
      The other half of the DS's "Chat to shell" screen, and the part that was missing here:
