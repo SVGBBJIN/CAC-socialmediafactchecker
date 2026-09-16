@@ -31,19 +31,28 @@
   :root {
     --bg: #12151A;
     --surface: #1B1F26;
-    --surface-raised: #232833;
-    --border: #2A2F39;
-    --ink: #F0EDE6;
-    --ink-dim: #A9AFBB;
-    --muted: #8A93A3;
-    --accent: #4FD1C5;
+    --surface-raised: #262C37;
+    /* Edges used to be a shade off the surface they sat on, which on a dim screen meant no
+       edge at all: a card's outline, a divider, the composer's own border all disappeared.
+       Every neutral below is lifted for the same reason — the palette was tuned for a dark
+       room and read as low-contrast everywhere else. */
+    --border: #3A4150;
+    --ink: #F4F1EB;
+    --ink-dim: #C3C9D5;
+    --muted: #A2AAB9;
+    --accent: #5DDCD0;
     /* Secondary accent — violet, used sparingly (claim-card top edge, the loading dial's
        and brand HUD's own third ring/node/core accent) so the palette reads as considered,
        not a second brand color competing with teal. */
-    --accent-2: #9C8CF0;
-    --good: #6FA98A;
-    --warn: #D6A84A;
-    --bad: #C1594F;
+    --accent-2: #AE9EFF;
+    /* The three verdict colours carry the app's actual finding, so they are the last place
+       to be subtle. Raised well clear of the surfaces they are drawn on — as badge text, as
+       a summary dot, as a sidebar status dot — rather than the muted-earth versions they
+       were, which on a badge tint at 20% opacity were barely distinguishable from each
+       other. */
+    --good: #56C08D;
+    --warn: #E8B54B;
+    --bad: #E8756A;
 
     /* The one place this app diverges from the design system's tokens on purpose: the DS
        sets display to the same grotesque as body ("differentiated by weight rather than a
@@ -63,17 +72,19 @@
     --bg: #F6F4EF;
     --surface: #FFFFFF;
     --surface-raised: #EFEBE2;
-    --border: #DDD7C8;
+    --border: #C9C2AF;
 
-    --ink: #1C1B18;
-    --ink-dim: #55524A;
-    --muted: #857F71;
+    --ink: #17160F;
+    --ink-dim: #46443D;
+    --muted: #6E695D;
 
-    --accent: #1C8C81;
-    --accent-2: #6952C4;
-    --good: #3F7A57;
-    --warn: #966327;
-    --bad: #A6402F;
+    /* Darkened to match the dark theme's lift — the same complaint in the other direction:
+       mid-tone accents on a warm off-white read as washed out, and a verdict must not. */
+    --accent: #12766C;
+    --accent-2: #5942B0;
+    --good: #2F6B47;
+    --warn: #855318;
+    --bad: #952F20;
   }
 
   * { box-sizing: border-box; }
@@ -392,7 +403,7 @@
      verdict badge at once, so it read as a second copy of what was on screen — but the
      TRASE Design System's own "Chat to shell" screen keeps it above the grid at every
      width, as the one place the check's shape is legible before the reader has scanned the
-     whole grid, so it now renders everywhere (see `.summary-card` below). */
+     whole grid, so it now renders everywhere (see `.summary-pill` below). */
   .sheet-handle,
   .media-expand-btn { display: none; }
 
@@ -906,58 +917,54 @@
      surface would just make every box too small to read — the claims there stay a single
      stacked column, same as before this existed. */
   @media (min-width: 701px) {
+    /* Two columns of claim boxes, as a wrapping flex row rather than a grid.
+       A grid divides its height between its rows, which is the right answer when every box
+       is a fixed-size tile and the wrong one here: a claim with a long analysis was capped
+       at its share of the pane and spilled over its own edge (and used to grow a scrollbar
+       of its own inside the box, which is what this replaces). A flex row sizes each box to
+       what is in it, wraps at two per row, and lets the pane be the one thing that scrolls.
+       Desktop/tablet only: on a phone `.claims-pane` is already the bottom sheet over the
+       video (see the phone breakpoint further down), where the claims stay a single stacked
+       column. */
     .claims-pane.claim-grid {
-      display: grid;
-      grid-template-columns: repeat(var(--claim-cols, 2), 1fr);
-      /* `minmax(220px, 1fr)` rather than a bare `1fr`: with up to two rows (four claims,
-         `claimGridColumns`'s cap) the `1fr` half still evenly divides the pane's full
-         stretched height between them, same as before. A third row past that no longer has
-         room to divide into — a bare `1fr` would have shrunk every row instead, cramming
-         claim five and six into a sliver alongside the first four. The `220px` floor holds
-         each row to a readable minimum instead, so the grid grows *past* the pane's height
-         and this rule's own `overflow-y: auto` scrolls to it — "about four visible, the
-         rest a scroll away" instead of every row shrinking to fit. */
-      grid-auto-rows: minmax(220px, 1fr);
-      gap: 12px;
+      --claim-gap: 12px;
+      display: flex;
+      /* Explicitly, because `.claims-pane`'s own base rule is a flex *column* — without
+         this the boxes stack and the basis below is read against the wrong axis. */
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      align-items: flex-start;
+      gap: var(--claim-gap);
       overflow-y: auto;
-      /* An explicit first row sized to its own content, spanned by `.summary-card` (see its
-         own rule) — without this it would be an implicit row and inherit the same
-         `minmax(220px, 1fr)` every claim box gets, stretching a compact summary strip into a
-         claim-sized box. `grid-auto-rows` still governs every row after it. */
-      grid-template-rows: auto;
     }
-    /* The loading variant reserves a second `auto`-height row for `claimGridStatusHTML`'s
-       status strip, on top of the summary card's own row above — `grid-auto-rows` above
-       still governs every claim-box row after both. The finished result has only the one
-       extra row (the summary card): every other cell there is a claim. */
-    .claims-pane.claim-grid.claim-grid-loading { grid-template-rows: auto auto; }
+    /* The summary strip and the loading status strip are rows of their own, above the
+       boxes — the flex equivalent of the `grid-column: 1 / -1` they used to carry. */
+    .claims-pane.claim-grid > .summary-pill,
+    .claims-pane.claim-grid > .claim-grid-status { flex: 0 0 100%; }
     .claims-pane.claim-grid .claim-pane {
-      /* A grid item's default `min-height` is `auto` — the same trap a flex item's is (see
-         `.claims-pane`'s own comment above) — so without this, a box with more in it than
-         its row is tall grows the row instead of scrolling inside the height it actually
-         has. `position: relative` gives the fade below a containing block that is this box
-         itself, not the grid — see its own comment for why that specific anchor matters. */
+      /* `--claim-cols` is set inline per render by `claimGridColumns` (app.js) — one column
+         for a single claim, two above that. `flex-grow: 1` is also what makes an odd last
+         box fill the row it would otherwise sit alone in, which used to need its own
+         `grid-column: 1 / -1` from `claimGridSpanLast`. */
+      flex: 1 1 calc((100% - (var(--claim-cols, 2) - 1) * var(--claim-gap)) / var(--claim-cols, 2));
+      max-width: 100%;
+      min-width: 0;
+      /* The floor that used to be the grid track's minimum: it only ever stops a one-line
+         claim from collapsing to a strip. Nothing caps the other end any more. */
+      min-height: 220px;
       position: relative;
-      min-height: 0;
-      overflow-y: auto;
-    }
-    /* An overflowing box's last line — often the verdict badge, since it's what every box
-       ends on — would otherwise be sliced flat by the box's own edge, reading as a broken
-       layout rather than "there's more, scroll for it". This fades it into the card's own
-       background instead. `position: absolute` inside a `position: relative` scroll
-       container (`.claim-pane` above) is pinned to that box's own visible edge rather than
-       scrolling with the content — the containing block is the scroller itself, not the
-       (taller) content inside it — so it always sits over whatever is currently cut off,
-       never drifting away from the edge as the reader scrolls. Harmless when a box doesn't
-       overflow: fading empty space into a background already that color paints nothing. */
-    .claims-pane.claim-grid .claim-pane::after {
-      content: "";
-      position: absolute; left: 0; right: 0; bottom: 0;
-      height: 28px;
-      background: linear-gradient(to bottom, transparent, var(--surface));
-      pointer-events: none;
+      overflow: visible;
     }
   }
+
+  .claim-header-row {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  }
+  .claim-header-row .claim-title { flex: 1 1 auto; min-width: 0; margin-bottom: 8px; }
+  /* `.badges` is a block with its own bottom margin everywhere else it is used; in this row
+     it is one item beside another and neither applies. */
+  .claim-header-row .badges { flex: 0 0 auto; margin: 0; }
 
   .claim-grid-status {
     grid-column: 1 / -1;
@@ -1101,56 +1108,42 @@
      and `renderResultCard` both prepend it), its counts updating live as each claim's
      verdict lands (`updateSummaryCard`). Its counts read the same closed four-verdict
      vocabulary everything else does (`VERDICTS` in public/claims.js). */
-  .summary-card {
+  /* The DS's SummaryCard `pill` variant, which is what this app draws now: one line of
+     counts across the top of the claim grid rather than a titled card taking a grid row of
+     its own and reading as a fifth claim. `summaryCardHTML` (app.js) writes it and
+     `updateSummaryCard` patches the numbers in place as claims settle. */
+  .summary-pill {
     grid-column: 1 / -1;
-    padding: 18px 20px;
-    border-radius: 14px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--ink) 4%, transparent);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px;
+    font-size: 12px;
+    padding: 2px 2px 4px;
   }
-  .summary-title { font-family: var(--font-display); font-size: 16px; font-weight: 600; color: var(--ink); margin: 0; }
-  .summary-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
-  .summary-stats { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 14px; }
-  .summary-stat { display: flex; align-items: center; gap: 9px; min-width: 0; }
-  .summary-count {
-    flex-shrink: 0;
-    width: 26px; height: 26px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; color: #fff;
+  .summary-pill-total {
+    font-family: var(--font-display); font-weight: 600; color: var(--ink);
+    padding-right: 12px; border-right: 1px solid var(--border);
+    flex-shrink: 0; white-space: nowrap;
   }
-  .summary-count.bad   { background: color-mix(in oklab, var(--bad) 82%, black 18%); }
-  .summary-count.warn  { background: color-mix(in oklab, var(--warn) 78%, black 22%); }
-  .summary-count.good  { background: color-mix(in oklab, var(--good) 78%, black 22%); }
-  .summary-count.muted { background: color-mix(in oklab, var(--muted) 68%, black 32%); }
-  /* The DS's `compact` modifier, and the only size this app ever draws the card at: the
-     summary is a strip over a grid of claim boxes here, not a page-heading card, and at the
-     base size above it reads as a fifth claim. Kept as a modifier rather than folded into
-     the base rule so the card stays the DS's component — `summaryCardHTML` (app.js) writes
-     the class, and the two halves can be diffed against `components/SummaryCard.css`
-     line for line. */
-  .summary-card.compact { padding: 11px 13px; }
-  .summary-card.compact .summary-title { font-size: 12px; }
-  .summary-card.compact .summary-sub { font-size: 10px; margin-top: 1px; }
-  .summary-card.compact .summary-stats { gap: 5px 12px; margin-top: 8px; }
-  .summary-card.compact .summary-stat { gap: 5px; }
-  .summary-card.compact .summary-count { width: 18px; height: 18px; font-size: 9.5px; }
-  .summary-card.compact .summary-label { font-size: 10px; }
+  .summary-pill-stat { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-dim); white-space: nowrap; }
+  .summary-pill-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .summary-pill-dot.bad { background: var(--bad); }
+  .summary-pill-dot.warn { background: var(--warn); }
+  .summary-pill-dot.good { background: var(--good); }
+  .summary-pill-dot.muted { background: var(--muted); }
+  /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
+     and disappears as counts change would make the strip a different shape every check. */
+  .summary-pill-stat[data-count="0"] { opacity: 0.5; }
   /* Ported from the TRASE Design System's SummaryCard (`AnimatedNumber`): a count that just
      went up rolls in from above instead of silently swapping digits — `updateSummaryCard`
      (app.js) is what decides "just went up" and adds/removes this class per bump. Never
      played on a decrease; there isn't one — a settled claim's verdict is never un-counted. */
-  .summary-num { display: inline-block; }
+  .summary-num { display: inline-block; font-variant-numeric: tabular-nums; }
   .summary-num.rolling { animation: summary-roll 0.32s ease; }
   @keyframes summary-roll {
     0%   { transform: translateY(-55%); opacity: 0; }
     60%  { opacity: 1; }
     100% { transform: translateY(0); opacity: 1; }
   }
-  /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
-     and disappears as counts change would make the card a different shape on every check. */
-  .summary-stat[data-count="0"] { opacity: 0.45; }
-  .summary-label { font-size: 12.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 
   /* ---------- Claim skeleton (loading grid) ---------- */
   /* `renderClaimSkeletons` (app.js) — a placeholder box for a claim the model has named but
@@ -1844,7 +1837,7 @@
      the cluster clone is scaled about. Above the analyzing overlay (z-index 40) for the
      same reason the DS's own `.hud-fly` sits above its analyzing layer: on a phone the
      flight's waypoint *is* that overlay's scan ring. */
-  .morph-layer { position: fixed; inset: 0; z-index: 41; pointer-events: none; transition: opacity 0.4s ease; }
+  .morph-layer { position: fixed; inset: 0; z-index: 41; pointer-events: none; transition: opacity 0.28s ease; }
   .morph-layer.out { opacity: 0; }
   .morph-frame {
     position: fixed; box-sizing: border-box; overflow: hidden;
@@ -1855,7 +1848,12 @@
     background: var(--bg);
     background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
   }
-  .morph-dial { position: fixed; }
+  /* Pinned at the origin and moved by `transform` alone (see `paintMorph`) — a fixed box
+     the compositor slides and scales, rather than sixteen percentage-sized children being
+     re-laid-out sixty times a second. `will-change` keeps it on its own layer for the whole
+     flight instead of being promoted and demoted as the transform starts and stops. */
+  .morph-dial { position: fixed; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+  .morph-frame { will-change: top, left, width, height; }
   /* The brand mark's own leg, which on a phone is a separate flight from the HUD's: the DS
      sends it into the middle of the analyzing ring while the cluster closes around it, so
      the interstitial's core *is* the landing's mark rather than a new dot in its place. A
@@ -1917,7 +1915,12 @@
      suppresses `.run-enter`'s own entrance, which would otherwise play (and finish) behind
      the flight and have nothing left to show on arrival. */
   .claim-card.morph-incoming { opacity: 0 !important; animation: none !important; }
-  .claim-card.morph-land { animation: morph-land-in 0.6s ease both; }
+  /* The destination is simply *there* the frame the flight ends — no fade of its own. It
+     used to fade in over 0.6s while the clone faded out over 0.45s, which is two drawings
+     of the same mark dissolving through each other: the double image that read as a flash
+     at the exact moment the animation was meant to resolve. Now only the clone fades, over
+     something already solid behind it. */
+  .claim-card.morph-land { opacity: 1; animation: none; }
   /* The rest of the DS's arrival, which the flight is only half of: the video column rises
      in under the panel while it is still travelling, and the title bar's new text fades in
      late — after the mark has landed, so the screen finishes assembling rather than being
@@ -1946,11 +1949,7 @@
   [data-motion="reduced"][data-shell-enter] .video-pane,
   [data-motion="reduced"][data-shell-enter] .shell-topbar-meta,
   [data-motion="reduced"][data-shell-enter] .topbar-meta { animation: none; }
-  @keyframes morph-land-in { from { opacity: 0; } to { opacity: 1; } }
-  @media (prefers-reduced-motion: reduce) {
-    .claim-card.morph-land { animation: none; opacity: 1; }
-  }
-  [data-motion="reduced"] .claim-card.morph-land { animation: none; opacity: 1; }
+
 
   /* ---------- Analyzing interstitial: bridges the shared-element flight ----------
      Ported from the TRASE Design System's "Chat to shell"/"Mobile Landing to Shell"
@@ -2121,10 +2120,23 @@
     70%  { opacity: 1; transform: scale(1.25); }
     100% { opacity: 1; transform: scale(1); }
   }
-  .badge.verdict.bad   { background: rgba(193,89,79,0.15);  color: var(--bad);   border: 1px solid rgba(193,89,79,0.35); }
-  .badge.verdict.warn  { background: rgba(214,168,74,0.15); color: var(--warn);  border: 1px solid rgba(214,168,74,0.35); }
-  .badge.verdict.good  { background: rgba(111,169,138,0.15);color: var(--good);  border: 1px solid rgba(111,169,138,0.35); }
-  .badge.verdict.muted { background: rgba(138,147,163,0.15);color: var(--muted); border: 1px solid rgba(138,147,163,0.3); }
+  /* Derived from the tokens rather than hard-coded rgba: the four verdict hues moved when
+     the palette was raised for contrast, and a badge that kept the old literals would have
+     been tinted one colour and lettered another. `color-mix` against `transparent` is the
+     same tint at a stronger mix — a verdict badge is the app's finding, and it was reading
+     as a faint label. The border is what carries the shape at a glance, so it takes the
+     bigger lift of the two. */
+  .badge.verdict.bad   { background: color-mix(in oklab, var(--bad) 22%, transparent);   color: var(--bad);   border: 1px solid color-mix(in oklab, var(--bad) 55%, transparent); }
+  .badge.verdict.warn  { background: color-mix(in oklab, var(--warn) 22%, transparent);  color: var(--warn);  border: 1px solid color-mix(in oklab, var(--warn) 55%, transparent); }
+  .badge.verdict.good  { background: color-mix(in oklab, var(--good) 22%, transparent);  color: var(--good);  border: 1px solid color-mix(in oklab, var(--good) 55%, transparent); }
+  .badge.verdict.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); border: 1px solid color-mix(in oklab, var(--muted) 45%, transparent); }
+  /* In high contrast the tint is dropped for a solid, and the label takes the surface
+     colour — the strongest reading of the same badge, and the one thing a verdict should
+     never be quiet about. */
+  [data-contrast="high"] .badge.verdict.bad   { background: var(--bad);   color: var(--bg); border-color: var(--bad); }
+  [data-contrast="high"] .badge.verdict.warn  { background: var(--warn);  color: var(--bg); border-color: var(--warn); }
+  [data-contrast="high"] .badge.verdict.good  { background: var(--good);  color: var(--bg); border-color: var(--good); }
+  [data-contrast="high"] .badge.verdict.muted { background: var(--muted); color: var(--bg); border-color: var(--muted); }
 
   /* How long a finished turn took — `durationHTML` in app.js, fed by the same
      `createElapsedTicker` that runs live above the loading grid. A retrospective number
@@ -2301,27 +2313,6 @@
     border: 1px solid var(--border);
     border-radius: 14px;
     padding: 7px 13px;
-  }
-  /* The bubble for the link a check actually started from — the same shape as `.thread-q`
-     (it sits above the same thread), but a favicon-plus-title preview instead of raw
-     question text. It grows with the title, same as `.thread-q` itself does, up to a cap
-     generous enough that a normal title (even a wrapped two- or three-line one) is never
-     scrolled — only a pathological title, or a URL with no natural break point, hits the
-     cap and scrolls inside the bubble instead of stretching the card around it. */
-  .link-bubble {
-    display: flex; align-items: flex-start; gap: 8px;
-    max-height: 130px; overflow-y: auto;
-  }
-  .link-bubble-icon {
-    width: 16px; height: 16px; flex-shrink: 0;
-    margin-top: 1px;
-    border-radius: 4px;
-    color: var(--ink-dim);
-  }
-  .link-bubble-icon svg { width: 100%; height: 100%; }
-  .link-bubble-icon img { width: 100%; height: 100%; border-radius: 4px; object-fit: cover; }
-  .link-bubble-title {
-    overflow-wrap: anywhere;
   }
   .thread-a.claim-text { font-size: 14.5px; margin: 0; }
   .thread-error { font-size: 12.5px; color: var(--bad); }
@@ -3345,7 +3336,42 @@
      (already dark-on-light, already high-contrast) token values, since both are single
      attribute selectors of equal specificity and this block comes later in the file. */
   [data-contrast="high"]:not([data-theme="light"]) {
-    --ink-dim: #D7DBE3; --muted: #B6BCC9; --border: #454C59; --surface-raised: #2A303B;
+    --ink: #FFFFFF;
+    --ink-dim: #E4E8EF;
+    --muted: #C6CCD8;
+    /* An outline you can actually see without looking for it — the default `--border` is a
+       hint, and this mode's whole job is to stop hinting. */
+    --border: #6C7488;
+    --surface: #1E232B;
+    --surface-raised: #2E3540;
+    /* The four semantic hues too, which the old block left at their default values: a
+       verdict badge, a status dot and a summary dot are the app's own findings, so a mode
+       asked for because colour was hard to see has to raise *those* before anything else. */
+    --accent: #7BEFE3;
+    --accent-2: #C4B8FF;
+    --good: #74DCA6;
+    --warn: #FFCB5E;
+    --bad: #FF9186;
+  }
+  /* Light + high contrast is a reachable combination (theme and contrast are independent —
+     see `applySettings`), and until now it was the one that did nothing at all: every rule
+     in this section excluded light theme, on the reasoning that light was "already
+     high-contrast". It isn't — it is a warm off-white palette with mid-tone accents, and a
+     reader who turns this on in light theme is asking for the same thing a dark-theme
+     reader is. Same treatment, the other way up: ink to black, edges to a real line,
+     semantic hues darkened rather than lightened. */
+  [data-contrast="high"][data-theme="light"] {
+    --ink: #000000;
+    --ink-dim: #2C2A24;
+    --muted: #4A4639;
+    --border: #9A9384;
+    --surface: #FFFFFF;
+    --surface-raised: #E7E2D6;
+    --accent: #0A5F57;
+    --accent-2: #442F96;
+    --good: #1E5735;
+    --warn: #6B4110;
+    --bad: #7C2115;
   }
   /* The phone layout's text sits over an arbitrary video rather than a fixed dark
      surface — a blur and a gradient are a thin guarantee of contrast there compared to

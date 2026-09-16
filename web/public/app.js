@@ -1950,15 +1950,6 @@ function claimGridColumns(count) {
   return count <= 1 ? 1 : 2;
 }
 
-/** Whether the last item should span the full row width — only the specific case of a
- * 2-column grid with an odd count, where the last claim would otherwise sit alone against
- * a bare gap beside it. Left alone (a normal trailing gap) for the 3-column case, since
- * spanning a partial remainder there gets visually uneven fast and six-plus claims is
- * already the overflow case, not the one this layout is tuned for. */
-function claimGridSpanLast(count, cols) {
-  return cols === 2 && count > 1 && count % 2 === 1;
-}
-
 /** Stamps (or clears) the grid layout on the claims pane itself. `null` is every other view
  * the pane renders — the empty state, an error card, the free-standing chat thread, a
  * whole-answer check with no `[[claim: …]]` markers — none of which are a set of same-shape
@@ -2147,32 +2138,6 @@ function fillLibThumb(thumb, entry) {
     if (icon.naturalWidth > 0) thumb.replaceChildren(icon);
   });
   icon.src = `${origin}/favicon.ico`;
-}
-
-/**
- * The bubble shown above a check's analysis for the link it actually started from — the
- * same "glyph first, favicon once it decodes" shape as `fillLibThumb`'s sidebar thumbnail,
- * because it's the same problem: no third-party favicon service, just the site's own
- * `/favicon.ico` fetched straight from the checked host, with the glyph as the honest
- * fallback for the many sites that don't answer it.
- *
- * The title is `entry.title` if a resolve has already improved on it (see `applyPostTitle`),
- * otherwise the pasted URL itself — there is nothing better to show yet.
- */
-function linkBubbleHTML(entry) {
-  return `
-    <div class="thread-q link-bubble">
-      <span class="link-bubble-icon" aria-hidden="true"></span>
-      <a class="link-bubble-title" href="${escapeHTML(entry.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(entry.title || entry.url)}</a>
-    </div>`;
-}
-
-/** Fills in the link bubble's icon exactly the way `fillLibThumb` fills in a sidebar row's
- * — call once the bubble markup above is actually in the document. */
-function fillLinkBubbleIcon(entry, container) {
-  const icon = container.querySelector(".link-bubble-icon");
-  if (!icon) return;
-  fillLibThumb(icon, entry);
 }
 
 function dotClassFor(entry) {
@@ -2983,13 +2948,6 @@ function applyPostTitle(entry, title, token) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   if (token === videoPaneToken) renderVideoTitle(entry);
-  // The claims pane's link bubble names the post the same way the pane heading does — see
-  // `linkBubbleHTML` — but a full `renderResultCard` here would restart that render's reveal
-  // animation, so just the bubble's own text is swapped in place.
-  if (selectedId === entry.id) {
-    const bubbleLink = el.claimsPane.querySelector(".link-bubble-title");
-    if (bubbleLink) bubbleLink.textContent = title;
-  }
 }
 
 /**
@@ -3376,8 +3334,11 @@ function renderRunningCard() {
   setClaimsGridMode(null);
   // `run-enter`: the "Chat to shell" arrival beat (index.html's own comment on `.run-enter`
   // explains why it's safe to always apply — this function only ever runs once per check).
+  // `run-enter` only when nothing is flying in: a card that is about to be the destination
+  // of the morph gets its arrival from the flight landing on it, and playing a scale-and-
+  // fade entrance underneath a clone of itself is one of the extra flashes this beat had.
   setClaimsPaneHTML(`
-    <div class="claim-card run-enter">
+    <div class="claim-card run-card${morph ? "" : " run-enter"}">
       <div class="card-loading">
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus" role="status">Sending to the model…</div>
@@ -3591,10 +3552,11 @@ const SKELETON_BODY_HTML = `
  * box's text was already on screen and already read, and replaying its entrance every time a
  * sibling appears is the re-animation `revealAttrs` exists to avoid. Only the box that has
  * genuinely just settled fades in. */
+/** Just the analysis. The verdict badge is no longer part of the body — it lives on the
+ * title row now (see `claimPanesHTML`), which is a different place in the DOM, so
+ * `settleClaimPane` puts it there rather than this returning the two together. */
 function settledBodyHTML(claim, sources, seekable, animate = true) {
-  return `
-      <div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
-      ${badgeHTML(claim.verdictKey, animate)}`;
+  return `<div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>`;
 }
 
 /** The position label on a claim box. Shared by the loading grid and the finished card so
@@ -3605,14 +3567,14 @@ function claimEyebrowText(index, total) {
 
 /** One box in the loading grid: title always real (lifted straight off the `[[claim: …]]`
  * marker that streamed in), body either settled or shimmering. */
-function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
+function loadingClaimHTML(claim, index, total, sources, seekable) {
   const done = Boolean(claim.verdictKey);
   // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
   // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
   // status strip is another <div> ahead of these, so nth-of-type would be off by one.
   // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
   // box has visibly finished sliding into place, instead of outrunning it.
-  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
+  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s`;
   return `
     <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       <div class="claim-eyebrow${done ? "" : " pending"}">${
@@ -3620,7 +3582,10 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
           ? escapeHTML(claimEyebrowText(index, total))
           : `Claim ${index + 1} of ${total} &middot; checking&hellip;`
       }</div>
-      <p class="claim-title in">${escapeHTML(claim.title)}</p>
+      <div class="claim-header-row">
+        <p class="claim-title in">${escapeHTML(claim.title)}</p>
+        ${done ? badgeHTML(claim.verdictKey, false) : ""}
+      </div>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
     </div>`;
 }
@@ -3642,7 +3607,6 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
 function renderClaimSkeletons(claims, stage, sources, seekable) {
   const count = claims.length;
   const cols = claimGridColumns(count);
-  const spanLast = claimGridSpanLast(count, cols);
   setClaimsGridMode("grid-loading", cols);
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
@@ -3652,7 +3616,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
       claimGridStatusHTML(stage) +
       claims
         .map((claim, i) =>
-          loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
+          loadingClaimHTML(claim, i, count, sources, seekable),
         )
         .join(""),
   );
@@ -3687,6 +3651,12 @@ function settleClaimPane(index, claim, total, sources, seekable) {
 
   body.insertAdjacentHTML("afterend", settledBodyHTML(claim, sources, seekable));
   body.remove();
+  // The badge belongs to the title row, not to the body that just landed — a settling box
+  // grows its verdict where every other box already wears one rather than at its foot.
+  const header = pane.querySelector(".claim-header-row");
+  if (header && !header.querySelector(".badges")) {
+    header.insertAdjacentHTML("beforeend", badgeHTML(claim.verdictKey, true));
+  }
   pane.classList.remove("skeleton");
   if (!prefersReducedMotion()) pane.classList.add("just-settled");
   const eyebrow = pane.querySelector(".claim-eyebrow");
@@ -4149,7 +4119,6 @@ function threadHTML(entry, newestIndex) {
 function claimPanesHTML(entry, animate, newestFollowup) {
   const { claims } = entry;
   const cols = claimGridColumns(claims.length);
-  const spanLast = claimGridSpanLast(claims.length, cols);
   return claims
     .map((claim, index) => {
       const isLast = index === claims.length - 1;
@@ -4161,21 +4130,24 @@ function claimPanesHTML(entry, animate, newestFollowup) {
            ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
-      // The last box spans the full row when it would otherwise sit alone against a bare
-      // gap beside it — see `claimGridSpanLast`. It's also, not coincidentally, the one
-      // carrying the footer above, so the extra width goes to the box that needs it most.
-      const spanFull = isLast && spanLast;
+
       // `role="button"`/`tabindex`/`aria-expanded`: on the phone layout this box is a
       // summary that opens on tap (see `handleClaimsPaneClick`). The attributes are
       // harmless above 700px, where the box is already showing everything it has and the
       // toggle changes nothing visible — the alternative was rendering different markup per
       // breakpoint and re-rendering the pane on every resize.
       return `
-        <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false"${spanFull ? ' style="grid-column:1/-1"' : ""}>
+        <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false">
           <div class="claim-eyebrow">${escapeHTML(eyebrow)}</div>
-          <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+          <!-- Title and verdict on one row, the way the DS's ClaimCard puts them: the
+               finding is what a reader is looking for, and at the foot of a paragraph of
+               analysis it was the last thing they reached rather than the first. The badge
+               keeps its own markup; only where it sits changed. -->
+          <div class="claim-header-row">
+            <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+            ${badgeHTML(claim.verdictKey, animate)}
+          </div>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
-          ${badgeHTML(claim.verdictKey, animate)}
           ${footer}
         </div>`;
     })
@@ -4208,19 +4180,23 @@ function summaryCardHTML(claims) {
     .map(([key, verdict]) => {
       const count = counts[key] ?? 0;
       return `
-        <div class="summary-stat" data-verdict="${key}" data-count="${count}">
-          <span class="summary-count ${verdict.css}"><span class="summary-num" data-count="${count}">${count}</span></span>
-          <span class="summary-label">${escapeHTML(verdict.label)}</span>
-        </div>`;
+        <span class="summary-pill-stat" data-verdict="${key}" data-count="${count}">
+          <span class="summary-pill-dot ${verdict.css}"></span>
+          <span class="summary-num" data-count="${count}">${count}</span> ${escapeHTML(verdict.label)}
+        </span>`;
     })
     .join("");
+  // The DS's `pill` variant of SummaryCard, not its card: a strip over a grid of claim
+  // boxes wants to be a line of counts, and the titled card it replaces was reading as a
+  // fifth claim. Same four verdicts, same live-updating numbers (`updateSummaryCard`),
+  // no chrome.
   return `
-    <div class="summary-card compact">
-      <h2 class="summary-title">Fact check summary</h2>
-      <div class="summary-sub">${claims.length} claim${claims.length === 1 ? "" : "s"} analysed</div>
-      <div class="summary-stats">${stats}</div>
+    <div class="summary-pill">
+      <span class="summary-pill-total">${claims.length} claim${claims.length === 1 ? "" : "s"}</span>
+      ${stats}
     </div>`;
 }
+
 
 /**
  * Keeps the loading grid's summary card in step as claims settle one at a time — the same
@@ -4236,18 +4212,18 @@ function summaryCardHTML(claims) {
  * a decrease, because there isn't one: a settled claim's verdict is never un-counted.
  */
 function updateSummaryCard(claims) {
-  const card = el.claimsPane.querySelector(".summary-card");
-  if (!card) return;
+  const pill = el.claimsPane.querySelector(".summary-pill");
+  if (!pill) return;
   const counts = {};
   for (const claim of claims) {
     if (claim.verdictKey && VERDICTS[claim.verdictKey]) {
       counts[claim.verdictKey] = (counts[claim.verdictKey] ?? 0) + 1;
     }
   }
-  const sub = card.querySelector(".summary-sub");
-  if (sub) sub.textContent = `${claims.length} claim${claims.length === 1 ? "" : "s"} analysed`;
+  const total = pill.querySelector(".summary-pill-total");
+  if (total) total.textContent = `${claims.length} claim${claims.length === 1 ? "" : "s"}`;
   for (const key of Object.keys(VERDICTS)) {
-    const stat = card.querySelector(`.summary-stat[data-verdict="${key}"]`);
+    const stat = pill.querySelector(`.summary-pill-stat[data-verdict="${key}"]`);
     if (!stat) continue;
     const count = counts[key] ?? 0;
     stat.dataset.count = String(count);
@@ -4264,16 +4240,20 @@ function updateSummaryCard(claims) {
   }
 }
 
+
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
     setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
     setClaimsPaneHTML(
-      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
+      // No bubble echoing the link back: the post is already on screen in the video pane,
+      // and its title is already in the shell's own title bar — a third copy of the same
+      // URL, styled as something the reader said, was the check quoting the paste back at
+      // them before answering it.
+      summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
     );
   } else {
     setClaimsGridMode(null);
     setClaimsPaneHTML(`
-    ${linkBubbleHTML(entry)}
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
@@ -4285,7 +4265,6 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       ${threadHTML(entry, newestFollowup)}
     </div>`);
   }
-  fillLinkBubbleIcon(entry, el.claimsPane);
   revealIn(el.claimsPane);
   // After the markup, not before: the windows are read back off the chips this render just
   // wrote, and the ones from the previous render point at nodes that no longer exist.
@@ -4611,7 +4590,7 @@ const MORPH_DIAL_BASE = 196;
  * then the flight runs 1800ms on an `easeOutCubic`, which front-loads the travel and lets
  * the last third be the mark settling rather than still crossing the pane. Shortening it
  * was the thing that made this read as a swap with a slide in front of it. */
-const MORPH_HERO_OUT_MS = 600;
+const MORPH_HERO_OUT_MS = 700;
 const MORPH_FLIGHT_MS = 1800;
 /* The phone's last leg is the DS's other screen and its other number: "Mobile Landing to
  * Shell" moves its mark in 0.8s, because there the mark has already had its long beat
@@ -4671,6 +4650,8 @@ const mixColor = (from, to, pct) => `color-mix(in oklab, ${to} ${pct}%, ${from} 
  */
 function paintMorph(frameRect, dialRect) {
   if (morph.frame && frameRect) {
+    // The panel is one box with a border and a corner radius, so it really does have to
+    // change size — a scaled box would smear both. One element, one layout per frame.
     Object.assign(morph.frame.style, {
       top: `${frameRect.top}px`,
       left: `${frameRect.left}px`,
@@ -4681,13 +4662,19 @@ function paintMorph(frameRect, dialRect) {
     });
     morph.wash.style.opacity = 1 - clamp01((morph.parts - 0.25) / 0.55);
   }
-  Object.assign(morph.dial.style, {
-    top: `${dialRect.top}px`,
-    left: `${dialRect.left}px`,
-    width: `${dialRect.width}px`,
-    height: `${dialRect.height}px`,
-  });
+  // The mark is sixteen nodes whose every dimension is a percentage of this box, so
+  // resizing the box re-lays-out all sixteen — sixty times a second, next to a check that
+  // is also streaming. It keeps its full size and moves under a transform instead: the
+  // compositor handles that without touching layout, which is the difference between the
+  // flight the design system plays and the one that stuttered.
+  const scale = dialRect.width / MORPH_DIAL_BASE;
+  morph.dial.style.transform = `translate3d(${dialRect.left}px, ${dialRect.top}px, 0) scale(${scale})`;
 
+  // The internals only move when a leg is actually morphing them (the phone's first leg
+  // travels without doing so), and writing fifteen colour strings per frame for nothing is
+  // the other half of the same cost.
+  if (morph.parts === morph.painted) return;
+  morph.painted = morph.parts;
   const pct = morph.parts * 100;
   const { r1, r2, r3, ticks, core } = morph.parts$;
   if (r1) {
@@ -4710,6 +4697,7 @@ function paintMorph(frameRect, dialRect) {
   // mark settles instead of being caught mid-spin.
   if (core) core.style.transform = `rotate(${morph.parts * 720}deg)`;
 }
+
 
 /**
  * Lifts the clones out of `hero` and parks them exactly over the originals. No motion yet —
@@ -4738,6 +4726,11 @@ function startMorph(hero) {
   if (frameRect) layer.innerHTML = `<div class="morph-frame"><div class="morph-wash"></div></div>`;
   const dial = document.createElement("div");
   dial.className = "morph-dial";
+  // Fixed at the mark's own intrinsic size and never resized — `paintMorph` moves and
+  // scales it with a transform instead. `top`/`left` stay at 0 so the transform's
+  // translation is straight viewport coordinates.
+  dial.style.width = `${MORPH_DIAL_BASE}px`;
+  dial.style.height = `${MORPH_DIAL_BASE}px`;
   const ticks = Array.from({ length: 12 }, (_, i) => `<i style="transform:rotate(${i * 30}deg)"><b></b></i>`).join("");
   dial.innerHTML = `
     <div class="morph-parts">
@@ -4766,6 +4759,9 @@ function startMorph(hero) {
     // is actually doing that morph — see `flyMorph`.
     parts: 0,
     partsRaw: 0,
+    // The last `parts` value actually painted, so a frame that only moved the mark does not
+    // rewrite all fifteen of its colours to the values they already have.
+    painted: -1,
     parts$: {
       r1: dial.querySelector(".mm-ring.r1"),
       r2: dial.querySelector(".mm-ring.r2"),
@@ -4854,7 +4850,7 @@ function endMorph() {
   const { layer, logo } = morph;
   morph = null;
   layer.classList.add("out");
-  setTimeout(() => layer.remove(), 450);
+  setTimeout(() => layer.remove(), 320);
   if (logo) {
     logo.classList.add("out");
     setTimeout(() => logo.remove(), 400);
@@ -4872,7 +4868,9 @@ function endMorph() {
  */
 async function finishMorph() {
   if (!morph) return;
-  const card = el.claimsPane.querySelector(".claim-card.run-enter");
+  // `.run-card`, not `.run-enter`: that class is the entrance animation, which this card
+  // does not get precisely because a morph is landing on it (see `renderRunningCard`).
+  const card = el.claimsPane.querySelector(".claim-card.run-card");
   const dial = card?.querySelector(".iris-wrap");
   if (!card || !dial) {
     endMorph();
@@ -4920,10 +4918,7 @@ async function finishMorph() {
   // No arrival to play if the card left while the clone was still in the air — the clone
   // just fades where it is, and whatever replaced the card (an error, most likely) is
   // already on screen in its own right.
-  if (landed) {
-    card.classList.add("morph-land");
-    setTimeout(() => card.classList.remove("morph-land"), 700);
-  }
+  if (landed) card.classList.add("morph-land");
   endMorph();
 }
 
