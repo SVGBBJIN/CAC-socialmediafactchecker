@@ -958,13 +958,14 @@
     }
   }
 
-  .claim-header-row {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  /* The verdict opens a claim box (see `claimPanesHTML` in app.js) — above the title, on
+     its own line, where the position pill used to be. `align-self` keeps it sized to its
+     own text rather than stretching across the box the way a block child of a flex column
+     otherwise would. */
+  .claim-pane > .badges {
+    align-self: flex-start;
+    margin-bottom: 10px;
   }
-  .claim-header-row .claim-title { flex: 1 1 auto; min-width: 0; margin-bottom: 8px; }
-  /* `.badges` is a block with its own bottom margin everywhere else it is used; in this row
-     it is one item beside another and neither applies. */
-  .claim-header-row .badges { flex: 0 0 auto; margin: 0; }
 
   .claim-grid-status {
     grid-column: 1 / -1;
@@ -1418,36 +1419,10 @@
     letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
   }
 
-  /* The per-claim position label ("Claim 2 of 4") in a claim-grid box — a pill instead of
-     `.eyebrow`'s plain uppercase line, matching the chip language `.source-pill`/`.badge`
-     already use elsewhere on the same box. `.eyebrow` itself stays as it was for the
-     whole-answer card and the error card, where there's no set of same-shape siblings for a
-     pill to distinguish this box from. `align-self: flex-start` keeps it sized to its own
-     text instead of stretching full width, which is what a block child of a flex column
-     does by default. */
-  .claim-eyebrow {
-    display: inline-flex; align-items: center;
-    align-self: flex-start;
-    margin-bottom: 10px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    /* `--ink-dim` rather than `--muted`, at 11px and semibold: this pill is the only thing
-       separating one claim from the next in the stacked mobile layout, so it has to survive
-       being skimmed. Uppercase mono at 10.5px in `--muted` was borderline against the
-       raised surface behind it and read as decoration rather than as a position marker. */
-    color: var(--ink-dim);
-    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
-    letter-spacing: 0.06em; text-transform: uppercase;
-  }
-  /* Still being checked (see `skeletonClaimHTML`) — accent-tinted so a reader scanning the
-     grid can tell a box apart from an already-settled one without reading its text. */
-  .claim-eyebrow.pending { color: var(--accent); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
 
   /* The claim itself, in `claimPanesHTML`'s split-panes layout — one line reproducing the
-     `[[claim: …]]` marker's own text, between the `.claim-eyebrow` pill above it and the
-     analysis text below. Same reveal-in transition as `.claim-text`, since the two always
+     `[[claim: …]]` marker's own text, between the verdict badge above it and the analysis
+     text below. Same reveal-in transition as `.claim-text`, since the two always
      arrive together. `word-break` matters more here than it did in the old full-width card:
      a claim box is often under 300px wide, narrow enough that one long unbroken token (a
      URL, a long number) could force the box wider than its grid cell. */
@@ -3170,7 +3145,7 @@
        "there's more, scroll for it". Here the clamp below already says it, and the fade over
        a two-line clamp reads as a rendering fault. */
     .claims-pane.claim-grid .claim-pane::after { content: none; }
-    .claim-pane .claim-eyebrow { font-size: 9.5px; padding: 1px 7px; margin-bottom: 6px; }
+    .claim-pane > .badges { margin-bottom: 8px; }
     /* Two lines each, clamped by height rather than by `-webkit-line-clamp`. The title
        could use the line clamp — it is one text node — but the analysis cannot: it is a
        wrapper around whatever blocks `renderMarkdown` produced (paragraphs, lists), and a
@@ -3220,7 +3195,6 @@
        the one line that identifies it and its verdict — the design system's "minimal" claim
        card. A box the reader has explicitly tapped open keeps its text. */
     [data-media="expanded"] .claim-pane:not(.expanded) .claim-text,
-    [data-media="expanded"] .claim-pane:not(.expanded) .claim-eyebrow,
     [data-media="expanded"] .claim-pane:not(.expanded) .skeleton-body { display: none; }
     [data-media="expanded"] .claim-pane:not(.expanded) .claim-title { max-height: 1.4em; margin-bottom: 6px; }
 

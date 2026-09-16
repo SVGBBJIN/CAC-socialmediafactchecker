@@ -3559,15 +3559,9 @@ function settledBodyHTML(claim, sources, seekable, animate = true) {
   return `<div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>`;
 }
 
-/** The position label on a claim box. Shared by the loading grid and the finished card so
- * a box that settles mid-stream doesn't relabel itself when the final render lands. */
-function claimEyebrowText(index, total) {
-  return total > 1 ? `Claim ${index + 1} of ${total}` : "Claim checked";
-}
-
 /** One box in the loading grid: title always real (lifted straight off the `[[claim: …]]`
  * marker that streamed in), body either settled or shimmering. */
-function loadingClaimHTML(claim, index, total, sources, seekable) {
+function loadingClaimHTML(claim, index, sources, seekable) {
   const done = Boolean(claim.verdictKey);
   // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
   // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
@@ -3577,15 +3571,8 @@ function loadingClaimHTML(claim, index, total, sources, seekable) {
   const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s`;
   return `
     <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
-      <div class="claim-eyebrow${done ? "" : " pending"}">${
-        done
-          ? escapeHTML(claimEyebrowText(index, total))
-          : `Claim ${index + 1} of ${total} &middot; checking&hellip;`
-      }</div>
-      <div class="claim-header-row">
-        <p class="claim-title in">${escapeHTML(claim.title)}</p>
-        ${done ? badgeHTML(claim.verdictKey, false) : ""}
-      </div>
+      ${done ? badgeHTML(claim.verdictKey, false) : ""}
+      <p class="claim-title in">${escapeHTML(claim.title)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
     </div>`;
 }
@@ -3616,7 +3603,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
       claimGridStatusHTML(stage) +
       claims
         .map((claim, i) =>
-          loadingClaimHTML(claim, i, count, sources, seekable),
+          loadingClaimHTML(claim, i, sources, seekable),
         )
         .join(""),
   );
@@ -3643,7 +3630,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
  * one. A no-op if the box isn't there — the reader navigated away, or the finished card has
  * already replaced the loading view.
  */
-function settleClaimPane(index, claim, total, sources, seekable) {
+function settleClaimPane(index, claim, sources, seekable) {
   const pane = el.claimsPane.querySelector(`.claim-pane[data-claim="${index}"]`);
   if (!pane) return;
   const body = pane.querySelector(".claim-body");
@@ -3651,19 +3638,14 @@ function settleClaimPane(index, claim, total, sources, seekable) {
 
   body.insertAdjacentHTML("afterend", settledBodyHTML(claim, sources, seekable));
   body.remove();
-  // The badge belongs to the title row, not to the body that just landed — a settling box
-  // grows its verdict where every other box already wears one rather than at its foot.
-  const header = pane.querySelector(".claim-header-row");
-  if (header && !header.querySelector(".badges")) {
-    header.insertAdjacentHTML("beforeend", badgeHTML(claim.verdictKey, true));
+  // The badge opens the box (see `claimPanesHTML`), so a settling one grows its verdict
+  // above its title rather than at its foot — where every box that settled before it is
+  // already wearing one.
+  if (!pane.querySelector(".badges")) {
+    pane.insertAdjacentHTML("afterbegin", badgeHTML(claim.verdictKey, true));
   }
   pane.classList.remove("skeleton");
   if (!prefersReducedMotion()) pane.classList.add("just-settled");
-  const eyebrow = pane.querySelector(".claim-eyebrow");
-  if (eyebrow) {
-    eyebrow.classList.remove("pending");
-    eyebrow.textContent = claimEyebrowText(index, total);
-  }
   revealIn(pane);
   // The `[t=…]` chips this box just gained are seek controls like any other — read them
   // back now rather than at the end, so a settled claim's timestamps play the clip
@@ -4122,7 +4104,6 @@ function claimPanesHTML(entry, animate, newestFollowup) {
   return claims
     .map((claim, index) => {
       const isLast = index === claims.length - 1;
-      const eyebrow = claimEyebrowText(index, claims.length);
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
            ${durationHTML(entry.durationMs, animate)}
@@ -4138,15 +4119,12 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       // breakpoint and re-rendering the pane on every resize.
       return `
         <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false">
-          <div class="claim-eyebrow">${escapeHTML(eyebrow)}</div>
-          <!-- Title and verdict on one row, the way the DS's ClaimCard puts them: the
-               finding is what a reader is looking for, and at the foot of a paragraph of
-               analysis it was the last thing they reached rather than the first. The badge
-               keeps its own markup; only where it sits changed. -->
-          <div class="claim-header-row">
-            <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
-            ${badgeHTML(claim.verdictKey, animate)}
-          </div>
+          <!-- Verdict first, then the claim it belongs to. The finding is what a reader
+               came for, so it opens the box rather than closing it; the "Claim 1 of 4"
+               label that used to sit here is gone, since the boxes are laid out side by
+               side and counting them off was numbering what the reader can already see. -->
+          ${badgeHTML(claim.verdictKey, animate)}
+          <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
           ${footer}
         </div>`;
@@ -5145,7 +5123,7 @@ async function runCheck(url, existingId, hint) {
           flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
         } else {
           for (const index of settled) {
-            settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
+            settleClaimPane(index, claims[index], liveSources, seekable);
           }
           // The surgical path above never touches the summary card, unlike the rebuild path
           // above it — so it's the one place that has to patch it itself.
