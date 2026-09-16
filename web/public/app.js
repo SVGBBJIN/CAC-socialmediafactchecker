@@ -4695,9 +4695,10 @@ function paintMorph(frameRect, dialRect) {
  * Lifts the clones out of `hero` and parks them exactly over the originals. No motion yet —
  * `flyMorph` is what moves them, once there is somewhere to move them to.
  *
- * Measured before the caller adds `.leaving`: that class scales the hero, and
- * `getBoundingClientRect` reports the rendered, post-transform box, so a reading taken
- * afterwards would start the flight from slightly the wrong place.
+ * Called at the *end* of the idle screen's exit rather than the start of it, because the
+ * frame clone is opaque and would otherwise sit over the pills while they pan — see the
+ * call site in `playLandingExit`, which also records what that timing now depends on
+ * (nothing under `.leaving` may transform the hero or the HUD block).
  *
  * Only the "New chat" hero flies a panel, because it is the only idle screen that *is* one:
  * a bordered, radially-lit box sitting inside the shell, the same shape as the card it is
@@ -4938,7 +4939,6 @@ async function playLandingExit(url) {
   const landing = el.claimsPane.querySelector(".landing, .newchat-hero");
   if (!landing || prefersReducedMotion()) return;
   pendingMediaReveal = true;
-  startMorph(landing);
   // The overlay is the phone flow's own beat in the DS, and only the phone's: at any width
   // where the panel itself flies, a frosted sheet over the top would hide the flight it is
   // supposed to be covering for.
@@ -4955,6 +4955,22 @@ async function playLandingExit(url) {
   // by their own parent's fade, as they were, this read as the mark freezing before the
   // flight, because that is precisely what it was.
   await new Promise((resolve) => setTimeout(resolve, MORPH_HERO_OUT_MS));
+
+  // Lifted *after* the hold, not before it, which is the DS's own order (`setHeroOut`, then
+  // 600ms, then `setFlying` mounts the clone) and the reason the hero's pills looked like
+  // they had no animation at all. The landing flies no panel, so its clone is the mark
+  // alone and transparent everywhere else — but the hero flies one, and `.morph-frame` is
+  // an opaque `--surface` fill at z-index 20 parked exactly over the hero. Mounted at the
+  // top of this function it spent the whole hold covering the very pills that are supposed
+  // to be panning out from under it: they were animating the entire time, behind a lid.
+  //
+  // Measuring this late is only safe because nothing transforms either hero during the
+  // hold any more: `.landing-hud` is exempt from the column teardown and the hero box
+  // itself no longer fades or scales (both in index.html, and both the DS's own
+  // `.hero-out`). Re-transform either of them and this reading has to move back up —
+  // `getBoundingClientRect` reports the post-transform box, so the flight would start from
+  // slightly the wrong place.
+  startMorph(landing);
 
   // Measured now, at the exact moment the page it's embedded in is about to be torn down —
   // not before the fade above, whose own `transform: scale(...)` would have made an earlier
