@@ -31,19 +31,28 @@
   :root {
     --bg: #12151A;
     --surface: #1B1F26;
-    --surface-raised: #232833;
-    --border: #2A2F39;
-    --ink: #F0EDE6;
-    --ink-dim: #A9AFBB;
-    --muted: #8A93A3;
-    --accent: #4FD1C5;
+    --surface-raised: #262C37;
+    /* Edges used to be a shade off the surface they sat on, which on a dim screen meant no
+       edge at all: a card's outline, a divider, the composer's own border all disappeared.
+       Every neutral below is lifted for the same reason — the palette was tuned for a dark
+       room and read as low-contrast everywhere else. */
+    --border: #3A4150;
+    --ink: #F4F1EB;
+    --ink-dim: #C3C9D5;
+    --muted: #A2AAB9;
+    --accent: #5DDCD0;
     /* Secondary accent — violet, used sparingly (claim-card top edge, the loading dial's
        and brand HUD's own third ring/node/core accent) so the palette reads as considered,
        not a second brand color competing with teal. */
-    --accent-2: #9C8CF0;
-    --good: #6FA98A;
-    --warn: #D6A84A;
-    --bad: #C1594F;
+    --accent-2: #AE9EFF;
+    /* The three verdict colours carry the app's actual finding, so they are the last place
+       to be subtle. Raised well clear of the surfaces they are drawn on — as badge text, as
+       a summary dot, as a sidebar status dot — rather than the muted-earth versions they
+       were, which on a badge tint at 20% opacity were barely distinguishable from each
+       other. */
+    --good: #56C08D;
+    --warn: #E8B54B;
+    --bad: #E8756A;
 
     /* The one place this app diverges from the design system's tokens on purpose: the DS
        sets display to the same grotesque as body ("differentiated by weight rather than a
@@ -63,17 +72,19 @@
     --bg: #F6F4EF;
     --surface: #FFFFFF;
     --surface-raised: #EFEBE2;
-    --border: #DDD7C8;
+    --border: #C9C2AF;
 
-    --ink: #1C1B18;
-    --ink-dim: #55524A;
-    --muted: #857F71;
+    --ink: #17160F;
+    --ink-dim: #46443D;
+    --muted: #6E695D;
 
-    --accent: #1C8C81;
-    --accent-2: #6952C4;
-    --good: #3F7A57;
-    --warn: #966327;
-    --bad: #A6402F;
+    /* Darkened to match the dark theme's lift — the same complaint in the other direction:
+       mid-tone accents on a warm off-white read as washed out, and a verdict must not. */
+    --accent: #12766C;
+    --accent-2: #5942B0;
+    --good: #2F6B47;
+    --warn: #855318;
+    --bad: #952F20;
   }
 
   * { box-sizing: border-box; }
@@ -392,7 +403,7 @@
      verdict badge at once, so it read as a second copy of what was on screen — but the
      TRASE Design System's own "Chat to shell" screen keeps it above the grid at every
      width, as the one place the check's shape is legible before the reader has scanned the
-     whole grid, so it now renders everywhere (see `.summary-card` below). */
+     whole grid, so it now renders everywhere (see `.summary-pill` below). */
   .sheet-handle,
   .media-expand-btn { display: none; }
 
@@ -514,11 +525,30 @@
     cursor: pointer;
   }
   .entry-bar #checkBtn:hover { filter: brightness(1.08); }
+  /* Running: the submit button is a stop button. Flat surface rather than the gradient —
+     it is no longer the affirmative action in the row — and the square is the shape
+     everything else that streams text uses for this, so it needs no label to be read. */
+  #checkBtn .stop-btn-icon { display: none; }
+  #checkBtn[data-mode="stop"] .check-btn-icon { display: none; }
+  #checkBtn[data-mode="stop"] .stop-btn-icon { display: block; }
+  .entry-bar #checkBtn[data-mode="stop"] {
+    background: var(--surface-raised);
+    border-color: var(--border);
+    color: var(--ink);
+  }
+  .entry-bar #checkBtn[data-mode="stop"]:hover { filter: none; border-color: var(--bad); color: var(--bad); }
+  /* A stop button that is disabled is a trap: the reader is watching something happen and
+     the one control that ends it is greyed out. It stays live for the whole turn — every
+     `disabled` the run paths used to set is now `setComposerRunning`'s business. */
+  .entry-bar #checkBtn[data-mode="stop"]:disabled { opacity: 1; cursor: pointer; }
   .entry-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .entry-bar button:disabled { opacity: 0.5; cursor: default; }
   /* Dark ink on the gradient, the one place in the app where text sits *on* the accent
      rather than in it — `currentColor` on the glyph would otherwise inherit teal on teal. */
   .check-btn-icon { display: block; width: 18px; height: 18px; color: #06201d; }
+  /* `currentColor`, unlike the glyph above: the stop button is not on the gradient, so it
+     takes the button's own ink (and the `--bad` it turns on hover). */
+  .stop-btn-icon { width: 18px; height: 18px; color: currentColor; }
   .check-btn-label {
     position: absolute; width: 1px; height: 1px;
     overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
@@ -887,57 +917,40 @@
      surface would just make every box too small to read — the claims there stay a single
      stacked column, same as before this existed. */
   @media (min-width: 701px) {
+    /* One column of claim boxes, the design system's ClaimStack.
+       It was a grid of tiles, then a wrapping two-column flex row; both were a way of
+       fitting more on screen at once, and both cost the thing a claim actually needs — a
+       readable measure and as much height as its analysis takes. A stack gives every box
+       the pane's full width, sizes each to its own content, and leaves one scroller for the
+       whole surface, which is also what the DS's own "Chat to shell" screen ends on. */
     .claims-pane.claim-grid {
-      display: grid;
-      grid-template-columns: repeat(var(--claim-cols, 2), 1fr);
-      /* `minmax(220px, 1fr)` rather than a bare `1fr`: with up to two rows (four claims,
-         `claimGridColumns`'s cap) the `1fr` half still evenly divides the pane's full
-         stretched height between them, same as before. A third row past that no longer has
-         room to divide into — a bare `1fr` would have shrunk every row instead, cramming
-         claim five and six into a sliver alongside the first four. The `220px` floor holds
-         each row to a readable minimum instead, so the grid grows *past* the pane's height
-         and this rule's own `overflow-y: auto` scrolls to it — "about four visible, the
-         rest a scroll away" instead of every row shrinking to fit. */
-      grid-auto-rows: minmax(220px, 1fr);
-      gap: 12px;
+      display: flex;
+      /* `.claims-pane`'s base rule is already a flex column; said again here so this rule
+         is legible on its own rather than depending on what it happens to inherit. */
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
       overflow-y: auto;
-      /* An explicit first row sized to its own content, spanned by `.summary-card` (see its
-         own rule) — without this it would be an implicit row and inherit the same
-         `minmax(220px, 1fr)` every claim box gets, stretching a compact summary strip into a
-         claim-sized box. `grid-auto-rows` still governs every row after it. */
-      grid-template-rows: auto;
+      scrollbar-width: thin;
     }
-    /* The loading variant reserves a second `auto`-height row for `claimGridStatusHTML`'s
-       status strip, on top of the summary card's own row above — `grid-auto-rows` above
-       still governs every claim-box row after both. The finished result has only the one
-       extra row (the summary card): every other cell there is a claim. */
-    .claims-pane.claim-grid.claim-grid-loading { grid-template-rows: auto auto; }
+    .claims-pane.claim-grid > * { flex: 0 0 auto; }
     .claims-pane.claim-grid .claim-pane {
-      /* A grid item's default `min-height` is `auto` — the same trap a flex item's is (see
-         `.claims-pane`'s own comment above) — so without this, a box with more in it than
-         its row is tall grows the row instead of scrolling inside the height it actually
-         has. `position: relative` gives the fade below a containing block that is this box
-         itself, not the grid — see its own comment for why that specific anchor matters. */
+      /* Nothing constrains a box's height any more: no track to divide, no row to share, no
+         scroller of its own. It is as tall as what is in it, and the pane scrolls. */
+      width: 100%;
+      min-width: 0;
       position: relative;
-      min-height: 0;
-      overflow-y: auto;
+      overflow: visible;
     }
-    /* An overflowing box's last line — often the verdict badge, since it's what every box
-       ends on — would otherwise be sliced flat by the box's own edge, reading as a broken
-       layout rather than "there's more, scroll for it". This fades it into the card's own
-       background instead. `position: absolute` inside a `position: relative` scroll
-       container (`.claim-pane` above) is pinned to that box's own visible edge rather than
-       scrolling with the content — the containing block is the scroller itself, not the
-       (taller) content inside it — so it always sits over whatever is currently cut off,
-       never drifting away from the edge as the reader scrolls. Harmless when a box doesn't
-       overflow: fading empty space into a background already that color paints nothing. */
-    .claims-pane.claim-grid .claim-pane::after {
-      content: "";
-      position: absolute; left: 0; right: 0; bottom: 0;
-      height: 28px;
-      background: linear-gradient(to bottom, transparent, var(--surface));
-      pointer-events: none;
-    }
+  }
+
+  /* The verdict opens a claim box (see `claimPanesHTML` in app.js) — above the title, on
+     its own line, where the position pill used to be. `align-self` keeps it sized to its
+     own text rather than stretching across the box the way a block child of a flex column
+     otherwise would. */
+  .claim-pane > .badges {
+    align-self: flex-start;
+    margin-bottom: 10px;
   }
 
   .claim-grid-status {
@@ -1082,43 +1095,42 @@
      and `renderResultCard` both prepend it), its counts updating live as each claim's
      verdict lands (`updateSummaryCard`). Its counts read the same closed four-verdict
      vocabulary everything else does (`VERDICTS` in public/claims.js). */
-  .summary-card {
+  /* The DS's SummaryCard `pill` variant, which is what this app draws now: one line of
+     counts across the top of the claim grid rather than a titled card taking a grid row of
+     its own and reading as a fifth claim. `summaryCardHTML` (app.js) writes it and
+     `updateSummaryCard` patches the numbers in place as claims settle. */
+  .summary-pill {
     grid-column: 1 / -1;
-    padding: 11px 13px;
-    border-radius: 14px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    box-shadow: inset 0 1px 0 rgba(240,237,230,0.04);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px;
+    font-size: 12px;
+    padding: 2px 2px 4px;
   }
-  .summary-title { font-family: var(--font-display); font-size: 12.5px; font-weight: 600; color: var(--ink); margin: 0; }
-  .summary-sub { font-size: 10.5px; color: var(--muted); margin-top: 1px; }
-  .summary-stats { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
-  .summary-stat { display: flex; align-items: center; gap: 5px; min-width: 0; }
-  .summary-count {
-    flex-shrink: 0;
-    width: 18px; height: 18px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  .summary-pill-total {
+    font-family: var(--font-display); font-weight: 600; color: var(--ink);
+    padding-right: 12px; border-right: 1px solid var(--border);
+    flex-shrink: 0; white-space: nowrap;
   }
-  .summary-count.bad   { background: color-mix(in oklab, var(--bad) 20%, transparent);   color: var(--bad); }
-  .summary-count.warn  { background: color-mix(in oklab, var(--warn) 20%, transparent);  color: var(--warn); }
-  .summary-count.good  { background: color-mix(in oklab, var(--good) 20%, transparent);  color: var(--good); }
-  .summary-count.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); }
+  .summary-pill-stat { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-dim); white-space: nowrap; }
+  .summary-pill-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .summary-pill-dot.bad { background: var(--bad); }
+  .summary-pill-dot.warn { background: var(--warn); }
+  .summary-pill-dot.good { background: var(--good); }
+  .summary-pill-dot.muted { background: var(--muted); }
+  /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
+     and disappears as counts change would make the strip a different shape every check. */
+  .summary-pill-stat[data-count="0"] { opacity: 0.5; }
   /* Ported from the TRASE Design System's SummaryCard (`AnimatedNumber`): a count that just
      went up rolls in from above instead of silently swapping digits — `updateSummaryCard`
      (app.js) is what decides "just went up" and adds/removes this class per bump. Never
      played on a decrease; there isn't one — a settled claim's verdict is never un-counted. */
-  .summary-num { display: inline-block; }
+  .summary-num { display: inline-block; font-variant-numeric: tabular-nums; }
   .summary-num.rolling { animation: summary-roll 0.32s ease; }
   @keyframes summary-roll {
     0%   { transform: translateY(-55%); opacity: 0; }
     60%  { opacity: 1; }
     100% { transform: translateY(0); opacity: 1; }
   }
-  /* Dimmed rather than dropped: the four verdicts are a fixed set, and a row that appears
-     and disappears as counts change would make the card a different shape on every check. */
-  .summary-stat[data-count="0"] { opacity: 0.45; }
-  .summary-label { font-size: 10.5px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 
   /* ---------- Claim skeleton (loading grid) ---------- */
   /* `renderClaimSkeletons` (app.js) — a placeholder box for a claim the model has named but
@@ -1174,6 +1186,12 @@
     transition: opacity 0.6s cubic-bezier(.2,1,.3,1);
     transition-delay: var(--split-delay, 0s);
   }
+  /* A box already in the stack changing height — a skeleton settling into its real analysis
+     — animates rather than snapping, which is what the DS's `.claim-stack-cell` does with
+     its own measured height. Here the box owns its height directly, so the transition goes
+     on the box. */
+  .claims-pane.claim-grid .claim-pane { transition: height 0.4s cubic-bezier(.4,0,.2,1); }
+  [data-motion="reduced"] .claims-pane.claim-grid .claim-pane { transition: none; }
 
   /* The loading spinner — the only child of `.claim-card` while a check is running, so
      `flex: 1` lets it claim the card's whole height and `justify-content: center` puts it
@@ -1393,36 +1411,10 @@
     letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
   }
 
-  /* The per-claim position label ("Claim 2 of 4") in a claim-grid box — a pill instead of
-     `.eyebrow`'s plain uppercase line, matching the chip language `.source-pill`/`.badge`
-     already use elsewhere on the same box. `.eyebrow` itself stays as it was for the
-     whole-answer card and the error card, where there's no set of same-shape siblings for a
-     pill to distinguish this box from. `align-self: flex-start` keeps it sized to its own
-     text instead of stretching full width, which is what a block child of a flex column
-     does by default. */
-  .claim-eyebrow {
-    display: inline-flex; align-items: center;
-    align-self: flex-start;
-    margin-bottom: 10px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    /* `--ink-dim` rather than `--muted`, at 11px and semibold: this pill is the only thing
-       separating one claim from the next in the stacked mobile layout, so it has to survive
-       being skimmed. Uppercase mono at 10.5px in `--muted` was borderline against the
-       raised surface behind it and read as decoration rather than as a position marker. */
-    color: var(--ink-dim);
-    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
-    letter-spacing: 0.06em; text-transform: uppercase;
-  }
-  /* Still being checked (see `skeletonClaimHTML`) — accent-tinted so a reader scanning the
-     grid can tell a box apart from an already-settled one without reading its text. */
-  .claim-eyebrow.pending { color: var(--accent); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
 
   /* The claim itself, in `claimPanesHTML`'s split-panes layout — one line reproducing the
-     `[[claim: …]]` marker's own text, between the `.claim-eyebrow` pill above it and the
-     analysis text below. Same reveal-in transition as `.claim-text`, since the two always
+     `[[claim: …]]` marker's own text, between the verdict badge above it and the analysis
+     text below. Same reveal-in transition as `.claim-text`, since the two always
      arrive together. `word-break` matters more here than it did in the old full-width card:
      a claim box is often under 300px wide, narrow enough that one long unbroken token (a
      URL, a long number) could force the box wider than its grid cell. */
@@ -1710,6 +1702,10 @@
     gap: 22px;
     padding: 32px;
     border-radius: 18px; border: 1px solid var(--border);
+    /* Both halves, as the DS writes them: the flat `--bg` fill is what the radial highlight
+       is lit against, and without it the pane's own surface shows through the gradient's
+       transparent end and the panel stops reading as a panel. */
+    background-color: var(--bg);
     background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
     opacity: 0;
     animation: card-in 0.5s cubic-bezier(.2,1,.3,1) forwards;
@@ -1726,14 +1722,10 @@
     font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
     text-transform: uppercase; color: var(--muted); margin-top: 10px; line-height: 1.7;
   }
-  @media (max-width: 520px) {
-    /* The phone has one pane and a video strip to share it with, so the hero gives up its
-       border the same way `.claim-card` does at this width (see that rule's own comment)
-       and just centres what it holds. */
-    .newchat-hero { padding: 16px 8px; gap: 16px; border: 0; border-radius: 0; background-image: none; }
-    .newchat-wordmark { font-size: 26px; }
-    .newchat-tagline { font-size: 10px; }
-  }
+  /* No phone override any more, and none is reachable: every phone gets the landing page as
+     its idle screen (see `renderChatPane`), and the phone breakpoint (700px) is wider than
+     this rule's own, so what used to live here could only ever have applied to a screen
+     that no longer renders at that width. */
   @media (prefers-reduced-motion: reduce) { .newchat-hero { animation: none; opacity: 1; } }
   [data-motion="reduced"] .newchat-hero { animation: none; opacity: 1; }
 
@@ -1749,12 +1741,44 @@
      the landing, but it is the same brand block over the same HUD, and a check starting
      from it is the same event — so it flies its pills out too rather than blinking away
      while the landing gets a send-off. */
-  .landing.leaving,
+  /* The "New chat" hero is a box, and a box leaves as a box. */
   .newchat-hero.leaving {
     transition: opacity 0.32s ease, transform 0.32s ease;
     opacity: 0;
     transform: scale(0.97) translateY(-6px);
   }
+  /* The landing is a page, and the DS's "Mobile Landing to Shell" takes it apart rather
+     than dimming it: every block in the scroll column lifts, blurs and goes, one after the
+     next from the top, so the screen empties in the reading direction instead of all at
+     once. Same `.rise` elements the entrance staggers (see `.landing .rise` above), run the
+     other way — the delays here are the DS's own, and the topbar goes with the page since
+     it is not part of that column.
+
+     `filter: blur(1px)` is what makes this read as a dissolve rather than a slide: without
+     it the blocks simply move up and out, which at this speed looks like a scroll. */
+  .landing.leaving .lshell-topbar {
+    transition: opacity 0.35s ease;
+    opacity: 0;
+  }
+  .landing.leaving .lshell-scroll > .rise {
+    transition: opacity 0.45s ease, transform 0.55s cubic-bezier(.4,0,.2,1), filter 0.45s ease;
+    opacity: 0;
+    transform: translateY(-16px) scale(0.98);
+    filter: blur(1px);
+    /* The entrance animation is still on these elements and `both` holds its last frame,
+       which would pin opacity at 1 and beat every transition above. */
+    animation: none;
+  }
+  .landing.leaving .lshell-scroll > .rise:nth-child(1) { transition-delay: 0.02s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(2) { transition-delay: 0.06s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(3) { transition-delay: 0.10s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(4) { transition-delay: 0.14s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(5) { transition-delay: 0.18s; }
+  .landing.leaving .lshell-scroll > .rise:nth-child(6) { transition-delay: 0.22s; }
+  /* No exemption for the entry block, even though the composer is inside it: by the time
+     the block is far into its fade the real `#entryBar` node has already been moved out to
+     its dock and is flying there under its own transform (`flyEntryBarHome`), so what
+     dissolves here is the block's own chrome, not the control. */
   .landing.leaving .brand-hud-pill,
   .newchat-hero.leaving .brand-hud-pill { transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.3,0,.2,1); }
   .landing.leaving .brand-hud-pill.sources,
@@ -1765,6 +1789,134 @@
   .newchat-hero.leaving .brand-hud-pill.facts   { opacity: 0; transform: translate(-28px, 18px); }
   .landing.leaving .brand-hud-pill.clarity,
   .newchat-hero.leaving .brand-hud-pill.clarity { opacity: 0; transform: translate(28px, 18px); }
+
+  /* ---------- Chat to shell: the shared-element morph ----------
+     The other half of the DS's "Chat to shell" screen, and the part that was missing here:
+     the idle screen doesn't only fade, it *travels*. A clone of the hero panel and of the
+     brand HUD's cluster is lifted out of the page into a fixed layer (`startMorph` in
+     app.js) at the moment the pills fly out, and flown on one rAF clock into the running
+     card's own footprint and its loading dial (`finishMorph`). Clones rather than the real
+     nodes because the pane underneath is torn down and rebuilt between the two halves of
+     the flight — the source no longer exists by the time the destination does.
+
+     Sizes are driven from JS (`paintMorph`), so there is nothing here but the paint: the
+     frame's chrome, the radial wash it carries out of the hero, and the `transform-origin`
+     the cluster clone is scaled about. Above the analyzing overlay (z-index 40) for the
+     same reason the DS's own `.hud-fly` sits above its analyzing layer: on a phone the
+     flight's waypoint *is* that overlay's scan ring. */
+  .morph-layer { position: fixed; inset: 0; z-index: 41; pointer-events: none; transition: opacity 0.28s ease; }
+  .morph-layer.out { opacity: 0; }
+  .morph-frame {
+    position: fixed; box-sizing: border-box; overflow: hidden;
+    border: 1px solid var(--border); border-radius: 16px; background: var(--surface);
+  }
+  .morph-wash {
+    position: absolute; inset: 0;
+    background: var(--bg);
+    background-image: radial-gradient(circle at 50% 30%, var(--surface-raised) 0%, var(--bg) 60%);
+  }
+  /* Pinned at the origin and moved by `transform` alone (see `paintMorph`) — a fixed box
+     the compositor slides and scales, rather than sixteen percentage-sized children being
+     re-laid-out sixty times a second. `will-change` keeps it on its own layer for the whole
+     flight instead of being promoted and demoted as the transform starts and stops. */
+  .morph-dial { position: fixed; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+  .morph-frame { will-change: top, left, width, height; }
+  /* The brand mark's own leg, which on a phone is a separate flight from the HUD's: the DS
+     sends it into the middle of the analyzing ring while the cluster closes around it, so
+     the interstitial's core *is* the landing's mark rather than a new dot in its place. A
+     CSS transition rather than a frame of the rAF loop, exactly as the DS's `.logo-fly` is
+     — it has one leg with one destination and nothing to stay in step with. */
+  .morph-logo {
+    position: fixed; z-index: 42; pointer-events: none;
+    transition: top 0.62s cubic-bezier(.45,0,.15,1), left 0.62s cubic-bezier(.45,0,.15,1),
+                width 0.62s cubic-bezier(.45,0,.15,1), height 0.62s cubic-bezier(.45,0,.15,1),
+                opacity 0.35s ease;
+  }
+  .morph-logo svg { width: 100%; height: 100%; display: block; }
+  .morph-logo.spin svg { animation: brand-hud-spin-slow 6s linear infinite; }
+  .morph-logo.out { opacity: 0; }
+  /* The mark in flight, drawn the DS's way rather than cloned from either end of the trip.
+     Every dimension here is a percentage of the flying box, which is what lets the same
+     markup be a 196px brand HUD at the start and an 84px loading dial at the end with no
+     re-layout — and, more to the point, it is what makes the two *the same drawing*: the
+     rings, ticks, core and nodes are at the same proportions in both, so the flight can
+     interpolate between the HUD's values and the dial's instead of scaling one and cutting
+     to the other. The from-values below are the brand HUD's; `paintMorph` (app.js) walks
+     them to the dial's over the flight.
+
+     A clone of the real cluster cannot do this: `.brand-hud-cluster`'s geometry is in px
+     against a 196px box, so scaled down it stays the HUD's drawing at the dial's size and
+     the handoff reads as a pop. */
+  .morph-parts { position: relative; width: 100%; height: 100%; }
+  .mm-ring { position: absolute; border-radius: 50%; box-sizing: border-box; }
+  .mm-ring.r1 { inset: 0; border: 1px solid var(--border); }
+  .mm-ring.r2 {
+    inset: 11%; border: 1.5px dashed color-mix(in oklab, var(--warn) 45%, var(--border));
+    animation: brand-hud-spin-slow 40s linear infinite;
+  }
+  .mm-ring.r3 { inset: 21%; border: 1px solid color-mix(in oklab, var(--accent-2) 50%, var(--border)); }
+  .mm-ticks { position: absolute; inset: 0; }
+  .mm-ticks i { position: absolute; top: 0; left: calc(50% - 1px); width: 2px; height: 50%; transform-origin: 50% 100%; }
+  .mm-ticks i b {
+    position: absolute; top: 2%; left: 0; width: 2px; height: 4%; display: block;
+    background: color-mix(in oklab, var(--accent) 50%, var(--border));
+  }
+  .mm-core { position: absolute; top: 50%; left: 50%; width: 30%; height: 30%; margin: -15% 0 0 -15%; }
+  .mm-core svg { width: 100%; height: 100%; display: block; }
+  .mm-node { position: absolute; width: 5%; height: 5%; border-radius: 50%; }
+  .mm-node.n1 { top: 24%; left: 18%; background: var(--good); }
+  .mm-node.n2 { top: 64%; left: 78%; background: var(--bad); }
+  .mm-node.n3 { top: 14%; left: 70%; background: var(--accent-2); }
+  /* The mark waiting in the analyzing ring on a phone: the DS spins up its dashed ring and
+     lights an arc around it, so the thing that just landed reads as working rather than as
+     parked. Only that flow has a wait to fill. */
+  .morph-dial .mm-arc {
+    position: absolute; inset: -2px; border-radius: 50%;
+    border: 3px solid transparent; border-top-color: var(--accent);
+    opacity: 0; transition: opacity 0.4s ease;
+  }
+  .morph-dial.loading .mm-arc { opacity: 1; animation: analyzing-scan-spin 1.1s linear infinite; }
+  .morph-dial.loading .mm-ring.r2 { animation-duration: 2.4s; }
+  /* The destination holds still and empty while the clone is in the air, then catches it —
+     the same handoff the DS does with `.card-morph`/`.morph-land`. `animation: none`
+     suppresses `.run-enter`'s own entrance, which would otherwise play (and finish) behind
+     the flight and have nothing left to show on arrival. */
+  .claim-card.morph-incoming { opacity: 0 !important; animation: none !important; }
+  /* The destination is simply *there* the frame the flight ends — no fade of its own. It
+     used to fade in over 0.6s while the clone faded out over 0.45s, which is two drawings
+     of the same mark dissolving through each other: the double image that read as a flash
+     at the exact moment the animation was meant to resolve. Now only the clone fades, over
+     something already solid behind it. */
+  .claim-card.morph-land { opacity: 1; animation: none; }
+  /* The rest of the DS's arrival, which the flight is only half of: the video column rises
+     in under the panel while it is still travelling, and the title bar's new text fades in
+     late — after the mark has landed, so the screen finishes assembling rather than being
+     fully written the moment the pane swaps. The DS's own durations and delays.
+     `[data-shell-enter]` is set by `playShellEntrance` (app.js); the phone's own version of
+     this arrival is in the phone breakpoint further down, since down there the shell comes
+     out from under an interstitial instead of being watched the whole way. */
+  @media (min-width: 701px) {
+    [data-shell-enter] .video-pane { animation: shell-col-in 1.3s cubic-bezier(.2,.7,.2,1) 0.35s both; }
+    [data-shell-enter] .shell-topbar-meta,
+    [data-shell-enter] .topbar-meta { animation: shell-fade-late 1s ease 1.35s both; }
+  }
+  @keyframes shell-col-in {
+    from { opacity: 0; transform: translateY(16px) scale(0.97); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes shell-fade-late {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-shell-enter] .video-pane,
+    [data-shell-enter] .shell-topbar-meta,
+    [data-shell-enter] .topbar-meta { animation: none; }
+  }
+  [data-motion="reduced"][data-shell-enter] .video-pane,
+  [data-motion="reduced"][data-shell-enter] .shell-topbar-meta,
+  [data-motion="reduced"][data-shell-enter] .topbar-meta { animation: none; }
+
 
   /* ---------- Analyzing interstitial: bridges the shared-element flight ----------
      Ported from the TRASE Design System's "Chat to shell"/"Mobile Landing to Shell"
@@ -1789,6 +1941,23 @@
     transition: opacity 0.45s ease;
   }
   .analyzing-overlay.on { opacity: 1; }
+  /* The DS's own staged entrance for this layer: the ring, then the target, then the step
+     list, each a beat behind the last, so the interstitial assembles instead of appearing.
+     Delays only apply on the way in — leaving, all three go with the layer's own fade. */
+  .analyzing-overlay .analyzing-scan,
+  .analyzing-overlay .analyzing-target,
+  .analyzing-overlay .analyzing-steps {
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 0.4s ease, transform 0.45s cubic-bezier(.2,.8,.3,1);
+  }
+  .analyzing-overlay.on .analyzing-scan { opacity: 1; transform: none; transition-delay: 0.2s; }
+  .analyzing-overlay.on .analyzing-target { opacity: 1; transform: none; transition-delay: 0.3s; }
+  .analyzing-overlay.on .analyzing-steps { opacity: 1; transform: none; transition-delay: 0.4s; }
+  /* The scan ring is the flight's waypoint on a phone: the brand mark lands in its centre
+     and the HUD cluster closes around it, so the ring's own core would be a second mark in
+     the same spot. It yields while the flight is using it (`.analyzing-overlay.handoff`,
+     set by `startMorph`). */
+  .analyzing-overlay.handoff .analyzing-scan-core { opacity: 0; transition: opacity 0.2s ease; }
   .analyzing-scan {
     position: relative; width: 120px; height: 120px; border-radius: 50%;
     border: 1px solid var(--border);
@@ -1918,10 +2087,23 @@
     70%  { opacity: 1; transform: scale(1.25); }
     100% { opacity: 1; transform: scale(1); }
   }
-  .badge.verdict.bad   { background: rgba(193,89,79,0.15);  color: var(--bad);   border: 1px solid rgba(193,89,79,0.35); }
-  .badge.verdict.warn  { background: rgba(214,168,74,0.15); color: var(--warn);  border: 1px solid rgba(214,168,74,0.35); }
-  .badge.verdict.good  { background: rgba(111,169,138,0.15);color: var(--good);  border: 1px solid rgba(111,169,138,0.35); }
-  .badge.verdict.muted { background: rgba(138,147,163,0.15);color: var(--muted); border: 1px solid rgba(138,147,163,0.3); }
+  /* Derived from the tokens rather than hard-coded rgba: the four verdict hues moved when
+     the palette was raised for contrast, and a badge that kept the old literals would have
+     been tinted one colour and lettered another. `color-mix` against `transparent` is the
+     same tint at a stronger mix — a verdict badge is the app's finding, and it was reading
+     as a faint label. The border is what carries the shape at a glance, so it takes the
+     bigger lift of the two. */
+  .badge.verdict.bad   { background: color-mix(in oklab, var(--bad) 22%, transparent);   color: var(--bad);   border: 1px solid color-mix(in oklab, var(--bad) 55%, transparent); }
+  .badge.verdict.warn  { background: color-mix(in oklab, var(--warn) 22%, transparent);  color: var(--warn);  border: 1px solid color-mix(in oklab, var(--warn) 55%, transparent); }
+  .badge.verdict.good  { background: color-mix(in oklab, var(--good) 22%, transparent);  color: var(--good);  border: 1px solid color-mix(in oklab, var(--good) 55%, transparent); }
+  .badge.verdict.muted { background: color-mix(in oklab, var(--muted) 20%, transparent); color: var(--muted); border: 1px solid color-mix(in oklab, var(--muted) 45%, transparent); }
+  /* In high contrast the tint is dropped for a solid, and the label takes the surface
+     colour — the strongest reading of the same badge, and the one thing a verdict should
+     never be quiet about. */
+  [data-contrast="high"] .badge.verdict.bad   { background: var(--bad);   color: var(--bg); border-color: var(--bad); }
+  [data-contrast="high"] .badge.verdict.warn  { background: var(--warn);  color: var(--bg); border-color: var(--warn); }
+  [data-contrast="high"] .badge.verdict.good  { background: var(--good);  color: var(--bg); border-color: var(--good); }
+  [data-contrast="high"] .badge.verdict.muted { background: var(--muted); color: var(--bg); border-color: var(--muted); }
 
   /* How long a finished turn took — `durationHTML` in app.js, fed by the same
      `createElapsedTicker` that runs live above the loading grid. A retrospective number
@@ -2098,27 +2280,6 @@
     border: 1px solid var(--border);
     border-radius: 14px;
     padding: 7px 13px;
-  }
-  /* The bubble for the link a check actually started from — the same shape as `.thread-q`
-     (it sits above the same thread), but a favicon-plus-title preview instead of raw
-     question text. It grows with the title, same as `.thread-q` itself does, up to a cap
-     generous enough that a normal title (even a wrapped two- or three-line one) is never
-     scrolled — only a pathological title, or a URL with no natural break point, hits the
-     cap and scrolls inside the bubble instead of stretching the card around it. */
-  .link-bubble {
-    display: flex; align-items: flex-start; gap: 8px;
-    max-height: 130px; overflow-y: auto;
-  }
-  .link-bubble-icon {
-    width: 16px; height: 16px; flex-shrink: 0;
-    margin-top: 1px;
-    border-radius: 4px;
-    color: var(--ink-dim);
-  }
-  .link-bubble-icon svg { width: 100%; height: 100%; }
-  .link-bubble-icon img { width: 100%; height: 100%; border-radius: 4px; object-fit: cover; }
-  .link-bubble-title {
-    overflow-wrap: anywhere;
   }
   .thread-a.claim-text { font-size: 14.5px; margin: 0; }
   .thread-error { font-size: 12.5px; color: var(--bad); }
@@ -2585,6 +2746,11 @@
      wordmark — it reserves the row's free space so the settings button downstream of it
      stays packed against the trailing edge. */
   .topbar-meta { min-width: 0; margin-right: auto; }
+  /* Both phone-only (see the phone breakpoint, where one of the two is shown depending on
+     whether there is media under the bar). Hidden here rather than only shown there so a
+     tablet or desktop never paints either one for a frame. */
+  .topbar-brand { display: none; }
+  .media-title-block { display: none; }
   .topbar-title {
     font-family: var(--font-display); font-size: 13.5px; font-weight: 600; line-height: 1.25;
     background: linear-gradient(120deg, var(--ink) 30%, var(--accent) 85%);
@@ -2684,7 +2850,10 @@
          are lifted out of the flow so the strip is nothing but media. */
       position: relative;
       flex: 0 0 auto;
-      height: 24vh;
+      /* The DS's own 32vh, not the 24 this used to be: the bar and the check's title now
+         both live on this strip (see `[data-pane="split"] .topbar`), and at 24vh they had
+         the media pinched between them with nothing of the clip left to see. */
+      height: 32vh;
       padding: 0; margin: 0; border: 0; border-radius: 0;
       background: #000;
       overflow: hidden;
@@ -2712,6 +2881,37 @@
       to   { clip-path: inset(0 0 0 0); }
     }
     .video-pane.media-reveal { animation: video-pane-reveal 0.5s cubic-bezier(.2,.8,.3,1); }
+    /* ---------- The shell arriving, from "Mobile Landing to Shell" ----------
+       The DS does not cut to the shell when the analyzing layer lifts: the media wipes down
+       (`.media-reveal` above, which is that same `clip-path` inset), the title bar rises
+       into it, and the sheet slides up from under the fold with its contents a beat behind.
+       `playShellEntrance` (app.js) adds this class the moment the interstitial starts to
+       go, so the first thing under it is already moving rather than already arrived.
+       Stamped on <html> rather than on any one container because the two things that move
+       are on opposite sides of the shell's markup (the title bar above, the sheet below)
+       and a sibling selector between them is the kind of thing a later markup edit breaks
+       silently. The claims pane's own contents are left alone: the running card is already
+       playing its own arrival as the morph lands on it (`.morph-land`), and a second
+       opacity animation over the top of that one would fight it for the same property. */
+    /* The phone's own title-bar arrival (the late fade above is desktop-only): under an
+       interstitial the title bar is revealed rather than watched being written, so it rises
+       with the sheet instead of arriving a beat after a flight the reader never saw. */
+    [data-shell-enter] .topbar-meta { animation: shell-enter-rise 0.45s cubic-bezier(.2,.8,.3,1) 0.3s both; }
+    [data-shell-enter] .claims-pane-wrap { animation: shell-enter-sheet 0.55s cubic-bezier(.2,.8,.3,1) 0.12s both; }
+    @keyframes shell-enter-sheet {
+      from { transform: translateY(26px); }
+      to   { transform: translateY(0); }
+    }
+    @keyframes shell-enter-rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [data-shell-enter] .topbar-meta,
+      [data-shell-enter] .claims-pane-wrap { animation: none; }
+    }
+    [data-motion="reduced"][data-shell-enter] .topbar-meta,
+    [data-motion="reduced"][data-shell-enter] .claims-pane-wrap { animation: none; }
     .video-thumb {
       width: 100%; height: 100%; max-height: none;
       /* The base rule's `aspect-ratio: 9/16` shapes the card at every other width; here the
@@ -2724,10 +2924,95 @@
        *is* the evidence being read. */
     .video-thumb .video-media { object-fit: contain; }
 
+    /* ---------- The bar over the media, from "App shell — Mobile" ----------
+       With a clip on screen the top bar is not a bar: it floats over the media, its two
+       controls frosted so they read against whatever frame is behind them, and it carries
+       the app's mark and tagline rather than the check's title — the title has a better
+       home on the media's own bottom edge (`.media-title-block`). Taking it out of flow is
+       what lets the strip start at the top of the screen, which is the composition the DS
+       draws; `data-pane` (set by `updatePaneMode` in app.js) is how this knows there is a
+       strip to float over, since the bar is a sibling *before* the grid and cannot ask it.
+
+       The settings button is the one addition to the DS's row: this bar is the only place
+       on a phone it can live, so it gets the same frosted treatment as the drawer handle
+       rather than being dropped to stay verbatim. */
+    [data-pane="split"] .topbar {
+      position: absolute; top: 0; left: 0; right: 0; z-index: 4;
+      /* Right padding clears the expand chevron, which keeps the top-right corner the DS
+         gives it (see `.media-expand-btn`) — the brand line ellipsises before it reaches. */
+      padding: 12px 56px 12px 14px;
+      background: transparent;
+      border-bottom: 0;
+    }
+    /* Settings moves to sit beside the drawer handle rather than at the far right, which is
+       the chevron's. The DS's row has no settings button to place — this is the one thing
+       added to it, and putting it here is what keeps the rest of the row's geometry the
+       DS's own instead of fighting the control that was already in that corner. */
+    [data-pane="split"] .topbar .drawer-toggle { order: 0; }
+    [data-pane="split"] .topbar .settings-btn { order: 1; }
+    [data-pane="split"] .topbar-brand { order: 2; margin-right: auto; }
+    [data-pane="split"] .topbar::before { content: none; }
+    [data-pane="split"] .topbar .drawer-toggle,
+    [data-pane="split"] .topbar .settings-btn {
+      background: rgba(10,12,16,0.4);
+      backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: #fff;
+    }
+    [data-pane="split"] .topbar-meta { display: none; }
+    [data-pane="split"] .topbar-brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .topbar-brand-mark { width: 20px; height: 20px; flex-shrink: 0; }
+    .topbar-brand-mark svg { width: 100%; height: 100%; display: block; }
+    .topbar-brand-col { min-width: 0; }
+    .topbar-brand-name { font-family: var(--font-display); font-size: 14px; font-weight: 600; color: #fff; line-height: 1.2; }
+    .topbar-brand-tagline {
+      font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 0.03em;
+      color: rgba(255,255,255,0.65);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* What makes white text over an unknown frame readable, and the reason the title block
+       can be plain text rather than a plate: a dark wash at both ends of the strip, heavier
+       at the bottom where the title is. The DS puts this on its own `.video-thumb`. Under
+       the controls and the title (z-index 1) but over the media itself. */
+    [data-pane="split"] .video-thumb::after {
+      content: "";
+      position: absolute; inset: 0; z-index: 1;
+      pointer-events: none;
+      background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.15) 50%, rgba(0,0,0,0.35) 100%);
+    }
+    [data-pane="split"] .media-title-block {
+      display: block;
+      position: absolute; left: 0; right: 0; bottom: 18px; z-index: 2;
+      padding: 16px 16px 14px;
+      pointer-events: none;
+    }
+    .media-title {
+      font-family: var(--font-display); font-size: 19px; line-height: 1.25; font-weight: 700;
+      color: #fff; margin: 0 0 6px;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.4);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      /* Until a post resolves, this line *is* the pasted URL — one unbreakable token, which
+         a line clamp will happily run off the side of the screen rather than wrap. Same
+         reasoning as `.claim-title`'s own `word-break`. */
+      overflow-wrap: anywhere;
+    }
+    .media-sub {
+      font-size: 11px; color: rgba(255,255,255,0.75);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Expanded, the clip is the screen: the DS drops both the bar's brand row and the title
+       block so nothing is laid over a video the reader has just asked to see more of. The
+       two frosted controls stay — they are the way back. */
+    [data-media="expanded"] .topbar-brand,
+    [data-media="expanded"] .media-title-block { display: none; }
+    /* The link chip sat above the control bar to clear it; with a title block on the same
+       edge it would collide with the subtitle instead, so it moves up over it. */
+    [data-pane="split"] .video-link { bottom: auto; top: 58px; }
+
     /* Trades sheet height for video height. Sits over the media rather than in the flow —
-       the strip is 24vh and has no room for a control row of its own. */
+       the strip has no room for a control row of its own. */
     .media-expand-btn {
-      position: absolute; top: 10px; right: 10px; z-index: 2;
+      position: absolute; top: 12px; right: 12px; z-index: 5;
       width: 32px; height: 32px;
       display: flex; align-items: center; justify-content: center;
       border-radius: 50%;
@@ -2852,7 +3137,7 @@
        "there's more, scroll for it". Here the clamp below already says it, and the fade over
        a two-line clamp reads as a rendering fault. */
     .claims-pane.claim-grid .claim-pane::after { content: none; }
-    .claim-pane .claim-eyebrow { font-size: 9.5px; padding: 1px 7px; margin-bottom: 6px; }
+    .claim-pane > .badges { margin-bottom: 8px; }
     /* Two lines each, clamped by height rather than by `-webkit-line-clamp`. The title
        could use the line clamp — it is one text node — but the analysis cannot: it is a
        wrapper around whatever blocks `renderMarkdown` produced (paragraphs, lists), and a
@@ -2902,7 +3187,6 @@
        the one line that identifies it and its verdict — the design system's "minimal" claim
        card. A box the reader has explicitly tapped open keeps its text. */
     [data-media="expanded"] .claim-pane:not(.expanded) .claim-text,
-    [data-media="expanded"] .claim-pane:not(.expanded) .claim-eyebrow,
     [data-media="expanded"] .claim-pane:not(.expanded) .skeleton-body { display: none; }
     [data-media="expanded"] .claim-pane:not(.expanded) .claim-title { max-height: 1.4em; margin-bottom: 6px; }
 
@@ -3018,7 +3302,42 @@
      (already dark-on-light, already high-contrast) token values, since both are single
      attribute selectors of equal specificity and this block comes later in the file. */
   [data-contrast="high"]:not([data-theme="light"]) {
-    --ink-dim: #D7DBE3; --muted: #B6BCC9; --border: #454C59; --surface-raised: #2A303B;
+    --ink: #FFFFFF;
+    --ink-dim: #E4E8EF;
+    --muted: #C6CCD8;
+    /* An outline you can actually see without looking for it — the default `--border` is a
+       hint, and this mode's whole job is to stop hinting. */
+    --border: #6C7488;
+    --surface: #1E232B;
+    --surface-raised: #2E3540;
+    /* The four semantic hues too, which the old block left at their default values: a
+       verdict badge, a status dot and a summary dot are the app's own findings, so a mode
+       asked for because colour was hard to see has to raise *those* before anything else. */
+    --accent: #7BEFE3;
+    --accent-2: #C4B8FF;
+    --good: #74DCA6;
+    --warn: #FFCB5E;
+    --bad: #FF9186;
+  }
+  /* Light + high contrast is a reachable combination (theme and contrast are independent —
+     see `applySettings`), and until now it was the one that did nothing at all: every rule
+     in this section excluded light theme, on the reasoning that light was "already
+     high-contrast". It isn't — it is a warm off-white palette with mid-tone accents, and a
+     reader who turns this on in light theme is asking for the same thing a dark-theme
+     reader is. Same treatment, the other way up: ink to black, edges to a real line,
+     semantic hues darkened rather than lightened. */
+  [data-contrast="high"][data-theme="light"] {
+    --ink: #000000;
+    --ink-dim: #2C2A24;
+    --muted: #4A4639;
+    --border: #9A9384;
+    --surface: #FFFFFF;
+    --surface-raised: #E7E2D6;
+    --accent: #0A5F57;
+    --accent-2: #442F96;
+    --good: #1E5735;
+    --warn: #6B4110;
+    --bad: #7C2115;
   }
   /* The phone layout's text sits over an arbitrary video rather than a fixed dark
      surface — a blur and a gradient are a thin guarantee of contrast there compared to
@@ -3250,6 +3569,20 @@
              more than they need to be told which app they are in. `updateShellTopbar` in
              app.js fills both this and the desktop `.shell-topbar` from the same entry,
              and falls back to "New check" here when nothing is selected. -->
+        <!-- Two things can be in this row, and which one depends on whether there is a
+             clip on screen under it. With one (the DS's "App shell — Mobile"), the bar
+             floats over the media and carries the app's own mark and tagline, while the
+             check's title sits on the media's bottom edge in `.media-title-block` below —
+             the title belongs to the picture it names. With no clip (a page check, a plain
+             conversation, the idle shell) there is nothing to float over and nothing to put
+             a title on, so the bar goes back to being a bar and names the check itself. -->
+        <div class="topbar-brand" aria-hidden="true">
+          <span class="topbar-brand-mark"><svg viewBox="0 0 64 64" fill="none" aria-hidden="true"><circle cx="32" cy="32" r="21" stroke="var(--accent)" stroke-width="2.5" stroke-dasharray="27 6 27 6" stroke-linecap="round"/><line x1="14" y1="32" x2="50" y2="32" stroke="var(--accent)" stroke-width="1.5" opacity="0.55"/><circle cx="32" cy="32" r="6" fill="var(--accent)"/><rect x="41" y="28" width="5" height="8" rx="1.5" fill="var(--accent-2)"/></svg></span>
+          <div class="topbar-brand-col">
+            <div class="topbar-brand-name">Trase</div>
+            <div class="topbar-brand-tagline">See the facts. Think deeper.</div>
+          </div>
+        </div>
         <div class="topbar-meta">
           <div class="topbar-title" id="topbarTitle">New check</div>
           <div class="topbar-sub" id="topbarSub">Paste a link to get started</div>
@@ -3296,6 +3629,16 @@
                     aria-label="Expand video" aria-expanded="false" title="Expand video">
               <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
+
+            <!-- Phone only, and only with a clip to sit on: the DS's mobile shell titles the
+                 check over the bottom of its own media rather than in a bar above it, white
+                 on the gradient `.video-thumb::after` lays down for exactly this. Filled by
+                 `updateShellTopbar` (app.js) from the same entry as every other title line,
+                 and hidden with the top bar's brand row while the video is expanded. -->
+            <div class="media-title-block" aria-hidden="true">
+              <div class="media-title" id="mediaTitle"></div>
+              <div class="media-sub" id="mediaSub"></div>
+            </div>
 
             <!-- Ported from the TRASE Design System's VideoPlayer: a tap-anywhere overlay
                  (center play icon, hidden while playing — see the `play`/`pause` listeners
@@ -3415,11 +3758,20 @@
              EntryBar, where the submit button carries the same dashed-ring-and-dot logo as
              the sidebar's wordmark (Sidebar.jsx) rather than a generic checkmark glyph
              every other "confirm" button in the app could equally use. -->
+        <!-- One button, two jobs. While a turn is running it is the way to end it (
+             `data-mode="stop"`, set by `setComposerRunning` in app.js) — the same place the
+             reader just pressed to start it, which is where they look to take it back. The
+             two glyphs are both here rather than swapped in as markup so the switch is a
+             CSS toggle on an element that never leaves the DOM: no reflow of the composer
+             row, and no losing focus mid-turn for anyone driving this from the keyboard. -->
         <button type="button" id="checkBtn">
           <svg class="check-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <circle cx="12" cy="12" r="7.5" stroke="currentColor" stroke-width="1.8" stroke-dasharray="9 2 9 2" stroke-linecap="round"/>
             <circle cx="12" cy="12" r="2" fill="currentColor"/>
             <rect x="15.3" y="10.6" width="1.8" height="2.8" rx="0.5" fill="var(--accent-2)"/>
+          </svg>
+          <svg class="stop-btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="7.5" y="7.5" width="9" height="9" rx="1.5" fill="currentColor"/>
           </svg>
           <span class="check-btn-label">Check</span>
         </button>

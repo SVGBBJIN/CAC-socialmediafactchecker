@@ -246,6 +246,30 @@ const startedFresh = resumedFresh();
 // the "New chat" hero for one that has one.
 let selectedId = startedFresh ? null : (library[0]?.id ?? null);
 let inFlight = null;
+
+let stopRequested = false;
+
+/**
+ * Which of the three kinds of turn is running: "check", "chat" or "followup", or null.
+ *
+ * Only `startNewCheck` asks, and only for one reason — see its own comment. A check writes
+ * into a library entry and guards every draw on still being the selected one, so clearing
+ * the pane leaves it running happily. A chat or a follow-up writes into the pane's own
+ * conversation state, which is exactly what "new chat" throws away, so those are stopped
+ * rather than left writing into a thread that no longer exists.
+ */
+let inFlightKind = null;
+
+/**
+ * What a turn the reader stopped says afterwards.
+ *
+ * Deliberately in the same place a failure's message goes rather than a status of its own:
+ * the two want the identical treatment from every part of the app that reads one — the
+ * sidebar row, the pane, the "Try again" button — and they differ only in the sentence.
+ * Naming it as something the reader did, not something that went wrong, is the whole
+ * difference between the two.
+ */
+const STOPPED_MESSAGE = "Stopped.";
 // Resolved video-pane media, keyed by entry id: { kind: "direct"|"youtube", mediaURL,
 // videoID }. In-memory only — a TikTok or Instagram CDN URL is signed and short-lived (see
 // lib/tiktok.js and lib/instagram.js), so caching it in localStorage would just persist a
@@ -411,6 +435,13 @@ function applyDevice(next) {
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
   if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
   syncDrawerInert();
+  // Which of the two idle screens is the right one depends on the device kind (a phone only
+  // ever gets the landing — see `renderChatPane`), so crossing that boundary while an idle
+  // screen is up has to redraw it. Guarded on the kind actually changing and on the pane
+  // actually showing one of them: every other render path calls `renderChatPane` itself
+  // when it needs to, and re-entering it from here mid-check would tear down a running
+  // card.
+  if (next.kind !== previousKind && el.claimsPane.querySelector(".landing, .newchat-hero")) renderChatPane();
   // The landing page embeds the composer at every width, so a resize no longer moves it —
   // but this still has to run, because a re-render that happened while the device kind was
   // changing could have left it at the dock with the slot on screen, and the call is a
@@ -1848,11 +1879,46 @@ function analyzingOverlayEl() {
 function showAnalyzingOverlay(target) {
   const overlay = analyzingOverlayEl();
   document.getElementById("analyzingTarget").textContent = target ?? "";
-  overlay.querySelectorAll(".analyzing-step").forEach((stepEl, i) => {
-    stepEl.classList.toggle("active", i === 0);
-    stepEl.classList.remove("done");
-  });
+  setAnalyzingStep(0);
   overlay.classList.add("on");
+}
+
+/** Marks step `i` as the one under way and everything before it as done — the DS's own
+ * three-dot progression, driven here by what the turn has actually reported rather than by
+ * a timeline. Out of range (`i` past the last step) simply finishes them all, which is what
+ * the hand-off to the running card's dial looks like. */
+function setAnalyzingStep(i) {
+  const overlay = document.getElementById("analyzingOverlay");
+  if (!overlay) return;
+  overlay.querySelectorAll(".analyzing-step").forEach((stepEl, n) => {
+    stepEl.classList.toggle("active", n === i);
+    stepEl.classList.toggle("done", n < i);
+  });
+}
+
+/**
+ * How long the interstitial holds before the shell is revealed underneath it.
+ *
+ * The DS's demo holds a scripted 2.45s. This holds until the turn has something true to
+ * show for it — the first stage frame off the stream, which is the moment "fetching the
+ * source" stops being a guess — and no longer than `ANALYZING_MAX_HOLD_MS` whatever
+ * happens, so a slow or dead connection can never park a reader behind a frosted sheet.
+ * `resolveAnalyzingHold` is called from `runCheck`'s `onStage` and again in its `finally`,
+ * and both are safe to call when nothing is waiting.
+ */
+const ANALYZING_MAX_HOLD_MS = 1200;
+let resolveAnalyzingHold = () => {};
+
+function analyzingHold() {
+  return new Promise((resolve) => {
+    const done = () => {
+      resolveAnalyzingHold = () => {};
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, ANALYZING_MAX_HOLD_MS);
+    resolveAnalyzingHold = done;
+  });
 }
 
 /** Safe to call whether or not the overlay was ever shown — `showAnalyzingOverlay` is
@@ -1872,36 +1938,14 @@ function hideAnalyzingOverlay() {
  * rather than the grid growing a row to fit it or the pane growing a scrollbar of its own.
  */
 
-/** Column count for a given claim count — one column for a single claim (nothing to
- * arrange), two above that. Capped at two even well past four: widening to three or more
- * columns crammed every row into whatever height was left in the pane (see the old
- * `grid-auto-rows: 1fr` comment this replaces), so five-plus claims read as a shrinking
- * grid of unreadably short boxes instead of a normal 2×2 that just keeps growing downward.
- * `.claims-pane.claim-grid`'s own `grid-auto-rows: minmax(...)` is what makes that growth
- * scroll instead of squeeze — see its CSS comment — so capping the column count here is
- * the other half of "about four visible, the rest a scroll away". */
-function claimGridColumns(count) {
-  return count <= 1 ? 1 : 2;
-}
-
-/** Whether the last item should span the full row width — only the specific case of a
- * 2-column grid with an odd count, where the last claim would otherwise sit alone against
- * a bare gap beside it. Left alone (a normal trailing gap) for the 3-column case, since
- * spanning a partial remainder there gets visually uneven fast and six-plus claims is
- * already the overflow case, not the one this layout is tuned for. */
-function claimGridSpanLast(count, cols) {
-  return cols === 2 && count > 1 && count % 2 === 1;
-}
-
 /** Stamps (or clears) the grid layout on the claims pane itself. `null` is every other view
  * the pane renders — the empty state, an error card, the free-standing chat thread, a
  * whole-answer check with no `[[claim: …]]` markers — none of which are a set of same-shape
  * boxes to arrange. `"grid-loading"` adds a full-width first row for the status strip
  * (`claimGridStatusHTML`) that `"grid"` (the finished result) has no use for. */
-function setClaimsGridMode(mode, cols) {
+function setClaimsGridMode(mode) {
   el.claimsPane.classList.toggle("claim-grid", mode === "grid" || mode === "grid-loading");
   el.claimsPane.classList.toggle("claim-grid-loading", mode === "grid-loading");
-  if (cols) el.claimsPane.style.setProperty("--claim-cols", cols);
 }
 
 /** Shows or hides the down-arrow chip over the claims pane, from the pane's own scroll
@@ -2083,32 +2127,6 @@ function fillLibThumb(thumb, entry) {
   icon.src = `${origin}/favicon.ico`;
 }
 
-/**
- * The bubble shown above a check's analysis for the link it actually started from — the
- * same "glyph first, favicon once it decodes" shape as `fillLibThumb`'s sidebar thumbnail,
- * because it's the same problem: no third-party favicon service, just the site's own
- * `/favicon.ico` fetched straight from the checked host, with the glyph as the honest
- * fallback for the many sites that don't answer it.
- *
- * The title is `entry.title` if a resolve has already improved on it (see `applyPostTitle`),
- * otherwise the pasted URL itself — there is nothing better to show yet.
- */
-function linkBubbleHTML(entry) {
-  return `
-    <div class="thread-q link-bubble">
-      <span class="link-bubble-icon" aria-hidden="true"></span>
-      <a class="link-bubble-title" href="${escapeHTML(entry.url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(entry.title || entry.url)}</a>
-    </div>`;
-}
-
-/** Fills in the link bubble's icon exactly the way `fillLibThumb` fills in a sidebar row's
- * — call once the bubble markup above is actually in the document. */
-function fillLinkBubbleIcon(entry, container) {
-  const icon = container.querySelector(".link-bubble-icon");
-  if (!icon) return;
-  fillLibThumb(icon, entry);
-}
-
 function dotClassFor(entry) {
   if (entry.status === "running") return "warn";
   if (entry.status === "error") return "muted";
@@ -2144,7 +2162,11 @@ function boltIcon() {
 
 function statusLabel(entry) {
   if (entry.status === "running") return "Checking…";
-  if (entry.status === "error") return "Failed";
+  // A stopped turn is carried as an error (see `runCheck`'s abort branch — the two want
+  // identical treatment everywhere except the sentence), so this is the one place that has
+  // to tell them apart: "Failed" for a turn that broke, the reader's own word for a turn
+  // they ended.
+  if (entry.status === "error") return entry.error === STOPPED_MESSAGE ? "Stopped" : "Failed";
   if (!entry.url) return entry.turns.length === 1 ? "1 message" : `${entry.turns.length} messages`;
   // Same reasoning as `verdictHTML`: an incomplete turn that never reached a verdict must
   // not be filed in the library under one. "Unclassified" would be a truthful label and a
@@ -2167,7 +2189,13 @@ function statusLabel(entry) {
  */
 function updatePaneMode() {
   const entry = selectedId ? findEntry(selectedId) : null;
-  el.contentGrid.classList.toggle("single-pane", !entry || !entry.url);
+  const single = !entry || !entry.url;
+  el.contentGrid.classList.toggle("single-pane", single);
+  // The same fact on <html>, because the phone's top bar needs it and cannot ask for it:
+  // that bar is a sibling *before* the grid, so no selector reaches from the grid's own
+  // class to it, and with a clip on screen the bar floats over the media instead of sitting
+  // above it (see `[data-pane="split"]` in index.html).
+  document.documentElement.dataset.pane = single ? "single" : "split";
   updateShellTopbar(entry);
 }
 
@@ -2207,6 +2235,10 @@ function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
     el.topbarTitle.removeAttribute("title");
     setStatusText("topbarTitle", "New check");
     setStatusText("topbarSub", "Paste a link to get started");
+    // Nothing selected means nothing on the media edge either — and no media to put it on,
+    // since `updatePaneMode` has just made this the single-pane view.
+    setStatusText("mediaTitle", "");
+    setStatusText("mediaSub", "");
     return;
   }
   el.shellTopbar.hidden = false;
@@ -2221,6 +2253,11 @@ function updateShellTopbar(entry = selectedId ? findEntry(selectedId) : null) {
   setStatusText("topbarTitle", entry.title);
   el.topbarTitle.title = entry.title;
   setStatusText("topbarSub", subtitle);
+  // The phone's third copy of the same two lines: over the media's bottom edge, which is
+  // where the DS's mobile shell names the check. Only one of it and `.topbar-meta` is ever
+  // on screen (see `[data-pane="split"]`), so this is not two titles at once.
+  setStatusText("mediaTitle", entry.title);
+  setStatusText("mediaSub", subtitle);
 }
 
 /**
@@ -2469,7 +2506,15 @@ function renderChatPane({ newest = -1 } = {}) {
     // Chat" is what the shell looks like sitting idle once there is a library to go back to
     // (pressing "New chat" is the usual way back here). No video column either way, see
     // `updatePaneMode`.
-    const landing = library.length === 0;
+    //
+    // A phone only ever gets the landing. The DS's mobile flow is two screens, not three —
+    // "App shell — Mobile Landing" straight into "App shell — Mobile" (the two ends of
+    // "Mobile Landing to Shell") — and the "New chat" hero is the composition that doesn't
+    // survive the narrowing: with the sidebar behind a drawer and the topbar reduced to two
+    // icons, there is no shell left around it for a bordered hero *box* to sit inside, so
+    // it reads as a worse-cropped landing page rather than as a different screen. Landing
+    // → chat window is the whole of the phone's idle path.
+    const landing = library.length === 0 || device.kind === "phone";
     setClaimsPaneHTML(landing ? landingMarkup() : newChatMarkup());
     // `setClaimsPaneHTML` clears the landing view on every pane replacement, so this puts it
     // back — synchronously, with no await between, so the shell chrome it hides is never
@@ -2510,8 +2555,9 @@ async function runChat(question) {
 
   const controller = new AbortController();
   inFlight = controller;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  inFlightKind = "chat";
+  stopRequested = false;
+  setComposerRunning(true);
   let settled = false;
 
   try {
@@ -2567,7 +2613,9 @@ async function runChat(question) {
     renderLibrary(el.searchInput.value);
   } catch (error) {
     if (error.name === "AbortError") {
-      pendingChat = null;
+      // Kept, not dropped: the reader stopped the answer, not the question, and throwing
+      // their typing away is a worse outcome than the one they asked for.
+      pendingChat = { question, error: STOPPED_MESSAGE };
       return;
     }
     // Left as the pending item, with its error — not pushed into `chatThread`, since a
@@ -2578,8 +2626,8 @@ async function runChat(question) {
     chatElapsed.stop();
     if (settled) pendingChat = null;
     inFlight = null;
-    el.checkBtn.disabled = false;
-    el.newCheckBtn.disabled = false;
+    inFlightKind = null;
+    setComposerRunning(false);
     // True both before any turn has ever been saved (selectedId still null) and once one
     // has (selectedId now names the chat entry `runChat` just filed — see above), since
     // neither carries a `url`; false only if the reader switched to a real check mid-flight,
@@ -2596,8 +2644,26 @@ async function runChat(question) {
  * screen only works by remembering the no-space rule; this makes it a single click that
  * needs no rule at all.
  */
+/**
+ * Clears the pane back to the idle screen. No longer refuses while a check is running: a
+ * turn in flight writes only into the pane it started in, and every one of its callbacks
+ * already asks `selectedId === id` (or addresses a node by id that this render has just
+ * taken off the screen) before drawing anything — so the check carries on in the
+ * background, keeps its row in the sidebar saying "Checking…", and lands there when it is
+ * done. Which is what the button appeared to promise all along; refusing the click was the
+ * app protecting an invariant it had already stopped depending on.
+ *
+ * The composer stays a stop button throughout, because the running turn is still the turn
+ * this app is running — one at a time is still the rule, and it is now visible in the one
+ * control that would otherwise start a second.
+ */
 function startNewCheck() {
-  if (inFlight) return; // Same guard as switching library items mid-run.
+  // The one turn that cannot simply be left running: a chat or a follow-up writes into
+  // `chatThread`/`pendingFollowup`, which is the pane state this function is about to
+  // clear, so it would finish by drawing the conversation the reader just left on top of
+  // the blank screen they asked for. A check has a library entry of its own and draws
+  // nothing while it isn't selected, so it is left alone — see this function's own note.
+  if (inFlight && inFlightKind !== "check") stopRun();
   // "New chat" lives inside the drawer on a phone, and it hands focus to the composer
   // behind it — so the drawer has to be out of the way before that focus call lands.
   closeDrawer({ restoreFocus: false });
@@ -2869,13 +2935,6 @@ function applyPostTitle(entry, title, token) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   if (token === videoPaneToken) renderVideoTitle(entry);
-  // The claims pane's link bubble names the post the same way the pane heading does — see
-  // `linkBubbleHTML` — but a full `renderResultCard` here would restart that render's reveal
-  // animation, so just the bubble's own text is swapped in place.
-  if (selectedId === entry.id) {
-    const bubbleLink = el.claimsPane.querySelector(".link-bubble-title");
-    if (bubbleLink) bubbleLink.textContent = title;
-  }
 }
 
 /**
@@ -3262,8 +3321,11 @@ function renderRunningCard() {
   setClaimsGridMode(null);
   // `run-enter`: the "Chat to shell" arrival beat (index.html's own comment on `.run-enter`
   // explains why it's safe to always apply — this function only ever runs once per check).
+  // `run-enter` only when nothing is flying in: a card that is about to be the destination
+  // of the morph gets its arrival from the flight landing on it, and playing a scale-and-
+  // fade entrance underneath a clone of itself is one of the extra flashes this beat had.
   setClaimsPaneHTML(`
-    <div class="claim-card run-enter">
+    <div class="claim-card run-card${morph ? "" : " run-enter"}">
       <div class="card-loading">
         ${irisMarkup()}
         <div class="status-text stage-text" id="runStatus" role="status">Sending to the model…</div>
@@ -3337,7 +3399,7 @@ el.claimsPane.addEventListener("mouseout", (e) => {
  *
  * The DS component drives this from React state with a hand-picked pixel layout per stage
  * (1/2/4 claims, its demo's fixed ceiling); nothing here knows in advance how many claims a
- * real check will find or what `claimGridColumns` will lay them out as. So instead of
+ * real check will find. So instead of
  * pre-computing target rects, this reads whatever the grid's own CSS actually put on screen
  * before and after a rebuild and animates the difference — the standard "FLIP" technique
  * (First, Last, Invert, Play): measure every `.claim-card`'s rect, let `render` replace the
@@ -3477,35 +3539,26 @@ const SKELETON_BODY_HTML = `
  * box's text was already on screen and already read, and replaying its entrance every time a
  * sibling appears is the re-animation `revealAttrs` exists to avoid. Only the box that has
  * genuinely just settled fades in. */
+/** Just the analysis. The verdict badge is no longer part of the body — it lives on the
+ * title row now (see `claimPanesHTML`), which is a different place in the DOM, so
+ * `settleClaimPane` puts it there rather than this returning the two together. */
 function settledBodyHTML(claim, sources, seekable, animate = true) {
-  return `
-      <div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
-      ${badgeHTML(claim.verdictKey, animate)}`;
-}
-
-/** The position label on a claim box. Shared by the loading grid and the finished card so
- * a box that settles mid-stream doesn't relabel itself when the final render lands. */
-function claimEyebrowText(index, total) {
-  return total > 1 ? `Claim ${index + 1} of ${total}` : "Claim checked";
+  return `<div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>`;
 }
 
 /** One box in the loading grid: title always real (lifted straight off the `[[claim: …]]`
  * marker that streamed in), body either settled or shimmering. */
-function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
+function loadingClaimHTML(claim, index, sources, seekable) {
   const done = Boolean(claim.verdictKey);
   // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
   // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
   // status strip is another <div> ahead of these, so nth-of-type would be off by one.
   // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
   // box has visibly finished sliding into place, instead of outrunning it.
-  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s${spanFull ? "; grid-column: 1/-1" : ""}`;
+  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s`;
   return `
     <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
-      <div class="claim-eyebrow${done ? "" : " pending"}">${
-        done
-          ? escapeHTML(claimEyebrowText(index, total))
-          : `Claim ${index + 1} of ${total} &middot; checking&hellip;`
-      }</div>
+      ${done ? badgeHTML(claim.verdictKey, false) : ""}
       <p class="claim-title in">${escapeHTML(claim.title)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
     </div>`;
@@ -3518,7 +3571,7 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
  * marker in the text streaming in — the model writes one per claim well before the full
  * answer (and its citations) are finished. There's no separate "how many claims" signal to
  * wait for; the marker *is* the count, arriving incrementally, so the grid is built the same
- * way the finished result reads it (see `claimGridColumns`/`claimPanesHTML`), just with each
+ * way the finished result reads it (see `claimPanesHTML`), just with each
  * box showing its title over a shimmer where the analysis and verdict will land.
  *
  * Boxes that have *already* settled by the time a later marker forces this redraw keep their
@@ -3526,10 +3579,10 @@ function loadingClaimHTML(claim, index, total, spanFull, sources, seekable) {
  * version that runs when no redraw is needed.
  */
 function renderClaimSkeletons(claims, stage, sources, seekable) {
-  const count = claims.length;
-  const cols = claimGridColumns(count);
-  const spanLast = claimGridSpanLast(count, cols);
-  setClaimsGridMode("grid-loading", cols);
+  // Whether the reader is currently reading the bottom of the stack, measured *before* the
+  // rebuild — see `stickToNewestClaim`.
+  const atBottom = claimsPaneAtBottom();
+  setClaimsGridMode("grid-loading");
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
   // only the settled one, matching the DS's "Chat to shell" screen.
@@ -3538,14 +3591,41 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
       claimGridStatusHTML(stage) +
       claims
         .map((claim, i) =>
-          loadingClaimHTML(claim, i, count, i === count - 1 && spanLast, sources, seekable),
+          loadingClaimHTML(claim, i, sources, seekable),
         )
         .join(""),
   );
   revealIn(el.claimsPane);
+  stickToNewestClaim(atBottom);
   refreshTimeline();
   runProgress.resync();
   runElapsed.resync();
+}
+
+/** Whether the claims pane is scrolled to (or very near) its own bottom. The slack is for
+ * sub-pixel rounding and for the few pixels a reader loses to a trackpad's inertia, not a
+ * guess at intent. */
+function claimsPaneAtBottom() {
+  const pane = el.claimsPane;
+  return pane.scrollHeight - pane.clientHeight - pane.scrollTop < 80;
+}
+
+/**
+ * Keeps the newest claim in view as the stack grows, which is what the DS's ClaimStack does
+ * when a check finds another claim — but only for a reader who was already at the bottom.
+ *
+ * The DS component scrolls to the end unconditionally; it is a demo with nothing to
+ * interrupt. Here a claim can land while the reader is halfway up the stack reading an
+ * earlier one, and yanking them to the bottom mid-sentence is the one thing an
+ * auto-scrolling list must not do. So this is the standard stick-to-bottom rule: follow the
+ * stream while they are following it, and leave them alone the moment they scroll away.
+ */
+function stickToNewestClaim(wasAtBottom) {
+  if (!wasAtBottom) return;
+  el.claimsPane.scrollTo({
+    top: el.claimsPane.scrollHeight,
+    behavior: prefersReducedMotion() ? "auto" : "smooth",
+  });
 }
 
 /**
@@ -3565,7 +3645,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
  * one. A no-op if the box isn't there — the reader navigated away, or the finished card has
  * already replaced the loading view.
  */
-function settleClaimPane(index, claim, total, sources, seekable) {
+function settleClaimPane(index, claim, sources, seekable) {
   const pane = el.claimsPane.querySelector(`.claim-pane[data-claim="${index}"]`);
   if (!pane) return;
   const body = pane.querySelector(".claim-body");
@@ -3573,13 +3653,14 @@ function settleClaimPane(index, claim, total, sources, seekable) {
 
   body.insertAdjacentHTML("afterend", settledBodyHTML(claim, sources, seekable));
   body.remove();
+  // The badge opens the box (see `claimPanesHTML`), so a settling one grows its verdict
+  // above its title rather than at its foot — where every box that settled before it is
+  // already wearing one.
+  if (!pane.querySelector(".badges")) {
+    pane.insertAdjacentHTML("afterbegin", badgeHTML(claim.verdictKey, true));
+  }
   pane.classList.remove("skeleton");
   if (!prefersReducedMotion()) pane.classList.add("just-settled");
-  const eyebrow = pane.querySelector(".claim-eyebrow");
-  if (eyebrow) {
-    eyebrow.classList.remove("pending");
-    eyebrow.textContent = claimEyebrowText(index, total);
-  }
   revealIn(pane);
   // The `[t=…]` chips this box just gained are seek controls like any other — read them
   // back now rather than at the end, so a settled claim's timestamps play the clip
@@ -4034,12 +4115,9 @@ function threadHTML(entry, newestIndex) {
  */
 function claimPanesHTML(entry, animate, newestFollowup) {
   const { claims } = entry;
-  const cols = claimGridColumns(claims.length);
-  const spanLast = claimGridSpanLast(claims.length, cols);
   return claims
     .map((claim, index) => {
       const isLast = index === claims.length - 1;
-      const eyebrow = claimEyebrowText(index, claims.length);
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
            ${durationHTML(entry.durationMs, animate)}
@@ -4047,21 +4125,21 @@ function claimPanesHTML(entry, animate, newestFollowup) {
            ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
-      // The last box spans the full row when it would otherwise sit alone against a bare
-      // gap beside it — see `claimGridSpanLast`. It's also, not coincidentally, the one
-      // carrying the footer above, so the extra width goes to the box that needs it most.
-      const spanFull = isLast && spanLast;
+
       // `role="button"`/`tabindex`/`aria-expanded`: on the phone layout this box is a
       // summary that opens on tap (see `handleClaimsPaneClick`). The attributes are
       // harmless above 700px, where the box is already showing everything it has and the
       // toggle changes nothing visible — the alternative was rendering different markup per
       // breakpoint and re-rendering the pane on every resize.
       return `
-        <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false"${spanFull ? ' style="grid-column:1/-1"' : ""}>
-          <div class="claim-eyebrow">${escapeHTML(eyebrow)}</div>
+        <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false">
+          <!-- Verdict first, then the claim it belongs to. The finding is what a reader
+               came for, so it opens the box rather than closing it; the "Claim 1 of 4"
+               label that used to sit here is gone, since the boxes are laid out side by
+               side and counting them off was numbering what the reader can already see. -->
+          ${badgeHTML(claim.verdictKey, animate)}
           <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
-          ${badgeHTML(claim.verdictKey, animate)}
           ${footer}
         </div>`;
     })
@@ -4094,19 +4172,23 @@ function summaryCardHTML(claims) {
     .map(([key, verdict]) => {
       const count = counts[key] ?? 0;
       return `
-        <div class="summary-stat" data-verdict="${key}" data-count="${count}">
-          <span class="summary-count ${verdict.css}"><span class="summary-num" data-count="${count}">${count}</span></span>
-          <span class="summary-label">${escapeHTML(verdict.label)}</span>
-        </div>`;
+        <span class="summary-pill-stat" data-verdict="${key}" data-count="${count}">
+          <span class="summary-pill-dot ${verdict.css}"></span>
+          <span class="summary-num" data-count="${count}">${count}</span> ${escapeHTML(verdict.label)}
+        </span>`;
     })
     .join("");
+  // The DS's `pill` variant of SummaryCard, not its card: a strip over a grid of claim
+  // boxes wants to be a line of counts, and the titled card it replaces was reading as a
+  // fifth claim. Same four verdicts, same live-updating numbers (`updateSummaryCard`),
+  // no chrome.
   return `
-    <div class="summary-card">
-      <h2 class="summary-title">Fact check summary</h2>
-      <div class="summary-sub">${claims.length} claim${claims.length === 1 ? "" : "s"} analysed</div>
-      <div class="summary-stats">${stats}</div>
+    <div class="summary-pill">
+      <span class="summary-pill-total">${claims.length} claim${claims.length === 1 ? "" : "s"}</span>
+      ${stats}
     </div>`;
 }
+
 
 /**
  * Keeps the loading grid's summary card in step as claims settle one at a time — the same
@@ -4122,18 +4204,18 @@ function summaryCardHTML(claims) {
  * a decrease, because there isn't one: a settled claim's verdict is never un-counted.
  */
 function updateSummaryCard(claims) {
-  const card = el.claimsPane.querySelector(".summary-card");
-  if (!card) return;
+  const pill = el.claimsPane.querySelector(".summary-pill");
+  if (!pill) return;
   const counts = {};
   for (const claim of claims) {
     if (claim.verdictKey && VERDICTS[claim.verdictKey]) {
       counts[claim.verdictKey] = (counts[claim.verdictKey] ?? 0) + 1;
     }
   }
-  const sub = card.querySelector(".summary-sub");
-  if (sub) sub.textContent = `${claims.length} claim${claims.length === 1 ? "" : "s"} analysed`;
+  const total = pill.querySelector(".summary-pill-total");
+  if (total) total.textContent = `${claims.length} claim${claims.length === 1 ? "" : "s"}`;
   for (const key of Object.keys(VERDICTS)) {
-    const stat = card.querySelector(`.summary-stat[data-verdict="${key}"]`);
+    const stat = pill.querySelector(`.summary-pill-stat[data-verdict="${key}"]`);
     if (!stat) continue;
     const count = counts[key] ?? 0;
     stat.dataset.count = String(count);
@@ -4150,16 +4232,20 @@ function updateSummaryCard(claims) {
   }
 }
 
+
 function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 } = {}) {
   if (entry.claims) {
-    setClaimsGridMode("grid", claimGridColumns(entry.claims.length));
+    setClaimsGridMode("grid");
     setClaimsPaneHTML(
-      linkBubbleHTML(entry) + summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
+      // No bubble echoing the link back: the post is already on screen in the video pane,
+      // and its title is already in the shell's own title bar — a third copy of the same
+      // URL, styled as something the reader said, was the check quoting the paste back at
+      // them before answering it.
+      summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
     );
   } else {
     setClaimsGridMode(null);
     setClaimsPaneHTML(`
-    ${linkBubbleHTML(entry)}
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
@@ -4171,7 +4257,6 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       ${threadHTML(entry, newestFollowup)}
     </div>`);
   }
-  fillLinkBubbleIcon(entry, el.claimsPane);
   revealIn(el.claimsPane);
   // After the markup, not before: the windows are read back off the chips this render just
   // wrote, and the ones from the previous render point at nodes that no longer exist.
@@ -4430,6 +4515,41 @@ function historyFor(entry) {
 let pendingMediaReveal = false;
 
 /**
+ * The shell arriving around the flight — the movement both DS screens end on. On a phone
+ * that is "Mobile Landing to Shell"'s reveal: the media wipes down, the sheet slides up and
+ * the title bar rises with it. At every other width it is "Chat to shell"'s: the video
+ * column rises in under the travelling panel and the title bar's text fades in after the
+ * mark has landed. Either way the claims pane's own contents are left to the morph landing
+ * on them.
+ *
+ * Both flows, with different choreography (see `[data-shell-enter]` in index.html): at
+ * desktop width the reader watched the panel fly across the shell, so what arrives late is
+ * the title bar's text; on a phone the shell comes out from under the interstitial, so the
+ * sheet and the media strip are what move.
+ */
+let shellEnterTimer = 0;
+
+function playShellEntrance() {
+  if (prefersReducedMotion()) return;
+  // The video strip's own wipe, deferred to here rather than played in `runCheck`: on the
+  // phone flow it would otherwise have run and finished behind a frosted sheet, and the
+  // strip would simply be *there* when the sheet lifted.
+  const videoPane = document.querySelector(".video-pane");
+  if (pendingMediaReveal && videoPane && device.kind === "phone") {
+    pendingMediaReveal = false;
+    videoPane.classList.add("media-reveal");
+    videoPane.addEventListener("animationend", () => videoPane.classList.remove("media-reveal"), { once: true });
+  }
+  const root = document.documentElement;
+  root.dataset.shellEnter = "";
+  // Cleared rather than left on: the rules it drives are `both`-filled entrance animations,
+  // and a class that outlives its own animation replays it on the next thing to match. Long
+  // enough for the latest of them (the title bar's late fade, 1.35s in) to finish.
+  clearTimeout(shellEnterTimer);
+  shellEnterTimer = setTimeout(() => delete root.dataset.shellEnter, 2500);
+}
+
+/**
  * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
  * if the claims pane is still showing the landing page when a check begins, let it visibly
  * leave first — the whole page fades and scales back, the brand HUD's four pills fly
@@ -4441,6 +4561,375 @@ let pendingMediaReveal = false;
  * transition away from — a follow-up, a re-run, a retry) or under reduced motion, where the
  * running card's own entrance is left to carry "something happened" on its own.
  */
+/* ---------- The shared-element morph ----------
+ *
+ * The centre of the DS's "Chat to shell": the idle screen does not cut to the running card,
+ * it becomes it. The hero panel's own box flies into the card's box while the brand HUD's
+ * cluster — the same rings, ticks and core the loading dial is drawn from — shrinks into
+ * that card's dial, both on one rAF clock so they arrive together.
+ *
+ * Clones, in a fixed layer on `<body>`, rather than the real nodes: the flight spans a full
+ * teardown of the claims pane (`renderRunningCard` replaces its `innerHTML`), so the source
+ * elements stop existing halfway through it. The real cluster is hidden the same frame its
+ * clone takes over its exact pixels, so there is never two of it.
+ *
+ * `MORPH_DIAL_BASE` is `.brand-hud-cluster`'s intrinsic px size (index.html): the clone
+ * keeps that internal layout and is scaled about its top-left corner, so a 196px hero mark
+ * and an 84px card dial are the same drawing at two sizes rather than two re-layouts.
+ */
+const MORPH_DIAL_BASE = 196;
+/* The DS's own numbers for this screen: the idle screen holds for 600ms while it leaves,
+ * then the flight runs 1800ms on an `easeOutCubic`, which front-loads the travel and lets
+ * the last third be the mark settling rather than still crossing the pane. Shortening it
+ * was the thing that made this read as a swap with a slide in front of it. */
+const MORPH_HERO_OUT_MS = 700;
+const MORPH_FLIGHT_MS = 1800;
+/* The phone's last leg is the DS's other screen and its other number: "Mobile Landing to
+ * Shell" moves its mark in 0.8s, because there the mark has already had its long beat
+ * waiting in the analyzing ring and the shell it is dropping into was just revealed — a
+ * 1.8s descent on top of that is the reader waiting twice for the same arrival. */
+const MORPH_FLIGHT_PHONE_MS = 800;
+const MORPH_WAYPOINT_MS = 420;
+/* The two ends of every value the mark interpolates, brand HUD → loading dial, exactly as
+ * the DS's "Chat to shell" card lists them. The rings darken and thicken, the ticks grow
+ * from stubs to the dial's full marks, and the core turns twice and stops. */
+const MORPH_PARTS = {
+  r1: { from: "var(--border)", to: "color-mix(in oklab, var(--ink-dim) 45%, var(--border))", width: [1, 1.5] },
+  r2: { from: "color-mix(in oklab, var(--warn) 45%, var(--border))", to: "color-mix(in oklab, var(--warn) 70%, var(--border))" },
+  r3: { from: "color-mix(in oklab, var(--accent-2) 50%, var(--border))", to: "color-mix(in oklab, var(--accent-2) 75%, var(--border))", width: [1, 1.5] },
+  tick: { from: "color-mix(in oklab, var(--accent) 50%, var(--border))", to: "color-mix(in oklab, var(--accent) 75%, var(--border))", height: [4, 16] },
+};
+
+/** The in-flight morph, or `null` when there isn't one. Every function below is a no-op
+ * without it, which is what lets `runCheck` call `finishMorph()` unconditionally on a path
+ * (a follow-up, a retry, reduced motion) where no morph was ever started. */
+let morph = null;
+
+const easeOutCubic = (t) => 1 - (1 - t) ** 3;
+const clamp01 = (t) => Math.min(1, Math.max(0, t));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/** A viewport-relative box, which is the coordinate space a `position: fixed` clone lives
+ * in — so no scroll offsets or containing-block corrections are needed anywhere below. */
+function morphRect(node) {
+  const r = node.getBoundingClientRect();
+  return { top: r.top, left: r.left, width: r.width, height: r.height };
+}
+
+function lerpRect(from, to, e) {
+  return {
+    top: lerp(from.top, to.top, e),
+    left: lerp(from.left, to.left, e),
+    width: lerp(from.width, to.width, e),
+    height: lerp(from.height, to.height, e),
+  };
+}
+
+/** `color-mix` between two colors that may themselves be `color-mix`es or custom
+ * properties — which is why this composes a string rather than interpolating channels: the
+ * from- and to-values are the design system's tokens, and resolving them here would bake in
+ * one theme's numbers. */
+const mixColor = (from, to, pct) => `color-mix(in oklab, ${to} ${pct}%, ${from} ${100 - pct}%)`;
+
+/**
+ * Writes one frame of the flight: the panel's box, the mark's box, and — this is the part
+ * that makes it a morph rather than a scaled clone sliding — the mark's own internals,
+ * walked from the brand HUD's values to the loading dial's on the same clock.
+ *
+ * `parts` is the eased progress of that internal morph, held separately from the rects
+ * because the phone's first leg (into the analyzing ring) travels without it: the mark
+ * arrives there still a brand mark, and only becomes a dial on the leg into the card.
+ */
+function paintMorph(frameRect, dialRect) {
+  if (morph.frame && frameRect) {
+    // The panel is one box with a border and a corner radius, so it really does have to
+    // change size — a scaled box would smear both. One element, one layout per frame.
+    Object.assign(morph.frame.style, {
+      top: `${frameRect.top}px`,
+      left: `${frameRect.left}px`,
+      width: `${frameRect.width}px`,
+      height: `${frameRect.height}px`,
+      // The hero's 18px corners to the card's 14px, the DS's own two values.
+      borderRadius: `${lerp(18, 14, morph.parts)}px`,
+    });
+    morph.wash.style.opacity = 1 - clamp01((morph.parts - 0.25) / 0.55);
+  }
+  // The mark is sixteen nodes whose every dimension is a percentage of this box, so
+  // resizing the box re-lays-out all sixteen — sixty times a second, next to a check that
+  // is also streaming. It keeps its full size and moves under a transform instead: the
+  // compositor handles that without touching layout, which is the difference between the
+  // flight the design system plays and the one that stuttered.
+  const scale = dialRect.width / MORPH_DIAL_BASE;
+  morph.dial.style.transform = `translate3d(${dialRect.left}px, ${dialRect.top}px, 0) scale(${scale})`;
+
+  // The internals only move when a leg is actually morphing them (the phone's first leg
+  // travels without doing so), and writing fifteen colour strings per frame for nothing is
+  // the other half of the same cost.
+  if (morph.parts === morph.painted) return;
+  morph.painted = morph.parts;
+  const pct = morph.parts * 100;
+  const { r1, r2, r3, ticks, core } = morph.parts$;
+  if (r1) {
+    r1.style.borderColor = mixColor(MORPH_PARTS.r1.from, MORPH_PARTS.r1.to, pct);
+    r1.style.borderWidth = `${lerp(...MORPH_PARTS.r1.width, morph.parts)}px`;
+  }
+  if (r2) r2.style.borderColor = mixColor(MORPH_PARTS.r2.from, MORPH_PARTS.r2.to, pct);
+  if (r3) {
+    r3.style.borderColor = mixColor(MORPH_PARTS.r3.from, MORPH_PARTS.r3.to, pct);
+    r3.style.borderWidth = `${lerp(...MORPH_PARTS.r3.width, morph.parts)}px`;
+  }
+  // Each tick a hair behind the one before it, so the marks grow around the ring rather
+  // than all lengthening at once — the DS's own 1.12 overshoot and 0.006-per-tick offset.
+  ticks.forEach((tick, i) => {
+    const t = easeOutCubic(clamp01(morph.partsRaw * 1.12 - i * 0.006));
+    tick.style.background = mixColor(MORPH_PARTS.tick.from, MORPH_PARTS.tick.to, t * 100);
+    tick.style.height = `${lerp(...MORPH_PARTS.tick.height, t)}%`;
+  });
+  // Two turns on the same eased clock, so it decelerates to a clean stop exactly as the
+  // mark settles instead of being caught mid-spin.
+  if (core) core.style.transform = `rotate(${morph.parts * 720}deg)`;
+}
+
+
+/**
+ * Lifts the clones out of `hero` and parks them exactly over the originals. No motion yet —
+ * `flyMorph` is what moves them, once there is somewhere to move them to.
+ *
+ * Measured before the caller adds `.leaving`: that class scales the hero, and
+ * `getBoundingClientRect` reports the rendered, post-transform box, so a reading taken
+ * afterwards would start the flight from slightly the wrong place.
+ *
+ * Only the "New chat" hero flies a panel, because it is the only idle screen that *is* one:
+ * a bordered, radially-lit box sitting inside the shell, the same shape as the card it is
+ * about to become. The landing is a whole page — flying its rect would drag a lit panel
+ * across the sidebar and the title bar on its way to a box in the middle of the pane — so
+ * there only the mark travels, which is exactly what the DS's "Mobile Landing to Shell"
+ * flies (`.hud-fly`).
+ */
+function startMorph(hero) {
+  const cluster = hero.querySelector(".brand-hud-cluster");
+  if (!cluster || morph) return;
+  const dialRect = morphRect(cluster);
+  const frameRect = hero.classList.contains("newchat-hero") ? morphRect(hero) : null;
+
+  const layer = document.createElement("div");
+  layer.className = "morph-layer";
+  layer.setAttribute("aria-hidden", "true");
+  if (frameRect) layer.innerHTML = `<div class="morph-frame"><div class="morph-wash"></div></div>`;
+  const dial = document.createElement("div");
+  dial.className = "morph-dial";
+  // Fixed at the mark's own intrinsic size and never resized — `paintMorph` moves and
+  // scales it with a transform instead. `top`/`left` stay at 0 so the transform's
+  // translation is straight viewport coordinates.
+  dial.style.width = `${MORPH_DIAL_BASE}px`;
+  dial.style.height = `${MORPH_DIAL_BASE}px`;
+  const ticks = Array.from({ length: 12 }, (_, i) => `<i style="transform:rotate(${i * 30}deg)"><b></b></i>`).join("");
+  dial.innerHTML = `
+    <div class="morph-parts">
+      <div class="mm-ring r1"></div><div class="mm-ring r2"></div><div class="mm-ring r3"></div>
+      <div class="mm-ticks">${ticks}</div>
+      <div class="mm-core">${BRAND_MARK_SVG}</div>
+      <div class="mm-node n1"></div><div class="mm-node n2"></div><div class="mm-node n3"></div>
+      <div class="mm-arc"></div>
+    </div>`;
+  layer.append(dial);
+  document.body.append(layer);
+
+  // The same frame the drawing starts carrying the mark, the real one stops — no
+  // cross-fade, no two marks.
+  cluster.style.opacity = "0";
+  morph = {
+    layer,
+    frame: layer.querySelector(".morph-frame"),
+    wash: layer.querySelector(".morph-wash"),
+    dial,
+    logo: null,
+    frameRect,
+    dialRect,
+    // How far along the brand-HUD → loading-dial interpolation the mark's internals are,
+    // eased and raw (the tick stagger wants the raw clock). Advanced only by the leg that
+    // is actually doing that morph — see `flyMorph`.
+    parts: 0,
+    partsRaw: 0,
+    // The last `parts` value actually painted, so a frame that only moved the mark does not
+    // rewrite all fifteen of its colours to the values they already have.
+    painted: -1,
+    parts$: {
+      r1: dial.querySelector(".mm-ring.r1"),
+      r2: dial.querySelector(".mm-ring.r2"),
+      r3: dial.querySelector(".mm-ring.r3"),
+      core: dial.querySelector(".mm-core"),
+      ticks: [...dial.querySelectorAll(".mm-ticks i b")],
+    },
+    raf: 0,
+    leg: Promise.resolve(),
+  };
+  paintMorph(frameRect, dialRect);
+
+  // The brand mark's own leg, on the flow that has somewhere to fly it: the landing's
+  // wordmark mark travels into the middle of the analyzing ring, which is the DS's
+  // `.logo-fly`. Its second DS leg — on out to a small mark in the shell's title bar —
+  // has no destination in this app (the phone title bar carries the check's own title, not
+  // the brand), so it stays in the ring and leaves with it.
+  const mark = hero.querySelector(".landing-brand .brand-mark");
+  if (!mark || device.kind !== "phone") return;
+  const from = morphRect(mark);
+  const logo = document.createElement("div");
+  logo.className = "morph-logo";
+  logo.setAttribute("aria-hidden", "true");
+  logo.innerHTML = mark.innerHTML;
+  Object.assign(logo.style, { top: `${from.top}px`, left: `${from.left}px`, width: `${from.width}px`, height: `${from.height}px` });
+  document.body.append(logo);
+  mark.style.opacity = "0";
+  morph.logo = logo;
+}
+
+/** Sends the lifted brand mark to `to`, spinning as it goes. A plain transition, so the
+ * one required paint of the starting rect has to be forced first. */
+function flyLogo(to) {
+  if (!morph?.logo) return;
+  const logo = morph.logo;
+  void logo.offsetWidth;
+  logo.classList.add("spin");
+  Object.assign(logo.style, { top: `${to.top}px`, left: `${to.left}px`, width: `${to.width}px`, height: `${to.height}px` });
+}
+
+/** One leg of the flight, from wherever the clones currently are. Resolves when it lands;
+ * the current rects are updated every frame rather than only at the end, so a leg that is
+ * interrupted (`cancelAnimationFrame` below) leaves the next one a correct starting point
+ * instead of snapping back.
+ *
+ * `to` is re-read every frame rather than measured once, because the destination is a node
+ * in a live pane: a check that fails in the first second replaces the running card outright
+ * (`renderResultCard`'s error branch), and a flight aimed at a rect the detached node used
+ * to have lands in the corner of the screen. Returning `null` from it means "the
+ * destination is gone" and ends the leg early — reported back as `false` so the caller
+ * knows not to play an arrival.
+ */
+function flyMorph({ frame, dial, to, parts, duration }) {
+  if (!morph) return Promise.resolve(false);
+  cancelAnimationFrame(morph.raf);
+  const fromFrame = morph.frameRect;
+  const fromDial = morph.dialRect;
+  morph.leg = new Promise((resolve) => {
+    const start = performance.now();
+    const step = (now) => {
+      if (!morph) return resolve(false);
+      const target = to ? to() : { frame, dial };
+      if (!target) return resolve(false);
+      const raw = Math.min(1, (now - start) / duration);
+      const e = easeOutCubic(raw);
+      if (target.frame && fromFrame) morph.frameRect = lerpRect(fromFrame, target.frame, e);
+      morph.dialRect = lerpRect(fromDial, target.dial, e);
+      // Only the leg that lands on the dial turns the mark into one — see `morph.parts`.
+      if (parts) {
+        morph.parts = e;
+        morph.partsRaw = raw;
+      }
+      paintMorph(morph.frameRect, morph.dialRect);
+      if (raw < 1) morph.raf = requestAnimationFrame(step);
+      else resolve(true);
+    };
+    morph.raf = requestAnimationFrame(step);
+  });
+  return morph.leg;
+}
+
+/** Takes the layer down. Safe at any point, including mid-leg and including twice. */
+function endMorph() {
+  if (!morph) return;
+  cancelAnimationFrame(morph.raf);
+  const { layer, logo } = morph;
+  morph = null;
+  layer.classList.add("out");
+  setTimeout(() => layer.remove(), 320);
+  if (logo) {
+    logo.classList.add("out");
+    setTimeout(() => logo.remove(), 400);
+  }
+}
+
+/**
+ * The second half of the flight, called by `runCheck` the moment the running card exists —
+ * which is the first moment there is a destination to measure. The card is held blank while
+ * the clone is in the air and catches it on arrival (`.morph-incoming`/`.morph-land`), so
+ * the mark is never drawn twice and never missing.
+ *
+ * Deliberately not awaited by `runCheck`: the request is already in flight underneath this
+ * and nothing about the check waits on an animation.
+ */
+async function finishMorph() {
+  if (!morph) return;
+  // `.run-card`, not `.run-enter`: that class is the entrance animation, which this card
+  // does not get precisely because a morph is landing on it (see `renderRunningCard`).
+  const card = el.claimsPane.querySelector(".claim-card.run-card");
+  const dial = card?.querySelector(".iris-wrap");
+  if (!card || !dial) {
+    endMorph();
+    return;
+  }
+  card.classList.add("morph-incoming");
+  // On a phone the first leg is still flying into the analyzing overlay's scan ring (see
+  // `playLandingExit`); let it land before reading the destination, or the two legs fight
+  // over the same clock. A no-op on every other width, where there was no first leg.
+  await morph?.leg;
+  // …and then the interstitial holds, the way the DS's does, until the turn has something
+  // true to say for it (see `analyzingHold`). Only on the flow that has one.
+  const overlay = document.getElementById("analyzingOverlay");
+  if (overlay?.classList.contains("on")) {
+    setAnalyzingStep(1);
+    await analyzingHold();
+    setAnalyzingStep(2);
+  }
+  hideAnalyzingOverlay();
+  overlay?.classList.remove("handoff");
+  // The mark stays in the ring and leaves with it — its second DS leg has no destination
+  // here (see `startMorph`) — while the drawing carries on down into the card's dial, done
+  // waiting and so done showing the arc it waited behind.
+  morph?.logo?.classList.add("out");
+  morph?.dial.classList.remove("loading");
+  // What the interstitial was covering is revealed moving, not already arrived.
+  playShellEntrance();
+  if (!morph) {
+    card.classList.remove("morph-incoming");
+    return;
+  }
+  // Two frames so the just-mounted card has been laid out — a rect read on the same frame
+  // as the `innerHTML` swap can still be the pane's pre-swap geometry.
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  if (!morph) {
+    card.classList.remove("morph-incoming");
+    return;
+  }
+  const landed = await flyMorph({
+    to: () => (card.isConnected ? { frame: morphRect(card), dial: morphRect(dial) } : null),
+    parts: true,
+    duration: device.kind === "phone" ? MORPH_FLIGHT_PHONE_MS : MORPH_FLIGHT_MS,
+  });
+  card.classList.remove("morph-incoming");
+  // No arrival to play if the card left while the clone was still in the air — the clone
+  // just fades where it is, and whatever replaced the card (an error, most likely) is
+  // already on screen in its own right.
+  if (landed) card.classList.add("morph-land");
+  endMorph();
+}
+
+/**
+ * The "Chat to shell" beat, ported from the TRASE Design System's screen of the same name:
+ * if the claims pane is still showing an idle screen when a check begins, let it visibly
+ * leave first — the whole page fades and scales back, the brand HUD's four pills fly
+ * outward on top of that (`.landing.leaving` in index.html), a clone of the hero panel and
+ * of its brand mark lifts out of the page to be flown into the running card
+ * (`startMorph`/`finishMorph` — the morph proper), and, on a phone, the analyzing overlay
+ * fades in as that flight's waypoint the way the DS's "Mobile Landing to Shell" does. The
+ * composer, which on the landing is embedded in the page rather than docked
+ * (`syncLandingComposer`), flies back to its dock at the same time (`flyEntryBarHome`)
+ * instead of snapping there the instant the page is torn down.
+ *
+ * A no-op once a check is already under way (nothing to transition away from — a follow-up,
+ * a re-run, a retry) or under reduced motion, where the running card's own entrance is left
+ * to carry "something happened" on its own.
+ */
 async function playLandingExit(url) {
   // Either idle screen — the landing page, or the "New chat" hero inside the shell. They
   // leave identically (see the shared `.leaving` rules in index.html); what differs is only
@@ -4449,9 +4938,18 @@ async function playLandingExit(url) {
   const landing = el.claimsPane.querySelector(".landing, .newchat-hero");
   if (!landing || prefersReducedMotion()) return;
   pendingMediaReveal = true;
-  showAnalyzingOverlay(url);
+  startMorph(landing);
+  // The overlay is the phone flow's own beat in the DS, and only the phone's: at any width
+  // where the panel itself flies, a frosted sheet over the top would hide the flight it is
+  // supposed to be covering for.
+  const phone = device.kind === "phone";
+  if (phone) showAnalyzingOverlay(url);
   landing.classList.add("leaving");
-  await new Promise((resolve) => setTimeout(resolve, 320));
+  // The DS holds the idle screen for this long before the flight starts, at every width:
+  // long enough for the phone's staggered teardown to read (its last block does not begin
+  // leaving until 220ms in — see `.landing.leaving` in index.html), and, on the hero, long
+  // enough that the pills are actually gone before the panel they were orbiting moves.
+  await new Promise((resolve) => setTimeout(resolve, MORPH_HERO_OUT_MS));
 
   // Measured now, at the exact moment the page it's embedded in is about to be torn down —
   // not before the fade above, whose own `transform: scale(...)` would have made an earlier
@@ -4460,6 +4958,21 @@ async function playLandingExit(url) {
   // `setClaimsPaneHTML`); this is only what turns that redock into a flight.
   const embedded = el.entryBar.parentElement?.id === "landingEntrySlot";
   if (embedded) flyEntryBarHome(el.entryBar.getBoundingClientRect());
+
+  // The phone's waypoint: the brand mark lands in the middle of the analyzing ring and the
+  // HUD cluster closes around it, exactly the two flights the DS's "Mobile Landing to
+  // Shell" runs into its `.scan`. They hold there while the shell is built underneath, and
+  // `finishMorph` flies the cluster on down into the card's dial once the interstitial has
+  // had its beat. Not awaited — the pane swap should not wait on either; `finishMorph`
+  // awaits the leg instead.
+  const scan = phone ? document.querySelector(".analyzing-scan") : null;
+  if (!scan || !morph) return;
+  const ring = morphRect(scan);
+  // The ring yields its own core to the incoming mark rather than showing both.
+  document.getElementById("analyzingOverlay")?.classList.add("handoff");
+  const core = Math.round(ring.width * 0.42);
+  flyLogo({ top: ring.top + (ring.height - core) / 2, left: ring.left + (ring.width - core) / 2, width: core, height: core });
+  flyMorph({ dial: ring, duration: MORPH_WAYPOINT_MS }).then(() => morph?.dial.classList.add("loading"));
 }
 
 /**
@@ -4477,8 +4990,9 @@ async function runCheck(url, existingId, hint) {
   // AbortController is created further down. Overwritten with that controller once it
   // exists; every other reader of `inFlight` only ever checks it for truthiness.
   inFlight = true;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  inFlightKind = "check";
+  stopRequested = false;
+  setComposerRunning(true);
 
   await playLandingExit(url);
 
@@ -4508,7 +5022,9 @@ async function runCheck(url, existingId, hint) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
-  if (pendingMediaReveal) {
+  // Held back on the phone flow, where the strip is behind the interstitial right now and
+  // `playShellEntrance` is what reveals it — see its own comment.
+  if (pendingMediaReveal && !(morph && device.kind === "phone")) {
     pendingMediaReveal = false;
     // The phone video strip: `renderVideoPane` just made it visible for the first time
     // (`updatePaneMode` above already dropped `single-pane`), so this is the one moment to
@@ -4526,17 +5042,28 @@ async function runCheck(url, existingId, hint) {
   // The running card's own dial (just mounted, real stage-driven) is what takes over the
   // "still working" narrative from here — see `showAnalyzingOverlay`'s own comment for why
   // the overlay itself never has more than "Fetching the source" to say. Safe to call
-  // unconditionally: a no-op if the overlay was never shown (reduced motion, or a
+  // unconditionally: a no-op if there was no morph and no overlay (reduced motion, or a
   // follow-up/retry with no landing page to leave in the first place).
-  setTimeout(hideAnalyzingOverlay, 260);
+  //
+  // The card is the flight's destination, and this is the first moment it exists to be
+  // measured — hence here rather than inside `playLandingExit`. Not awaited: nothing about
+  // the check waits on the animation, and the overlay is taken down by `finishMorph` itself
+  // once the mark has left it (on a phone, it is the flight's waypoint).
+  if (morph) finishMorph();
+  else setTimeout(hideAnalyzingOverlay, 260);
 
   const image = pendingImage;
   clearPendingImage();
 
   const controller = new AbortController();
   inFlight = controller;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  // Deliberately not resetting `stopRequested` here, unlike every other run path: the
+  // window this check has just spent leaving the landing screen is one the reader could
+  // have pressed stop in, and the press is only now actionable. Aborting before the first
+  // byte is sent is what makes the button honest during the one beat it has nothing to
+  // abort.
+  if (stopRequested) controller.abort();
+  setComposerRunning(true);
 
   // What the loading view currently shows, kept outside the callbacks below so
   // `onDelta` — which rebuilds the whole loading view from scratch the moment a new claim
@@ -4557,14 +5084,23 @@ async function runCheck(url, existingId, hint) {
       signal: controller.signal,
       clipHints: hint ? { [url]: hint } : null,
       onStage: (frame) => {
+        // The first stage frame is the moment the interstitial's "Fetching the source" stops
+        // being an assumption, so it is what ends its hold rather than a timer — see
+        // `analyzingHold`. A no-op on every turn that isn't waiting on one.
+        resolveAnalyzingHold();
         stage.text = stageText(frame);
         stage.variant = dialVariant(frame);
+        // Same reasoning as `onSources` below: carried forward either way, painted only
+        // while this check is the one on screen. `setDialVariant` in particular reaches for
+        // whichever dial it can find, which on another check's card would be the wrong one.
+        if (selectedId !== id) return;
         setStatusText("runStatus", stage.text);
         setDialVariant(stage.variant);
         runProgress.bump(frame?.stage);
       },
       onSearchCount: (n) => {
         stage.searchCount = n;
+        if (selectedId !== id) return;
         const counter = document.getElementById("runCounter");
         if (counter) counter.textContent = `Source ${n}`;
         // A growing source count is real, visible progress even between named stages —
@@ -4574,7 +5110,11 @@ async function runCheck(url, existingId, hint) {
       },
       onSources: (rows) => {
         liveSources = rows;
-        renderLiveSources(rows);
+        // Tracked whether or not it is on screen (the finished card needs the full ledger),
+        // but only drawn while this check still owns the pane — the reader may have pressed
+        // "New chat" and be looking at the idle screen, which this check has no business
+        // writing source pills into.
+        if (selectedId === id) renderLiveSources(rows);
       },
       // The model writes one `[[claim: …]]` marker per claim as it drafts the answer, and
       // closes each one with its own `VERDICT:` line before opening the next — there's no
@@ -4597,7 +5137,7 @@ async function runCheck(url, existingId, hint) {
           flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
         } else {
           for (const index of settled) {
-            settleClaimPane(index, claims[index], claims.length, liveSources, seekable);
+            settleClaimPane(index, claims[index], liveSources, seekable);
           }
           // The surgical path above never touches the summary card, unlike the rebuild path
           // above it — so it's the one place that has to patch it itself.
@@ -4652,9 +5192,12 @@ async function runCheck(url, existingId, hint) {
       }
     }
   } catch (error) {
-    if (error.name === "AbortError") return;
+    // A stop is not a failure, but it does end the turn — and an entry left at `running`
+    // is one the library goes on calling "Checking…" until its heartbeat goes stale, which
+    // is the app claiming to be doing something it stopped doing. Recorded as ended, with
+    // the reader's own reason, and offering the same "Try again" a failure does.
     entry.status = "error";
-    entry.error = readerFacingError(error, "Check");
+    entry.error = error.name === "AbortError" ? STOPPED_MESSAGE : readerFacingError(error, "Check");
     persistLibrary();
     renderLibrary(el.searchInput.value);
     if (selectedId === id) renderErrorCard(entry);
@@ -4664,11 +5207,15 @@ async function runCheck(url, existingId, hint) {
     // reader navigated away from mid-flight would otherwise leave the ticker running against
     // a bar that's no longer on screen.
     clearInterval(heartbeat);
+    // A turn that ended without ever reporting a stage — an immediate error, an abort —
+    // still has to release the interstitial, or it would sit over the result until its own
+    // cap ran out. Safe when nothing is waiting.
+    resolveAnalyzingHold();
     runProgress.stop();
     runElapsed.stop();
     inFlight = null;
-    el.checkBtn.disabled = false;
-    el.newCheckBtn.disabled = false;
+    inFlightKind = null;
+    setComposerRunning(false);
     updateComposerMode();
   }
 }
@@ -4687,8 +5234,9 @@ async function runFollowup(entry, question) {
 
   const controller = new AbortController();
   inFlight = controller;
-  el.checkBtn.disabled = true;
-  el.newCheckBtn.disabled = true;
+  inFlightKind = "followup";
+  stopRequested = false;
+  setComposerRunning(true);
   let settled = false;
 
   try {
@@ -4722,7 +5270,8 @@ async function runFollowup(entry, question) {
     settled = true;
   } catch (error) {
     if (error.name === "AbortError") {
-      pendingFollowup = null;
+      // Same reasoning as `runChat`'s: the question survives the answer being stopped.
+      pendingFollowup = { entryId: entry.id, question, error: STOPPED_MESSAGE };
       return;
     }
     // Left as the pending item, with its error — not pushed into `followups`, since a
@@ -4733,8 +5282,8 @@ async function runFollowup(entry, question) {
     followupElapsed.stop();
     if (settled) pendingFollowup = null;
     inFlight = null;
-    el.checkBtn.disabled = false;
-    el.newCheckBtn.disabled = false;
+    inFlightKind = null;
+    setComposerRunning(false);
     if (selectedId === entry.id) {
       renderResultCard(entry, {
         animateAnalysis: false,
@@ -4764,7 +5313,52 @@ function setCheckBtnLabel(label) {
   el.checkBtn.setAttribute("title", label);
 }
 
+/**
+ * A stop asked for before there was anything to stop.
+ *
+ * `runCheck` claims `inFlight` synchronously (as `true`) and only builds its real
+ * `AbortController` a beat later, after the landing screen has finished leaving — so a
+ * reader who presses stop inside that window has nothing to abort yet. This remembers the
+ * press; the controller aborts itself the moment it exists. Cleared by whichever run path
+ * is starting, so it can never leak into the next turn.
+ */
+
+
+/**
+ * Puts the composer into (or out of) its running state: the submit button becomes a stop
+ * button, and stays live while everything else that could disturb a turn in progress stays
+ * disabled.
+ *
+ * One function rather than the `el.checkBtn.disabled = true` lines this replaces, because
+ * "a turn is running" now means two different things to two controls in the same row and
+ * getting them out of step is what a reader would experience as a stuck button.
+ */
+function setComposerRunning(running) {
+  el.checkBtn.disabled = false;
+  if (running) el.checkBtn.dataset.mode = "stop";
+  else delete el.checkBtn.dataset.mode;
+  setCheckBtnLabel(running ? "Stop" : looksLikeFollowup(el.linkInput.value) ? "Ask" : "Check");
+}
+
+/**
+ * Ends the turn in flight, the way every streaming assistant's stop button does: what has
+ * already arrived stays on screen, and the turn is marked stopped rather than failed — see
+ * each run path's `AbortError` branch.
+ *
+ * Safe to call with nothing running, and safe to call twice.
+ */
+function stopRun() {
+  if (!inFlight) return;
+  stopRequested = true;
+  // `true` rather than a controller: the check is between claiming the turn and owning a
+  // signal (see `stopRequested`). Nothing to abort yet, and nothing more to do here.
+  if (typeof inFlight.abort === "function") inFlight.abort();
+}
+
 function updateComposerMode() {
+  // Never relabel the button out from under a running turn — it is a stop button until the
+  // turn ends, and this runs on every keystroke.
+  if (inFlight) return;
   const entry = selectedDoneEntry();
   const asking = looksLikeFollowup(el.linkInput.value);
   setCheckBtnLabel(asking ? "Ask" : "Check");
@@ -5104,6 +5698,11 @@ function initSpeechToText() {
 /* ---------------------------------------------------------------- wiring */
 
 el.checkBtn.addEventListener("click", () => {
+  // Same button, whichever job it is doing right now — see `setComposerRunning`.
+  if (inFlight) {
+    stopRun();
+    return;
+  }
   const entry = selectedDoneEntry();
   const raw = el.linkInput.value;
   const url = normalizeLink(raw);

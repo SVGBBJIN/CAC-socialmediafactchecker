@@ -53,7 +53,29 @@ const ALIAS_PATTERN = [...VERDICT_KEY_BY_ALIAS.keys()]
   .map((alias) => alias.replace(/\s+/g, "\\s+"))
   .join("|");
 
-const VERDICT_LINE = new RegExp(`\\n?VERDICT:\\s*(${ALIAS_PATTERN})\\.?\\s*$`, "i");
+/*
+ * What a `VERDICT:` line is allowed to look like.
+ *
+ * The prompt asks for a bare `VERDICT: Corroborated` on its own line, and that is what a
+ * compliant answer writes. Everything optional below is the same kind of net
+ * `VERDICT_ALIASES` is: a model drafting prose reaches for markdown without being asked,
+ * and losing a claim's whole verdict badge — and, worse, leaving the claim looking unfinished
+ * to `claimDiff`, which is what decides when a box stops shimmering — because it emphasised
+ * the label is the app being pickier than the fact it is rendering.
+ *
+ * So the label may be bolded or italicised, either side of the colon; the colon may be an
+ * em or en dash; the line may carry a list bullet or heading hashes; and it may end in a
+ * period. What is NOT optional is the word VERDICT, one of the four findings, and the line
+ * being the last thing in the block — that anchor is load-bearing. `splitClaims` slices
+ * each claim's text at the next marker and asks for the verdict at the *end* of that slice,
+ * which is what makes a half-written claim mid-stream parse as unfinished rather than
+ * borrowing the verdict of the claim before it.
+ */
+const EMPH = "(?:\\*\\*|__|\\*|_)";
+const VERDICT_LINE = new RegExp(
+  `\\n?[ \\t]*(?:[-*\u2022]|#{1,6})?[ \\t]*${EMPH}?\\s*verdict\\s*${EMPH}?[ \\t]*[:\u2014\u2013-][ \\t]*${EMPH}?\\s*(${ALIAS_PATTERN})\\s*${EMPH}?[ \\t]*[.!]?[ \\t]*$`,
+  "i",
+);
 
 /**
  * Pulls the trailing `VERDICT: …` line off a block of answer text.
@@ -77,7 +99,8 @@ export function splitVerdict(answer) {
  * `[t=…]` timestamps use (see timestamps.js): `lib/citation-cleanup.js` only ever touches a
  * `[n]`-shaped group, so this can't be mistaken for a citation and deleted on the way out.
  */
-const CLAIM_MARKER = /^\[\[claim:\s*(.+?)\]\][ \t]*$/gim;
+const CLAIM_MARKER =
+  /^[ \t]*(?:[-*\u2022]|#{1,6}|\d+[.)])?[ \t]*(?:\*\*|__|\*|_)?\[\[[ \t]*claim[ \t]*:[ \t]*(.+?)[ \t]*\]\](?:\*\*|__|\*|_)?[ \t]*$/gim;
 
 /**
  * Splits a raw answer into one block per claim, or returns `null` if it has none.
