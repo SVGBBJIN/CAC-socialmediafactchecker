@@ -117,6 +117,19 @@ measuring live state; none would have shown up in a screenshot diff.
 - **`#checkBtn` is disabled outright with no `GEMINI_API_KEY`.** Real product behaviour, not
   a test artifact, and the cause of several minutes of "the click does nothing". Set a dummy
   key when driving the UI headlessly.
+- **A claim box in the desktop grid does not clip.** `.claim-card` sets `overflow: hidden`,
+  but `.claims-pane.claim-grid .claim-pane` overrides it to `visible` (`142a0cd`, when the
+  per-box scrollers went away), so nothing cuts an absolutely-positioned child to the card's
+  own 14px radius. The DS's `ClaimCard` verdict rail is a `::before` rectangle that relies on
+  exactly that clip, and ported as written it ran square-cornered straight past the curve at
+  the top and bottom of every box — visible only when you zoom a corner, which is why the
+  first pass shipped it. The rail is now a `background-image` layer on the card instead
+  (`background-origin` is the padding box by default, so `4px 100%` at `left center` sits
+  where the pseudo-element did), because a background is clipped to the rounded border box
+  for free. Restoring `overflow: hidden` would have been the other fix and is the wrong one:
+  the source-pill popovers escape the box deliberately. Anything else ported from the DS that
+  assumes the card clips needs the same treatment.
+
 - **Hardcoded colour constants survive a theme.** A dozen `rgba(79,209,197,…)` (the *old*
   accent) and four `rgba(240,237,230,…)` (the old ink) sat in `index.html` long after the
   tokens moved, invisible in dark mode and wrong in light. The file's idiom is

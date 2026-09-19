@@ -153,7 +153,9 @@ unmirrored. The larger pieces:
   hairline) and put it behind a "Legacy mode" switch in the settings dialog's General tab,
   off by default. This direction is DS → product, so the DS is owed nothing for the card
   itself. Two things the mirror is owed: the rail, which its `ClaimCard.css` predates, and
-  `SettingsMenu`, which has no row for the switch. Note when porting that the product keys
+  `SettingsMenu`, which has no row for the switch. Port the rail as the **background layer**
+  the product uses, not the DS's `::before` rectangle — see the clipping trap in `NOTES.md`;
+  the pseudo-element only works in the DS because its card doesn't override `overflow`. Note when porting that the product keys
   the rail off `verdict-bad`/`warn`/`good`/`muted` only, never the DS's
   `misleading`/`contradicted`/… spellings — see the verdict row in the divergence table.
 - **The landing / New Chat split** (`1769f0e`, `e2bc62f`, `8813668`) and the morph

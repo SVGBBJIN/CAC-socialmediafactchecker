@@ -1091,23 +1091,52 @@
      Gated on `[data-cards="legacy"]` being *absent* (stamped by `applySettings`) rather
      than the new look being the gated half: legacy is the product's existing, shipped card,
      so leaving its rules as the unconditional base is what makes the switch a genuine
-     fallback instead of a second re-implementation that can drift from it. */
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane { padding: 20px 20px 20px 24px; }
-  /* `right`/`height` back to `auto`, `bottom` to 0: the base rule above pins a bar across
-     the top, and a rail is the same pseudo-element turned through ninety degrees. */
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane::before {
-    top: 0; bottom: 0; left: 0; right: auto;
-    width: 4px; height: auto;
-    background: linear-gradient(180deg, var(--accent), var(--accent-2));
+     fallback instead of a second re-implementation that can drift from it.
+
+     The rail is a background layer on the card, not the `::before` rectangle the DS draws
+     it with. Same 4px at the same place — `background-origin` defaults to the padding box,
+     so `left center` / `4px 100%` lands exactly where `top: 0; bottom: 0; left: 0;
+     width: 4px` did — but a background is clipped to the card's own rounded border box for
+     free, and an absolutely-positioned box is not.
+
+     That difference is the whole reason for the departure. The DS's card relies on
+     `overflow: hidden` to cut its rail to the 14px radius; this product's desktop grid
+     overrides that with `overflow: visible` (see `.claims-pane.claim-grid .claim-pane`
+     below, from `142a0cd`, when the per-box scrollers went away), so a square-cornered
+     `::before` ran straight past the curve at the top and bottom of every box. Restoring
+     `overflow: hidden` would have fixed the rail and clipped the source-pill popovers that
+     deliberately escape the box, so the rail moved to a layer that follows the radius on
+     its own instead. Nothing about the overflow decision changes.
+
+     The legacy bar keeps its `::before` untouched; a pane in this mode has no use for it. */
+  :root:not([data-cards="legacy"]) .claim-card.claim-pane {
+    padding: 20px 20px 20px 24px;
+    background-image: linear-gradient(180deg, var(--accent), var(--accent-2));
+    background-repeat: no-repeat;
+    background-size: 4px 100%;
+    background-position: left center;
   }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-bad::before { background: linear-gradient(180deg, var(--bad), color-mix(in oklch, var(--bad) 55%, var(--warn))); }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-warn::before { background: linear-gradient(180deg, var(--warn), color-mix(in oklch, var(--warn) 55%, var(--bad))); }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-good::before { background: linear-gradient(180deg, var(--good), var(--accent)); }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-muted::before { background: linear-gradient(180deg, var(--muted), var(--accent-2)); }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-bad { border-color: color-mix(in oklch, var(--bad) 45%, var(--border)); box-shadow: 0 0 0 1px color-mix(in oklch, var(--bad) 12%, transparent) inset; }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-warn { border-color: color-mix(in oklch, var(--warn) 45%, var(--border)); box-shadow: 0 0 0 1px color-mix(in oklch, var(--warn) 12%, transparent) inset; }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-good { border-color: color-mix(in oklch, var(--good) 45%, var(--border)); box-shadow: 0 0 0 1px color-mix(in oklch, var(--good) 12%, transparent) inset; }
-  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-muted { border-color: color-mix(in oklch, var(--muted) 40%, var(--border)); box-shadow: 0 0 0 1px color-mix(in oklch, var(--muted) 10%, transparent) inset; }
+  :root:not([data-cards="legacy"]) .claim-card.claim-pane::before { content: none; }
+  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-bad {
+    background-image: linear-gradient(180deg, var(--bad), color-mix(in oklch, var(--bad) 55%, var(--warn)));
+    border-color: color-mix(in oklch, var(--bad) 45%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--bad) 12%, transparent) inset;
+  }
+  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-warn {
+    background-image: linear-gradient(180deg, var(--warn), color-mix(in oklch, var(--warn) 55%, var(--bad)));
+    border-color: color-mix(in oklch, var(--warn) 45%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--warn) 12%, transparent) inset;
+  }
+  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-good {
+    background-image: linear-gradient(180deg, var(--good), var(--accent));
+    border-color: color-mix(in oklch, var(--good) 45%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--good) 12%, transparent) inset;
+  }
+  :root:not([data-cards="legacy"]) .claim-card.claim-pane.verdict-muted {
+    background-image: linear-gradient(180deg, var(--muted), var(--accent-2));
+    border-color: color-mix(in oklch, var(--muted) 40%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--muted) 10%, transparent) inset;
+  }
 
   /* The one control that has to be visible when it is focused and invisible otherwise: the
      skip link. `.sr-only`'s clip trick hides it from sight without hiding it from the tab
