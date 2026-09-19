@@ -208,6 +208,7 @@ spent here.
 | The pixel-clone morph choreography | The DS screens fly cloned nodes on a fixed demo clock. The product's waits are real and unpredictable. Positional FLIP flights are in; scripted colour/progress sweeps are not — they'd misrepresent progress. |
 | The analyzing interstitial's step list | Ported, but only step 0 ever lights up. The app has no honest signal for "Extracting claims" / "Matching evidence" at that moment. |
 | `.brand-hud` scale | The product scales the tuned 236×220 mark rather than the desktop Landing card's hand-rolled 280×340 box. Two of the DS's three landing-ish screens use the tuned one; that card is the outlier. |
+| The collapsed rail's mark | The DS's 48px mark does not fit its own 60px/9px collapsed rail. The product runs 48px expanded and 36px in the rail. Don't "fix" it to one number in either direction without deciding the rail width in the DS first. |
 | The mobile tagline | The DS's own mobile card uses "See the facts. Think deeper." while its landing and New Chat screens use "Trace the truth. Understand what you see." The product matches both, per screen. This is a DS-level inconsistency, not a product bug — don't "unify" it without deciding it in the DS first. |
 | Mobile source pills | Hidden on the phone sheet (`.mshell-sheet .source-pills{display:none}`), in the DS and in the product. Not a missing feature. |
 

@@ -135,7 +135,22 @@
     display: flex; align-items: center; gap: 8px;
     margin-bottom: 16px; padding: 0 4px;
   }
-  .sidebar-header .mark { width: 21px; height: 21px; color: var(--accent); flex-shrink: 0; }
+  /* 48px, the TRASE Design System's own `Sidebar.css` size, against the 21px this used to
+     be. The mark is a ringed HUD reticle — a dashed ring, four tick marks, a centre dot and
+     the accent-2 block off to one side — and at 21px none of that resolves: it reads as a
+     smudge that happens to be teal. 48px is the size the detail was drawn for, and it is
+     what the DS's own sidebar card shows.
+     `transition` matches `.sidebar`'s own width/padding transition exactly, so the step
+     down to the collapsed rail below happens *with* the rail closing rather than snapping
+     a frame ahead of it. Left out of the reduced-motion rules for the same reason the
+     sidebar's own width transition is: the rail's open/close is the motion here, and the
+     mark is riding it, not adding one. */
+  .sidebar-header .mark {
+    width: 48px; height: 48px;
+    color: var(--accent);
+    flex-shrink: 0;
+    transition: width 0.18s ease, height 0.18s ease;
+  }
   .sidebar-header .mark svg { width: 100%; height: 100%; }
   /* `margin-left: auto` used to live on `.settings-btn` itself so it would push whichever
      button came right after the wordmark to the far edge. With three candidate buttons in
@@ -151,8 +166,13 @@
      which is mono there regardless of what the display role holds. The name is a mark
      rather than a heading, so it is set apart by letterform and tracking rather than by
      sharing the serif every claim title uses. */
+  /* 24px with the 48px mark, both the DS's numbers: the two are a lockup, and a mark that
+     grew while the name stayed at 14.5px reads as two unrelated things sharing a row. The
+     header has the width for it — the row holds the mark, the name and two buttons (the
+     gear carries signed-in state as a dot rather than there being a separate account
+     button), which comes to 212px of the 241px inside the sidebar's padding. */
   .sidebar-header .wordmark {
-    font-family: var(--font-mono); font-size: 14.5px; font-weight: 600;
+    font-family: var(--font-mono); font-size: 24px; font-weight: 600;
     letter-spacing: 0.13em; color: var(--ink); margin-right: auto;
   }
 
@@ -178,6 +198,14 @@
       flex-direction: column;
       gap: 10px;
     }
+    /* The one place the DS's numbers cannot both be taken: its `Sidebar.css` draws a 48px
+       mark and a 60px collapsed rail with 9px of padding, which leaves 42px to put the mark
+       in. Its own sidebar card only ever renders expanded, so the two never meet there;
+       here they do, and 48px crosses the rail's right border. 36px is the mark stepped down
+       to sit inside that 42px with its own breathing room — the same move the DS makes on
+       the wordmark and the search box at this width, which is to give the rail a version of
+       the thing rather than a clipped copy of the full-size one. */
+    [data-sidebar="collapsed"] .sidebar-header .mark { width: 36px; height: 36px; }
     [data-sidebar="collapsed"] .sidebar-header .wordmark,
     [data-sidebar="collapsed"] .new-check-label,
     [data-sidebar="collapsed"] .search,

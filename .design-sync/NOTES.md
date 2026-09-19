@@ -41,6 +41,7 @@ renders in the register the design intends. Accept the substitute.
 | `Mobile Landing to Shell`, in pieces | The video-strip clip-path reveal (`.media-reveal`), the composer's FLIP flight home (`flyEntryBarHome`), and the analyzing overlay (`showAnalyzingOverlay`). |
 | `ClaimStack` | `e69073b` — the product moved from a 2-column claim grid to one column. Note this **reverses** an earlier decision below. |
 | `SummaryCard`'s pill variant | `.summary-pill` — the DS ships both a full card and an inline pill; the product uses the pill. |
+| `Sidebar.css`'s brand lockup | `.sidebar-header .mark` at 48px and `.wordmark` at 24px, the DS's own numbers, against the 21px/14.5px the product had. The mark is a ringed reticle and 21px was below the size its detail resolves at. |
 | `ClaimCard`'s verdict card variations | The left rail, tinted border and inset hairline in `index.html`, keyed off `verdict-*` on the pane (`verdictPaneClass` in `app.js`). Four variations, one per verdict. Reversible from settings — see "Legacy mode" below. |
 | `Screens-404` | `public/404.html`, standalone. Brought back into line (brand-coloured blades, gradient button, lightning motif, current tokens, light theme) after drifting. |
 
@@ -76,6 +77,18 @@ reasons.
   instead. Settled retroactively and on evidence: `Matrix.css` and the *mobile* Landing card
   both use the tuned proportions; only the desktop Landing card hand-rolls the looser one.
   Two of three, so the product agrees with the majority and that card reads as the outlier.
+
+### The DS's brand lockup does not fit the DS's own collapsed rail
+
+`Sidebar.css` draws a 48px mark *and* a 60px collapsed rail with 9px of padding — 42px of
+room for a 48px mark. Its own sidebar card renders only the expanded state, so the two
+numbers never meet there; in the product they do, and 48px crosses the rail's right border.
+
+Resolved the same way the `.brand-hud` divergence below was: take each DS number where the
+DS actually draws it, rather than picking one and forcing the other to fit. The mark is 48px
+expanded and steps to 36px in the collapsed rail, on `.sidebar`'s own 0.18s width transition
+so it closes with the rail instead of a frame ahead of it. If the DS ever ships a collapsed
+sidebar card, this is the pair to reconcile there.
 
 ### One reversal worth knowing about
 
