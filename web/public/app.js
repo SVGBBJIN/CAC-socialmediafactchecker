@@ -176,6 +176,7 @@ const el = {
   settingsForm: document.getElementById("settings-form"),
   settingReducedMotion: document.getElementById("setting-reduced-motion"),
   settingHighContrast: document.getElementById("setting-high-contrast"),
+  settingLegacyCards: document.getElementById("setting-legacy-cards"),
   settingFontSize: document.getElementById("setting-font-size"),
   settingTheme: document.getElementById("setting-theme"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
@@ -301,6 +302,10 @@ const DEFAULT_SETTINGS = {
   reducedMotion: false,
   highContrast: false,
   fontSize: "normal", // "normal" | "large"
+  // Off ships the verdict-tinted claim cards (the TRASE Design System's ClaimCard rail);
+  // on falls back to the older single top bar. Stored rather than derived so a reader who
+  // prefers the flatter box keeps it across checks — see `applySettings`.
+  legacyCards: false,
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
 };
@@ -333,6 +338,10 @@ function applySettings() {
   setAttrIf(root, "data-theme", settings.theme === "light", "light");
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
+  // Purely a CSS switch: every claim pane already carries its `verdict-*` class whichever
+  // mode is on (see `verdictPaneClass`), so flipping this restyles what is on screen
+  // without re-rendering — and without disturbing a check that is mid-stream.
+  setAttrIf(root, "data-cards", settings.legacyCards, "legacy");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
   setAttrIf(root, "data-sidebar", settings.sidebarCollapsed, "collapsed");
   if (el.sidebarCollapseBtn) {
@@ -3557,7 +3566,7 @@ function loadingClaimHTML(claim, index, sources, seekable) {
   // box has visibly finished sliding into place, instead of outrunning it.
   const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s`;
   return `
-    <div class="claim-card claim-pane${done ? "" : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
+    <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       ${done ? badgeHTML(claim.verdictKey, false) : ""}
       <p class="claim-title in">${escapeHTML(claim.title)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
@@ -3660,6 +3669,12 @@ function settleClaimPane(index, claim, sources, seekable) {
     pane.insertAdjacentHTML("afterbegin", badgeHTML(claim.verdictKey, true));
   }
   pane.classList.remove("skeleton");
+  // The rail is tinted by the class, not by the badge, so it has to be added here too:
+  // this path is the one that runs when no sibling forced a redraw, and `loadingClaimHTML`
+  // (which writes the class for every box that a redraw *does* rebuild) never sees it.
+  // `trim()` because `verdictPaneClass` returns the leading space the templates want.
+  const paneVerdict = verdictPaneClass(claim.verdictKey).trim();
+  if (paneVerdict) pane.classList.add(paneVerdict);
   if (!prefersReducedMotion()) pane.classList.add("just-settled");
   revealIn(pane);
   // The `[t=…]` chips this box just gained are seek controls like any other — read them
@@ -3750,6 +3765,24 @@ const BADGE_ICONS = {
   good: '<path d="M4 12.5l5 5L20 6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
   muted: '<path d="M9 9a3 3 0 116 0c0 2-3 2.5-3 5 M12 17.5v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
 };
+
+/**
+ * The claim box's own verdict class — `verdict-good`, `verdict-bad`, and so on.
+ *
+ * The same `VERDICTS[key].css` string `badgeHTML` puts on the badge, so the box and the
+ * badge inside it are tinted off one value rather than two that can disagree. What reads it
+ * is the verdict card variations in index.html (the left rail, the tinted border), which
+ * apply only while "Legacy mode" is off — the class itself is written either way, so the
+ * settings switch is a CSS flip with no re-render behind it.
+ *
+ * Empty string for a claim whose `VERDICT:` line never parsed, which is the same nothing
+ * `badgeHTML` returns for it: an unbadged box gets the plain accent rail rather than being
+ * coloured as if a finding had been reached.
+ */
+function verdictPaneClass(verdictKey) {
+  const verdict = VERDICTS[verdictKey];
+  return verdict ? ` verdict-${verdict.css}` : "";
+}
 
 /** The badge markup for one verdict key, or nothing for a key with no matching verdict —
  * shared by the whole-answer badge below and each claim's own badge in the split-panes
@@ -4132,7 +4165,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       // toggle changes nothing visible — the alternative was rendering different markup per
       // breakpoint and re-rendering the pane on every resize.
       return `
-        <div class="claim-card claim-pane" role="button" tabindex="0" aria-expanded="false">
+        <div class="claim-card claim-pane${verdictPaneClass(claim.verdictKey)}" role="button" tabindex="0" aria-expanded="false">
           <!-- Verdict first, then the claim it belongs to. The finding is what a reader
                came for, so it opens the box rather than closing it; the "Claim 1 of 4"
                label that used to sit here is gone, since the boxes are laid out side by
@@ -5608,6 +5641,7 @@ function setSettingsTab(tab) {
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
+  el.settingLegacyCards.checked = settings.legacyCards;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   updateThemeButtons();
@@ -6072,6 +6106,11 @@ el.settingReducedMotion.addEventListener("change", () => {
 });
 el.settingHighContrast.addEventListener("change", () => {
   settings.highContrast = el.settingHighContrast.checked;
+  persistSettings();
+  applySettings();
+});
+el.settingLegacyCards.addEventListener("change", () => {
+  settings.legacyCards = el.settingLegacyCards.checked;
   persistSettings();
   applySettings();
 });

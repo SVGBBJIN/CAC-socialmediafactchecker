@@ -51,7 +51,11 @@ product abandoned two days ago. Check before every push:
 git log --oneline $(git log -1 --format=%H -- web/design-system)..HEAD -- web/public | wc -l
 ```
 
-Anything other than `0` means the mirror is behind by that many commits. Read them and
+Anything other than `0` means the mirror is behind by that many commits. **`0` does not
+mean it is current.** The command counts commits *since the mirror was last touched at
+all*, and `7e015a2` touched `web/design-system/src/tokens.css` and `web/public/` in the
+same commit — so it now reads `0` while every component under §2 below is still unported.
+Trust §2 over the number until a session actually clears it. Read them and
 port what they touched before going near `finalize_plan`.
 
 ## What we push
@@ -144,6 +148,14 @@ unmirrored. The larger pieces:
 - **One-column claims** (`e69073b`) — the product moved from a 2-column claim grid to the
   DS's own `ClaimStack` shape. The mirror still has `ClaimGridSplit`.
 - **Verdict-first claim cards** (`792f71b`) — badge above title, claim numbering dropped.
+- **The verdict card variations and their legacy switch** — the product adopted the DS's own
+  `ClaimCard.css` rail (left edge, 4px, tinted per verdict, plus a tinted border and inset
+  hairline) and put it behind a "Legacy mode" switch in the settings dialog's General tab,
+  off by default. This direction is DS → product, so the DS is owed nothing for the card
+  itself. Two things the mirror is owed: the rail, which its `ClaimCard.css` predates, and
+  `SettingsMenu`, which has no row for the switch. Note when porting that the product keys
+  the rail off `verdict-bad`/`warn`/`good`/`muted` only, never the DS's
+  `misleading`/`contradicted`/… spellings — see the verdict row in the divergence table.
 - **The landing / New Chat split** (`1769f0e`, `e2bc62f`, `8813668`) and the morph
   (`49130d0`, `677f8ca`, `0407270`) — product-side compositions, so per "What we do not
   push" these mostly do not become components; but `BrandHud`/`LoadingDial` were retuned
@@ -190,7 +202,7 @@ spent here.
 |---|---|
 | `--font-display` serif | The product keeps `ui-serif`. A claim card holds prose to be read, not UI copy. Do not pull the DS's grotesque in; do note the divergence in the DS README. |
 | `ClaimStack` vs the claim grid | **Resolved in the DS's favour** by `e69073b` — the product now runs one column. The mirror's `ClaimGridSplit` is dead code. |
-| The four verdicts | Closed set: Contradicted, Disputed, Corroborated, Insufficient evidence. Never adopt the remote's `misleading`/`false`/`true`. |
+| The four verdicts | Closed set: Contradicted, Disputed, Corroborated, Insufficient evidence. Never adopt the remote's `misleading`/`false`/`true` — including the `ClaimCard.css` rail selectors, where the same four gradients are spelled twice and only the `bad`/`warn`/`good`/`muted` half is ours. |
 | The pixel-clone morph choreography | The DS screens fly cloned nodes on a fixed demo clock. The product's waits are real and unpredictable. Positional FLIP flights are in; scripted colour/progress sweeps are not — they'd misrepresent progress. |
 | The analyzing interstitial's step list | Ported, but only step 0 ever lights up. The app has no honest signal for "Extracting claims" / "Matching evidence" at that moment. |
 | `.brand-hud` scale | The product scales the tuned 236×220 mark rather than the desktop Landing card's hand-rolled 280×340 box. Two of the DS's three landing-ish screens use the tuned one; that card is the outlier. |
