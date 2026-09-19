@@ -442,7 +442,10 @@ function applyDevice(next) {
   // Growing out of the phone layout — rotating to landscape, un-splitting a tablet,
   // widening a window — turns the drawer back into a permanent column. Leaving
   // `data-drawer="open"` set would then hold a scrim over a perfectly normal sidebar.
-  if (next.kind !== "phone" && previousKind === "phone") closeDrawer({ restoreFocus: false });
+  if (next.kind !== "phone" && previousKind === "phone") {
+    closeDrawer({ restoreFocus: false });
+    clearPhoneOnlyState();
+  }
   syncDrawerInert();
   // Which of the two idle screens is the right one depends on the device kind (a phone only
   // ever gets the landing — see `renderChatPane`), so crossing that boundary while an idle
@@ -456,6 +459,34 @@ function applyDevice(next) {
   // changing could have left it at the dock with the slot on screen, and the call is a
   // no-op whenever it is already where it belongs.
   syncLandingComposer();
+}
+
+/**
+ * Drops the two pieces of phone-only UI state on the way out of the phone layout, for the
+ * same reason `closeDrawer` is called beside it: each is a gesture that only means anything
+ * while the compact layout is on screen, and each leaves something untrue behind if it is
+ * carried across.
+ *
+ * - **The expanded video.** `data-media="expanded"` trades sheet height for video height,
+ *   and every rule that reads it lives inside the phone breakpoint — so above it the
+ *   attribute does nothing, while `#mediaExpandBtn` goes on claiming `aria-expanded="true"`
+ *   and offering to "Collapse video" from behind `display: none`. Widening the window is
+ *   also, in practice, the reader getting the room the gesture was asking for.
+ * - **An opened claim box.** On the phone a `.claim-pane` is a summary that opens on tap;
+ *   above the breakpoint it is showing everything it has and is not a toggle at all, so
+ *   `aria-expanded="true"` there describes a control that isn't one.
+ *
+ * Both are deliberately *not* restored on the way back down. Neither is a preference —
+ * `toggleMediaExpanded`'s own comment says as much about the video — and a claim box that
+ * reopens itself because the window once passed through a wider size is the app
+ * remembering something the reader didn't ask it to.
+ */
+function clearPhoneOnlyState() {
+  if (document.documentElement.dataset.media === "expanded") toggleMediaExpanded(false);
+  for (const pane of el.claimsPane.querySelectorAll(".claim-pane.expanded")) {
+    pane.classList.remove("expanded");
+    pane.setAttribute("aria-expanded", "false");
+  }
 }
 
 function isDrawerOpen() {
@@ -3917,6 +3948,16 @@ function collapseSourcePillsOverflow(root) {
     const row = wrap.querySelector(".source-pills-row");
     if (!sources || !row) return;
 
+    // A row with no layout cannot be measured, and measuring it anyway does not fail
+    // loudly — every pill reports `offsetTop: 0`, the loop below finds no second line, and
+    // the row is declared to fit when nothing about it has been rendered at all. That is
+    // the phone's case exactly: `.mshell-sheet .source-pills` is `display: none` there on
+    // purpose, so every resize through the phone breakpoint used to reach this function
+    // and leave the row fully expanded. Harmless while it is invisible, wrong the moment
+    // it isn't. Bail before the rebuild rather than after, so the row is left exactly as
+    // it was; the next resize or render that finds it visible measures it properly.
+    if (!row.offsetParent || row.clientWidth === 0) return;
+
     row.innerHTML = sources.map(sourcePillHTML).join("");
     wrap.querySelector(".source-expand")?.remove();
 
@@ -3932,16 +3973,27 @@ function collapseSourcePillsOverflow(root) {
     }
     if (cutIndex >= pills.length) return; // everything already fit on one line
 
-    const rest = sources.slice(cutIndex);
     for (let i = pills.length - 1; i >= cutIndex; i--) pills[i].remove();
 
     const moreBtn = document.createElement("button");
     moreBtn.type = "button";
     moreBtn.className = "source-pill more";
     moreBtn.setAttribute("aria-expanded", "false");
-    moreBtn.innerHTML = `+${rest.length} more<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>`;
+    moreBtn.innerHTML = `+${sources.length - cutIndex} more<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>`;
     row.appendChild(moreBtn);
 
+    // The toggle is a pill too, and it is added *after* the cut — so on a row whose first
+    // line was exactly full it becomes the thing that starts the second line, and a row
+    // that exists to be one line tall is two. Give back pills until it fits. `cutIndex > 1`
+    // keeps at least one real source visible: a row of nothing but "+9 more" names no
+    // source at all, which is worse than a second line.
+    while (moreBtn.offsetTop !== firstTop && cutIndex > 1) {
+      cutIndex -= 1;
+      row.children[cutIndex].remove();
+      moreBtn.firstChild.textContent = `+${sources.length - cutIndex} more`;
+    }
+
+    const rest = sources.slice(cutIndex);
     const expandPanel = document.createElement("div");
     expandPanel.className = "source-expand";
     expandPanel.hidden = true;
@@ -5812,20 +5864,78 @@ el.sidebarCollapseBtn?.addEventListener("click", () => {
   persistSettings();
   applySettings();
   // The rail's own width transition (see .sidebar's `transition: width` in index.html)
-  // changes how wide every claim card is, which is exactly what source-pill overflow is
-  // measured against — recheck once it's done rather than mid-transition, where every pill
-  // would still be at its pre-toggle width.
-  setTimeout(() => collapseSourcePillsOverflow(el.claimsPane), 200);
+  // changes how wide every claim card is, which is what source-pill overflow is measured
+  // against. Nothing to do here any more: that re-measure used to be a `setTimeout(…, 200)`
+  // guess at when the transition ends, and now rides the claims-pane width observer in the
+  // resize-guards section below, which watches the width instead of the clock.
 });
 
-// A sidebar-collapse toggle isn't the only thing that changes a claim card's width — so
-// does the window itself. Debounced: a drag-resize fires this dozens of times a second,
-// and the row only needs to be right once the reader stops moving the handle.
-let sourcePillsResizeTimer = null;
-window.addEventListener("resize", () => {
-  clearTimeout(sourcePillsResizeTimer);
-  sourcePillsResizeTimer = setTimeout(() => collapseSourcePillsOverflow(el.claimsPane), 150);
-});
+/* ---------------------------------------------------------------- resize guards
+ *
+ * A drag-resize is not one event, it is a few hundred, and the things that have to be
+ * *measured* rather than laid out by CSS cannot keep up with that — nor should they try,
+ * since every intermediate width is a width the reader is passing through, not one they
+ * asked for. So a drag has a beginning and an end here: `data-resizing` goes on <html> at
+ * the first event and comes off once they stop, and whatever needs measuring is measured
+ * once, at the end.
+ *
+ * What the attribute buys is that the in-between is not left looking broken. A sidebar
+ * collapse changes a claim card's width the same way and is already handled where it
+ * happens; this is the window's own version of it.
+ */
+const RESIZE_SETTLE_MS = 150;
+let resizeSettleTimer = null;
+
+function beginResize() {
+  document.documentElement.setAttribute("data-resizing", "");
+  clearTimeout(resizeSettleTimer);
+  resizeSettleTimer = setTimeout(endResize, RESIZE_SETTLE_MS);
+}
+
+/** The drag is over: drop the guards, then re-measure against the width they landed on.
+ *  Order matters — `collapseSourcePillsOverflow` reads `offsetTop` to find where the row
+ *  wraps, and it cannot find that on a row `[data-resizing]` is still holding to one line.
+ *  Measuring straight after the attribute comes off is safe without waiting a frame: the
+ *  `offsetTop` read forces the pending style change to be applied first. */
+function endResize() {
+  document.documentElement.removeAttribute("data-resizing");
+  collapseSourcePillsOverflow(el.claimsPane);
+}
+
+window.addEventListener("resize", beginResize);
+
+/*
+ * The window is not the only thing that changes how much room the pill row has, and it
+ * turned out not to be the common one. At first render the claims pane measures ~86px
+ * wider than it ends up — the split layout is still settling when `revealIn` calls the
+ * measurement — so the row was cut for a width it never had, and a check opened at a plain
+ * 1280px desktop showed a "one line" row on two. Collapsing the sidebar moves the same
+ * number, and used to be handled by guessing 200ms and re-measuring.
+ *
+ * Watching the pane's own width covers all three causes with one mechanism and no guesses:
+ * whatever moved it — the window, the sidebar, the layout finishing — the row is re-cut
+ * against the width it actually has. Routed through `beginResize` rather than measuring
+ * here so a sidebar transition coalesces into the same single settle the window's own drag
+ * does, instead of re-rendering every pill on every frame of it.
+ *
+ * Two things stop it feeding itself, and it does try. The measurement rewrites the row,
+ * which changes the row's *height*, which changes how tall the pane's content is, which
+ * can add or remove the pane's own scrollbar — and that lands right back here as a width
+ * change, one re-measure per 150ms, forever. So this reads the **border-box** width, which
+ * a scrollbar appearing inside the pane does not move, rather than `contentRect`, which it
+ * does; and it ignores a report that matches the width it last acted on. The cost is that
+ * a scrollbar arriving for some unrelated reason narrows the row by its width without a
+ * re-cut, which is a pill's worth of slack at most and self-corrects on the next real
+ * change — a much better trade than a measurement loop that never stops.
+ */
+let lastPaneWidth = 0;
+new ResizeObserver((entries) => {
+  const entry = entries[0];
+  const width = Math.round(entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width);
+  if (width === lastPaneWidth) return;
+  lastPaneWidth = width;
+  beginResize();
+}).observe(el.claimsPane);
 
 el.linkInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {

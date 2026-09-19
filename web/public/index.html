@@ -2241,6 +2241,25 @@
   }
   .source-pills.in { opacity: 1; transform: translateY(0); }
   .source-pills-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* Held to one line while the window is actually being dragged — `data-resizing` on <html>
+     (see `beginResize`/`endResize` in app.js), set on the first `resize` event and cleared
+     once they stop.
+
+     `collapseSourcePillsOverflow` is what decides where this row really cuts, and it can
+     only decide that by rendering every pill and reading where the second line starts. It
+     is debounced, so during a drag the row sits in that measuring state — fully expanded,
+     wrapped over as many lines as it takes, which on a narrowing window was four. That is
+     not a frame of jank, it lasts for the whole drag. Clipping the row for the duration
+     shows the same first line the settled row will show; the exact `+N more` count arrives
+     when the handle stops. The measurement itself is unaffected — it runs after this
+     attribute is gone, which is why `endResize` clears it before measuring, not after. */
+  [data-resizing] .source-pills-row { flex-wrap: nowrap; overflow: hidden; }
+  /* `nowrap` alone only stops the row wrapping — the pills themselves are still flex items
+     with the default `flex-shrink: 1`, so instead of running past the edge to be clipped
+     they squeeze, and the domain inside each one wraps to a second line. The row comes out
+     one line of *two-line pills*: 48px where the settled row is 29. Holding their width is
+     what makes the clip a clip. */
+  [data-resizing] .source-pills-row > * { flex-shrink: 0; }
   .source-pill {
     position: relative;
     display: inline-flex; align-items: center;

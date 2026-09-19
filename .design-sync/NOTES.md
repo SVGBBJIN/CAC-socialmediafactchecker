@@ -130,6 +130,19 @@ measuring live state; none would have shown up in a screenshot diff.
   the source-pill popovers escape the box deliberately. Anything else ported from the DS that
   assumes the card clips needs the same treatment.
 
+- **The claims pane is not its final width when it is first rendered, and it transitions.**
+  `revealIn` measures source-pill overflow the moment new markup lands; at that point the
+  split layout is still settling and the pane is ~86px wider than it ends up, so the row was
+  cut for a width it never had — a "one line" row on two lines, at a plain 1280px desktop,
+  with nothing resized. A viewport change then animates the pane's width frame by frame, so
+  anything measuring on `resize` sees a few hundred intermediate widths, none of them the
+  answer. Both are now handled by a `ResizeObserver` on the pane feeding one debounced
+  settle (`beginResize`/`endResize` in app.js). Two things to know if you add another
+  measurement here: observe the **border-box** width, because a scrollbar appearing inside
+  the pane moves `contentRect` and the measurement can cause that itself — an endless
+  re-measure; and measure only after `data-resizing` comes off, since the guards it applies
+  are the thing that would make the measurement wrong.
+
 - **Hardcoded colour constants survive a theme.** A dozen `rgba(79,209,197,…)` (the *old*
   accent) and four `rgba(240,237,230,…)` (the old ink) sat in `index.html` long after the
   tokens moved, invisible in dark mode and wrong in light. The file's idiom is
