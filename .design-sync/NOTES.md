@@ -41,6 +41,8 @@ renders in the register the design intends. Accept the substitute.
 | `Mobile Landing to Shell`, in pieces | The video-strip clip-path reveal (`.media-reveal`), the composer's FLIP flight home (`flyEntryBarHome`), and the analyzing overlay (`showAnalyzingOverlay`). |
 | `ClaimStack` | `e69073b` — the product moved from a 2-column claim grid to one column. Note this **reverses** an earlier decision below. |
 | `SummaryCard`'s pill variant | `.summary-pill` — the DS ships both a full card and an inline pill; the product uses the pill. |
+| `Sidebar.css`'s brand lockup | `.sidebar-header .mark` at 48px and `.wordmark` at 24px, the DS's own numbers, against the 21px/14.5px the product had. The mark is a ringed reticle and 21px was below the size its detail resolves at. |
+| `ClaimCard`'s verdict card variations | The left rail, tinted border and inset hairline in `index.html`, keyed off `verdict-*` on the pane (`verdictPaneClass` in `app.js`). Four variations, one per verdict. Reversible from settings — see "Legacy mode" below. |
 | `Screens-404` | `public/404.html`, standalone. Brought back into line (brand-coloured blades, gradient button, lightning motif, current tokens, light theme) after drifting. |
 
 ## Declined, and why
@@ -61,13 +63,32 @@ reasons.
   ~550ms gap and then hands the narrative to the real, stage-driven dial.
 - **`VerdictBadge`'s remote redesign** — solid-fill pills plus `misleading`/`false`/`true` as
   extra verdict keys. The vocabulary is closed at four. The remote's README drifts here too
-  ("Misleading" for "Disputed"); see `PUSH-REFERENCE.md` §4, it's ours to correct in the DS.
+  ("Misleading" for "Disputed"); see `PUSH-REFERENCE.md` §4, it's ours to correct in the DS. The
+  same drift is in `ClaimCard.css`, which spells its rail selectors
+  `verdict-contradicted`/`misleading`/`corroborated`/`insufficient` *as well as*
+  `verdict-bad`/`warn`/`good`/`muted` — for the same four gradients. The rail itself was
+  adopted; only the `bad`/`warn`/`good`/`muted` half of each selector came with it, because
+  that is what `VERDICTS[key].css` already names and the other half would have quietly
+  seeded a fifth spelling. The gradients, the `color-mix` percentages and the 4px/24px
+  measurements are the DS's own, copied as written.
 - **`tokens.css`'s dropped serif.** The DS sets `--font-display` to the same grotesque as
   body. The product keeps the serif, permanently — a claim card holds prose to be read.
 - **The desktop Landing card's 280×340 HUD box.** The product scales the tuned 236×220 mark
   instead. Settled retroactively and on evidence: `Matrix.css` and the *mobile* Landing card
   both use the tuned proportions; only the desktop Landing card hand-rolls the looser one.
   Two of three, so the product agrees with the majority and that card reads as the outlier.
+
+### The DS's brand lockup does not fit the DS's own collapsed rail
+
+`Sidebar.css` draws a 48px mark *and* a 60px collapsed rail with 9px of padding — 42px of
+room for a 48px mark. Its own sidebar card renders only the expanded state, so the two
+numbers never meet there; in the product they do, and 48px crosses the rail's right border.
+
+Resolved the same way the `.brand-hud` divergence below was: take each DS number where the
+DS actually draws it, rather than picking one and forcing the other to fit. The mark is 48px
+expanded and steps to 36px in the collapsed rail, on `.sidebar`'s own 0.18s width transition
+so it closes with the rail instead of a frame ahead of it. If the DS ever ships a collapsed
+sidebar card, this is the pair to reconcile there.
 
 ### One reversal worth knowing about
 
@@ -109,6 +130,32 @@ measuring live state; none would have shown up in a screenshot diff.
 - **`#checkBtn` is disabled outright with no `GEMINI_API_KEY`.** Real product behaviour, not
   a test artifact, and the cause of several minutes of "the click does nothing". Set a dummy
   key when driving the UI headlessly.
+- **A claim box in the desktop grid does not clip.** `.claim-card` sets `overflow: hidden`,
+  but `.claims-pane.claim-grid .claim-pane` overrides it to `visible` (`142a0cd`, when the
+  per-box scrollers went away), so nothing cuts an absolutely-positioned child to the card's
+  own 14px radius. The DS's `ClaimCard` verdict rail is a `::before` rectangle that relies on
+  exactly that clip, and ported as written it ran square-cornered straight past the curve at
+  the top and bottom of every box — visible only when you zoom a corner, which is why the
+  first pass shipped it. The rail is now a `background-image` layer on the card instead
+  (`background-origin` is the padding box by default, so `4px 100%` at `left center` sits
+  where the pseudo-element did), because a background is clipped to the rounded border box
+  for free. Restoring `overflow: hidden` would have been the other fix and is the wrong one:
+  the source-pill popovers escape the box deliberately. Anything else ported from the DS that
+  assumes the card clips needs the same treatment.
+
+- **The claims pane is not its final width when it is first rendered, and it transitions.**
+  `revealIn` measures source-pill overflow the moment new markup lands; at that point the
+  split layout is still settling and the pane is ~86px wider than it ends up, so the row was
+  cut for a width it never had — a "one line" row on two lines, at a plain 1280px desktop,
+  with nothing resized. A viewport change then animates the pane's width frame by frame, so
+  anything measuring on `resize` sees a few hundred intermediate widths, none of them the
+  answer. Both are now handled by a `ResizeObserver` on the pane feeding one debounced
+  settle (`beginResize`/`endResize` in app.js). Two things to know if you add another
+  measurement here: observe the **border-box** width, because a scrollbar appearing inside
+  the pane moves `contentRect` and the measurement can cause that itself — an endless
+  re-measure; and measure only after `data-resizing` comes off, since the guards it applies
+  are the thing that would make the measurement wrong.
+
 - **Hardcoded colour constants survive a theme.** A dozen `rgba(79,209,197,…)` (the *old*
   accent) and four `rgba(240,237,230,…)` (the old ink) sat in `index.html` long after the
   tokens moved, invisible in dark mode and wrong in light. The file's idiom is
@@ -137,6 +184,14 @@ obviously right answer.
   open for a fortnight still shows what was open.
 - **The overlap bite on the landing entry block is a taste value.** 12px of the outer ring,
   chosen because it looks deliberate at both breakpoints. One edit to change.
+- **"Legacy mode" is a one-way door that nothing else uses yet.** The switch
+  (`settings.legacyCards` → `data-cards="legacy"` on `<html>`) turns off the verdict card
+  variations and nothing else, by design — it was scoped to the claim card because that is
+  the only thing it introduced. The name is broader than the behaviour, so the next visual
+  change either joins it (and the switch stops meaning one specific card) or doesn't (and a
+  reader who turned it on has no idea what it now covers). Worth deciding before the second
+  thing lands, not after.
+
 - **The phone top bar says "New check" while the desktop bar and sidebar say "New chat".**
   Deliberate at the time (the phone-copy option was offered and not picked), but it is an
   inconsistency and a two-line fix if it wasn't.
