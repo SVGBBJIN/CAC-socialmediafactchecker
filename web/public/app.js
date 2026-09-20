@@ -167,10 +167,9 @@ const el = {
   linkConfirmBody: document.getElementById("link-confirm-body"),
   linkConfirmCancel: document.getElementById("link-confirm-cancel"),
   linkConfirmHeadlines: document.getElementById("link-confirm-headlines"),
-  deleteConfirmDialog: document.getElementById("delete-confirm-dialog"),
-  deleteConfirmForm: document.getElementById("delete-confirm-form"),
-  deleteConfirmBody: document.getElementById("delete-confirm-body"),
-  deleteConfirmCancel: document.getElementById("delete-confirm-cancel"),
+  undoBanner: document.getElementById("undoBanner"),
+  undoBannerText: document.getElementById("undoBannerText"),
+  undoBannerBtn: document.getElementById("undoBannerBtn"),
   settingsBtn: document.getElementById("settingsBtn"),
   settingsDialog: document.getElementById("settings-dialog"),
   settingsForm: document.getElementById("settings-form"),
@@ -2084,7 +2083,7 @@ function renderLibrary(filter = "") {
     // right below would otherwise fire second, since this button lives inside that row.
     deleteBtn.addEventListener("click", (event) => {
       event.stopPropagation();
-      confirmDeleteEntry(entry.id);
+      deleteEntry(entry.id);
     });
     deleteBtn.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") event.stopPropagation();
@@ -2384,42 +2383,27 @@ function selectEntry(id) {
   updateComposerMode();
 }
 
-// The row a delete click is waiting on a confirmation for — cleared the same way
-// `pendingConfirmUrl` is, by the dialog's own `close` listener, so Esc and the Cancel
-// button both leave nothing behind without needing their own separate handler.
-let pendingDeleteId = null;
-
-/**
- * Asks before removing a row — the one list action here with no undo (see
- * delete-confirm-dialog in index.html, the same shape link-confirm-dialog already uses).
- *
- * Same `inFlight` guard `selectEntry` has, and for the same reason plus one more: deleting
- * the row a stream is actively writing into out from under it would leave `runCheck`
- * finishing a turn against a `library` entry no longer in the array, and `persistLibrary`
- * racing that splice. Simplest correct answer is the one `selectEntry` already made —
- * nothing about the library changes while a turn is running.
- */
-function confirmDeleteEntry(id) {
-  if (inFlight) return;
-  const entry = findEntry(id);
-  if (!entry) return;
-  pendingDeleteId = id;
-  el.deleteConfirmBody.textContent = `"${entry.title}" will be deleted${
-    accounts.isConfigured() && accounts.getUser() ? " everywhere it's synced" : ""
-  }. This can't be undone.`;
-  el.deleteConfirmDialog.showModal();
-}
-
 /** Removes one entry from the library — local storage immediately, the cloud row
  * best-effort right behind it (see `deleteConversation` in auth.js). If the row being
  * removed is the one on screen, this falls back to the empty state exactly as
  * `startNewCheck` does, rather than leaving the pane pointed at an id `findEntry` can no
- * longer resolve. */
+ * longer resolve.
+ *
+ * There is no "are you sure?" in front of this any more: the confirmation dialog it used
+ * to open is replaced by the undo banner below, which is the same safety net arriving
+ * after the click instead of before it — one fewer step for the common case (a row the
+ * reader meant to delete) and a real recovery for the rare one. The `inFlight` guard the
+ * dialog carried stays here, for the reason it always had: deleting the row a stream is
+ * actively writing into would leave `runCheck` finishing a turn against a `library` entry
+ * no longer in the array, and `persistLibrary` racing that splice.
+ */
 function deleteEntry(id) {
+  if (inFlight) return;
   const index = library.findIndex((entry) => entry.id === id);
   if (index === -1) return;
-  library.splice(index, 1);
-  if (selectedId === id) {
+  const [entry] = library.splice(index, 1);
+  const wasSelected = selectedId === id;
+  if (wasSelected) {
     selectedId = null;
     updatePaneMode();
     pendingFollowup = null;
@@ -2431,6 +2415,59 @@ function deleteEntry(id) {
   persistLibrary();
   renderLibrary(el.searchInput.value);
   accounts.deleteConversation(id);
+  showUndoDelete({ entry, index, wasSelected });
+}
+
+// How long the "Chat deleted" banner stays offering its Undo. Long enough to notice and
+// act on, short enough that it isn't still sitting there next time the reader looks.
+const UNDO_DELETE_MS = 8000;
+
+// The one delete that can still be taken back, plus the timer that retires it. Only ever
+// one — a second delete replaces the first rather than stacking banners, so the offer on
+// screen always matches the row the reader just removed.
+let pendingUndoDelete = null;
+let undoDeleteTimer = null;
+
+/** Shows the "Chat deleted" banner and arms the window in which `undoDelete` can put the
+ * row back. */
+function showUndoDelete(record) {
+  pendingUndoDelete = record;
+  clearTimeout(undoDeleteTimer);
+  // Deliberately not the row's title: the banner sits where that row was, and a long
+  // title crowds the Undo button it exists to offer.
+  el.undoBannerText.textContent = "Chat deleted";
+  el.undoBanner.hidden = false;
+  undoDeleteTimer = setTimeout(dismissUndoDelete, UNDO_DELETE_MS);
+}
+
+/** Retires the offer without acting on it — the timeout, and every path that has just
+ * consumed the record. */
+function dismissUndoDelete() {
+  clearTimeout(undoDeleteTimer);
+  undoDeleteTimer = null;
+  pendingUndoDelete = null;
+  el.undoBanner.hidden = true;
+}
+
+/**
+ * Puts the deleted row back where it was.
+ *
+ * The cloud row is restored by `persistLibrary` rather than by any undo-specific call:
+ * `pushLibrary` upserts the whole library, so re-inserting the entry locally and saving is
+ * exactly the write that recreates it. That also means a delete whose cloud half failed
+ * and an undo landing after it are both self-correcting — the last save wins either way.
+ */
+function undoDelete() {
+  const record = pendingUndoDelete;
+  if (!record) return;
+  dismissUndoDelete();
+  if (findEntry(record.entry.id)) return; // Already back (a cloud pull beat us to it).
+  library.splice(Math.min(record.index, library.length), 0, record.entry);
+  persistLibrary();
+  renderLibrary(el.searchInput.value);
+  // Deleting the open check emptied the pane; undoing it should hand that check back,
+  // not just the sidebar row. `selectEntry` is the same path a click on the row takes.
+  if (record.wasSelected) selectEntry(record.entry.id);
 }
 
 /** The un-started state: nothing selected, video pane blank. The claims pane isn't
@@ -5842,20 +5879,7 @@ el.linkConfirmDialog.addEventListener("close", () => {
   pendingConfirmUrl = null;
 });
 
-el.deleteConfirmForm.addEventListener("submit", () => {
-  if (pendingDeleteId) deleteEntry(pendingDeleteId);
-  pendingDeleteId = null;
-});
-
-el.deleteConfirmCancel.addEventListener("click", () => {
-  el.deleteConfirmDialog.close();
-});
-
-// Same reasoning as link-confirm-dialog's own close listener just above: Esc leaves
-// `pendingDeleteId` set unless every way out of the dialog clears it here.
-el.deleteConfirmDialog.addEventListener("close", () => {
-  pendingDeleteId = null;
-});
+el.undoBannerBtn.addEventListener("click", undoDelete);
 
 el.newCheckBtn.addEventListener("click", startNewCheck);
 
