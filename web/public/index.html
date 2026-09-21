@@ -1602,6 +1602,11 @@
   }
   .claim-title.in { opacity: 1; transform: translateY(0); }
 
+  /* Off everywhere by default. The claim box is only ever clipped on the phone layout, and
+     a "Read more" under a box that is already showing everything it has is a control that
+     lies. The phone breakpoint turns it on — see `.claim-expand-cue` there. */
+  .claim-expand-cue { display: none; }
+
   /* "Claim:" — the app's own word, not the model's, saying whose sentence the heading is.
      Set quieter than the claim so the claim still reads as the heading, and `select-none`
      is deliberately NOT used: someone copying the heading by hand should get the framing
@@ -2820,6 +2825,54 @@
   .auth-switch-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   #account-dialog .account-message { font-size: 12px; color: var(--ink-dim); margin: -4px 0 12px; text-align: center; }
+
+  /* An input with a button living inside its box. The button is absolutely positioned
+     rather than flexed beside the field so the input keeps its full width and its own
+     focus ring, and the padding on the right is what keeps typed text from running under
+     the icon. */
+  #account-dialog .field-with-button { position: relative; }
+  #account-dialog .field-with-button input { width: 100%; padding-right: 40px; }
+  #account-dialog .field-btn {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    width: 30px; height: 30px; display: grid; place-items: center;
+    border: none; background: none; cursor: pointer; border-radius: 6px;
+    color: var(--ink-dim);
+  }
+  #account-dialog .field-btn:hover { color: var(--ink); background: var(--surface-raised); }
+  #account-dialog .field-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #account-dialog .field-btn svg { width: 17px; height: 17px; }
+  /* Pressed = the password is currently visible, so the icon shows the action that undoes
+     it: a struck-through eye, drawn with a border rather than a second SVG. */
+  #account-dialog .field-btn[aria-pressed="true"] { color: var(--accent); }
+
+  /* A text link that is a <button>, because it opens nothing and navigates nowhere. */
+  #account-dialog .auth-inline-link {
+    background: none; border: none; padding: 6px 0 0; cursor: pointer;
+    font-family: var(--font-body); font-size: 12px; color: var(--ink-dim); text-align: left;
+  }
+  #account-dialog .auth-inline-link:hover { color: var(--accent); text-decoration: underline; }
+  #account-dialog .auth-inline-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+  #account-dialog .auth-oauth { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  /* "or" with a rule either side, drawn with one flex row rather than pseudo-elements so
+     the word keeps its own background and the rules stop where it starts. */
+  #account-dialog .auth-divider {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11.5px; color: var(--muted); margin: 2px 0 6px;
+  }
+  #account-dialog .auth-divider::before,
+  #account-dialog .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  #account-dialog .auth-oauth-btn {
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    width: 100%; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface-raised); color: var(--ink);
+    font-family: var(--font-body); font-size: 13.5px; font-weight: 500; cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  #account-dialog .auth-oauth-btn:hover { border-color: var(--accent); }
+  #account-dialog .auth-oauth-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #account-dialog .auth-oauth-btn svg { width: 17px; height: 17px; flex: none; }
+  #account-dialog .auth-oauth-btn:disabled { opacity: 0.55; cursor: default; }
   .account-message.error { color: var(--bad); }
   .account-message:empty { display: none; }
 
@@ -3453,6 +3506,24 @@
     .claim-pane.expanded .action-row,
     .claim-pane.expanded .thread,
     .claim-pane.expanded .check-duration { display: block; }
+
+    /* "Read more" / "Show less" — the cue that says this box is a summary that opens.
+       The word is in CSS rather than in the markup because it is purely a state readout:
+       the box carries `aria-expanded` for anyone not looking at it (see `claimPanesHTML`),
+       and duplicating the word in the DOM would have it read out twice. */
+    .claim-expand-cue {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-family: var(--font-body); font-size: 11.5px; font-weight: 500;
+      color: var(--accent);
+      margin-top: 2px;
+    }
+    .claim-expand-cue::after { content: "Read more"; }
+    .claim-expand-cue svg {
+      width: 13px; height: 13px; order: 1;
+      transition: transform 0.2s ease;
+    }
+    .claim-pane.expanded .claim-expand-cue::after { content: "Show less"; }
+    .claim-pane.expanded .claim-expand-cue svg { transform: rotate(180deg); }
     .claim-pane.expanded .action-row { display: flex; }
 
     /* With the video expanded there is only a sliver of sheet left, so each claim shrinks to
@@ -4111,7 +4182,19 @@
       </div>
       <div class="field">
         <label for="account-password">Password</label>
-        <input type="password" id="account-password" placeholder="••••••••" autocomplete="current-password" />
+        <!-- The reveal toggle lives inside the field box so it reads as part of the input
+             rather than as a control beside it. `aria-pressed` carries the state; the
+             label changes with it so a screen reader is told what the button will do
+             next, not what it just did. -->
+        <div class="field-with-button">
+          <input type="password" id="account-password" placeholder="••••••••" autocomplete="current-password" />
+          <button type="button" class="field-btn" id="accountPasswordToggle" aria-pressed="false" aria-label="Show password" title="Show password">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.6"/></svg>
+          </button>
+        </div>
+        <!-- Password reset. Hidden while the form is in sign-up mode (see
+             `setAccountMode`), where there is no password to forget yet. -->
+        <button type="button" class="auth-inline-link" id="accountForgotBtn">Forgot password?</button>
       </div>
       <!-- Sign-in's only feedback channel, success and failure both — a colour change on a
            line of text, which is nothing at all to a screen reader. `role="status"` makes it
@@ -4127,6 +4210,21 @@
         <span id="accountSubmitLabel">Sign in</span>
       </button>
     </form>
+    <!-- OAuth, offered only where the project actually has the provider enabled — the
+         container stays empty and hidden otherwise, because a Google button that opens a
+         Supabase error page is worse than no Google button. See `renderOAuthButtons` in
+         app.js. -->
+    <div class="auth-oauth" id="accountOAuth" hidden>
+      <div class="auth-divider"><span>or</span></div>
+      <button type="button" class="auth-oauth-btn" data-provider="google">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.68-.06-1.34-.17-1.96H12v3.71h5.38a4.6 4.6 0 01-2 3.02v2.51h3.24c1.89-1.74 2.98-4.3 2.98-7.28z"/><path fill="#34A853" d="M12 22c2.7 0 4.96-.9 6.62-2.43l-3.24-2.51c-.9.6-2.04.96-3.38.96-2.6 0-4.8-1.76-5.59-4.12H3.06v2.59A10 10 0 0012 22z"/><path fill="#FBBC05" d="M6.41 13.9a6 6 0 010-3.8V7.51H3.06a10 10 0 000 8.98l3.35-2.59z"/><path fill="#EA4335" d="M12 5.98c1.47 0 2.79.5 3.83 1.5l2.87-2.87C16.95 2.99 14.7 2 12 2a10 10 0 00-8.94 5.51l3.35 2.59C7.2 7.74 9.4 5.98 12 5.98z"/></svg>
+        Continue with Google
+      </button>
+      <button type="button" class="auth-oauth-btn" data-provider="apple">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.4 12.7c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.9-3.5.9-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.9-2.3.9-1.3 1.3-2.6 1.3-2.7-.1 0-2.6-1-2.6-3.7zM14.2 5.6c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.8 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.8-1.3z"/></svg>
+        Continue with Apple
+      </button>
+    </div>
     <div class="auth-switch" id="accountSwitch"></div>
     <!-- Esc already closes any <dialog> opened via showModal() — this and a backdrop click
          (see the accountDialog click listener in app.js) are the other two ways out that

@@ -213,6 +213,9 @@ const el = {
   accountHeading: document.getElementById("accountHeading"),
   accountSub: document.getElementById("accountSub"),
   accountSwitch: document.getElementById("accountSwitch"),
+  accountOAuth: document.getElementById("accountOAuth"),
+  accountPasswordToggle: document.getElementById("accountPasswordToggle"),
+  accountForgotBtn: document.getElementById("accountForgotBtn"),
   accountEmail: document.getElementById("account-email"),
   accountPassword: document.getElementById("account-password"),
   accountMessage: document.getElementById("account-message"),
@@ -2779,6 +2782,12 @@ function turnBodyHTML(turn, sources, animate, seekable) {
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
  * `threadHTML` — but with no `entry` behind it. */
 function chatThreadHTML(newestIndex) {
+  // The conversation is filed in the library on its first answered turn (see `runChat`), so
+  // until that lands there is no entry id for an action row to act on. Rendering a row
+  // whose buttons could not resolve an entry would be worse than the missing row this
+  // replaces — the very next render, a moment later, has the id and draws them.
+  const chatEntry = selectedId ? findEntry(selectedId) : null;
+  const chatEntryId = chatEntry && !chatEntry.url ? chatEntry.id : null;
   return chatThread
     .map((c, index) => {
       const animate = index === newestIndex;
@@ -2788,6 +2797,7 @@ function chatThreadHTML(newestIndex) {
           ${turnBodyHTML(c, c.sources, animate)}
           ${incompleteHTML(c.incomplete, animate)}
           ${durationHTML(c.durationMs, animate, "Answered in")}
+          ${chatEntryId ? actionRowHTML(chatEntryId, index, "turn") : ""}
           ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
@@ -4352,11 +4362,21 @@ function collapseSourcePillsOverflow(root) {
  * rather than baking it into the HTML, where a long answer with quotes in it would be
  * awkward to embed safely.
  */
-function actionRowHTML(entryId, followupIndex) {
-  const liked = feedback[feedbackKey(entryId, followupIndex)];
-  const followupAttr = followupIndex == null ? "" : ` data-followup-index="${followupIndex}"`;
+/**
+ * Copy / share / like / dislike for one answer.
+ *
+ * `index` names which answer within the entry, and `kind` says which list it is in: a
+ * check's `followups`, or a link-less conversation's `turns`. Null index means the entry's
+ * own main analysis. The third case is the one that was missing entirely — a question asked
+ * with no link got a rendered answer and no action row at all, so the one kind of turn a
+ * reader is most likely to want to copy was the one kind they could not.
+ */
+function actionRowHTML(entryId, index, kind = "followup") {
+  const liked = feedback[feedbackKey(entryId, index)];
+  const indexAttr =
+    index == null ? "" : ` data-${kind === "turn" ? "turn" : "followup"}-index="${index}"`;
   return `
-    <div class="action-row" data-entry-id="${escapeHTML(entryId)}"${followupAttr}>
+    <div class="action-row" data-entry-id="${escapeHTML(entryId)}"${indexAttr}>
       <button type="button" class="action-btn" data-action="copy" aria-label="Copy answer" title="Copy">
         <svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a2 2 0 012-2h9" stroke="currentColor" stroke-width="1.6"/></svg>
       </button>
@@ -4479,8 +4499,17 @@ async function handleClaimsPaneClick(event) {
   const row = btn.closest(".action-row");
   const entry = row ? findEntry(row.dataset.entryId) : null;
   if (!entry) return;
+  // Which answer in this entry: a follow-up under a check, a turn of a link-less
+  // conversation, or — neither attribute present — the entry's own main analysis.
+  const turnIndex = row.dataset.turnIndex != null ? Number(row.dataset.turnIndex) : null;
   const followupIndex = row.dataset.followupIndex != null ? Number(row.dataset.followupIndex) : null;
-  const stored = followupIndex == null ? entry.answer : entry.followups[followupIndex]?.answer;
+  const answerIndex = turnIndex ?? followupIndex;
+  const stored =
+    turnIndex != null
+      ? entry.turns?.[turnIndex]?.answer
+      : followupIndex == null
+        ? entry.answer
+        : entry.followups[followupIndex]?.answer;
   if (stored == null) return;
   // `[t=0:12]` is this app's own syntax for a control that exists on this screen and
   // nowhere else. Copied or shared, it should read as what it means: a moment in the clip.
@@ -4513,7 +4542,7 @@ async function handleClaimsPaneClick(event) {
     return;
   }
   if (action === "like" || action === "dislike") {
-    const key = feedbackKey(entry.id, followupIndex);
+    const key = feedbackKey(entry.id, answerIndex);
     feedback[key] = feedback[key] === action ? undefined : action; // click again to un-set
     if (!feedback[key]) delete feedback[key];
     persistFeedback();
@@ -4603,6 +4632,16 @@ function claimPanesHTML(entry, animate, newestFollowup) {
           ${badgeHTML(claim.verdictKey, animate)}
           <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, entry.sources, seekableEntry(entry))}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
+          <!-- The tap affordance. On the phone layout this box is clipped to two lines of
+               title and two of analysis, and until now the only thing saying so was the
+               fade at the bottom of the text, which reads as a rendering fault at least as
+               often as it reads as "there is more". Marked aria-hidden because the box
+               itself is already a button carrying aria-expanded: a screen reader is told
+               the state properly, and this would only repeat it as stray text. Hidden by
+               CSS at every width where nothing is clipped. -->
+          <span class="claim-expand-cue" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" focusable="false"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
           ${footer}
         </div>`;
     })
@@ -6038,15 +6077,115 @@ function setAccountMode(mode) {
   el.accountSwitch.innerHTML = isSignup
     ? `<span>Already have an account?</span> <button type="button" class="auth-switch-link" data-mode="signin">Sign in</button>`
     : `<span>New to Trase?</span> <button type="button" class="auth-switch-link" data-mode="signup">Create an account</button>`;
+  // Nothing to forget yet while creating an account, and a "Forgot password?" under a
+  // field the reader is about to invent a password for is noise.
+  if (el.accountForgotBtn) el.accountForgotBtn.hidden = isSignup;
+  // A revealed password must not survive the dialog being closed and reopened — the next
+  // person at this screen did not ask to see it.
+  if (el.accountPassword) el.accountPassword.type = "password";
+  if (el.accountPasswordToggle) {
+    el.accountPasswordToggle.setAttribute("aria-pressed", "false");
+    el.accountPasswordToggle.setAttribute("aria-label", "Show password");
+    el.accountPasswordToggle.title = "Show password";
+  }
   el.accountMessage.textContent = "";
   el.accountMessage.classList.remove("error");
 }
+
+/**
+ * Offers only the OAuth providers this Supabase project actually has enabled.
+ *
+ * Asked once per session and cached, because the answer cannot change while the page is
+ * open and each question is a round trip. Both buttons off means the whole block stays
+ * hidden — including its "or" divider, which would otherwise sit under the form dividing
+ * it from nothing.
+ */
+let oauthProviders = null;
+async function renderOAuthButtons() {
+  if (!el.accountOAuth) return;
+  if (!accounts.isConfigured()) {
+    el.accountOAuth.hidden = true;
+    return;
+  }
+  if (oauthProviders === null) {
+    const names = ["google", "apple"];
+    const enabled = await Promise.all(names.map((name) => accounts.providerEnabled(name)));
+    oauthProviders = names.filter((_, i) => enabled[i]);
+  }
+  for (const button of el.accountOAuth.querySelectorAll("[data-provider]")) {
+    button.hidden = !oauthProviders.includes(button.dataset.provider);
+  }
+  el.accountOAuth.hidden = oauthProviders.length === 0;
+}
+
+el.accountOAuth?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-provider]");
+  if (!button) return;
+  el.accountMessage.textContent = "";
+  el.accountMessage.classList.remove("error");
+  try {
+    // Ends in a full-page redirect, so there is no success branch to write — the next
+    // thing that happens is this document being replaced by the provider's.
+    await accounts.signInWithProvider(button.dataset.provider);
+  } catch (error) {
+    el.accountMessage.textContent = error?.message || "That sign-in provider isn't available.";
+    el.accountMessage.classList.add("error");
+  }
+});
+
+/** Reveal/hide the password. The button's label names what it will do next, not what it
+ * just did, so it is correct whether it is read before or after the press. */
+el.accountPasswordToggle?.addEventListener("click", () => {
+  const shown = el.accountPassword.type === "text";
+  el.accountPassword.type = shown ? "password" : "text";
+  el.accountPasswordToggle.setAttribute("aria-pressed", String(!shown));
+  const label = shown ? "Show password" : "Hide password";
+  el.accountPasswordToggle.setAttribute("aria-label", label);
+  el.accountPasswordToggle.title = label;
+  // The caret goes to the end rather than to wherever the type change left it, and focus
+  // comes back to the field — pressing this is a step in typing a password, not a detour.
+  el.accountPassword.focus();
+  const end = el.accountPassword.value.length;
+  el.accountPassword.setSelectionRange?.(end, end);
+});
+
+/**
+ * "Forgot password?" — sends the reset email.
+ *
+ * The message is the same whether or not the address has an account, deliberately: saying
+ * "no account with that email" turns this box into a way of finding out who has one. See
+ * `requestPasswordReset` in auth.js.
+ */
+el.accountForgotBtn?.addEventListener("click", async () => {
+  const email = el.accountEmail.value.trim();
+  el.accountMessage.classList.remove("error");
+  if (!email) {
+    el.accountMessage.textContent = "Enter your email address first, then tap Forgot password.";
+    el.accountEmail.focus();
+    return;
+  }
+  el.accountForgotBtn.disabled = true;
+  el.accountMessage.textContent = "Sending…";
+  try {
+    await accounts.requestPasswordReset(email);
+    el.accountMessage.textContent = `If there's an account for ${email}, a reset link is on its way.`;
+  } catch (error) {
+    el.accountMessage.textContent = error?.message || "Couldn't send the reset email.";
+    el.accountMessage.classList.add("error");
+  } finally {
+    el.accountForgotBtn.disabled = false;
+  }
+});
 
 /** Opened from the settings dialog's Profile tab ("Sign in" button) rather than its own
  * icon — see the account-dialog comment in index.html for why sign-in/up still needs a
  * dialog of its own even though the rest of account state moved into Settings. */
 function openAccountDialog() {
   setAccountMode("signin");
+  // Not awaited: the dialog opens now, and the buttons appear a moment later if this
+  // project has them. Waiting on two network round trips before showing a sign-in form
+  // would be the feature charging everyone for the case where it is switched off.
+  renderOAuthButtons();
   el.accountDialog.showModal();
 }
 
