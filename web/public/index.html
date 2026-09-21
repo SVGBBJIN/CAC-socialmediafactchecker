@@ -209,6 +209,10 @@
     [data-sidebar="collapsed"] .sidebar-header .wordmark,
     [data-sidebar="collapsed"] .new-check-label,
     [data-sidebar="collapsed"] .search,
+    /* The rail has no room for the row this is about, and the list it sits under is
+       hidden here too — so is the offer. The record and its timer are untouched; undo is
+       simply not reachable until the sidebar is expanded again. */
+    [data-sidebar="collapsed"] .undo-banner,
     [data-sidebar="collapsed"] .lib-list {
       display: none;
     }
@@ -261,6 +265,33 @@
   .lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
 
   .lib-empty { font-size: 12px; color: var(--muted); padding: 10px; }
+
+  /* Sits directly under the list rather than floating over the page: the row it is talking
+     about was in that list, and a banner in the same column is read as being about it.
+     `flex-shrink: 0` for the same reason `.sidebar-bottom` has it — the list scrolls, this
+     doesn't get squeezed by it. */
+  .undo-banner {
+    flex-shrink: 0;
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface-raised);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+  .undo-banner[hidden] { display: none; }
+  .undo-banner-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .undo-banner-btn {
+    flex-shrink: 0;
+    border: 0; background: none; padding: 0;
+    color: var(--accent);
+    font-family: var(--font-body); font-size: 12px; font-weight: 600;
+    cursor: pointer;
+  }
+  .undo-banner-btn:hover { text-decoration: underline; }
+  .undo-banner-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
   /* Pinned to the sidebar's bottom edge regardless of how tall `.lib-list` is — `.sidebar`
      is a flex column, and `margin-top: auto` claims whatever space the list didn't, the
@@ -3697,6 +3728,14 @@
       </button>
       <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks…" />
       <ul class="lib-list" id="libList"></ul>
+      <!-- The undo half of deleting a check. Deleting is immediate now (no confirmation
+           dialog in front of it — see deleteEntry in app.js); this is the safety net that
+           replaced it, and it retires itself after UNDO_DELETE_MS. `role="status"` so the
+           deletion is announced rather than happening silently for a screen reader. -->
+      <div class="undo-banner" id="undoBanner" role="status" hidden>
+        <span class="undo-banner-text" id="undoBannerText"></span>
+        <button type="button" class="undo-banner-btn" id="undoBannerBtn">Undo</button>
+      </div>
       <div class="sidebar-bottom">
         <!-- Today's check allowance — see the CSS rule's own comment for why it isn't
              gated on sign-in state the way the block below it is. -->
@@ -4199,21 +4238,6 @@
       <div class="actions">
         <button type="button" class="secondary" id="link-confirm-cancel">Cancel</button>
         <button type="submit" id="link-confirm-proceed">Check anyway</button>
-      </div>
-    </form>
-  </dialog>
-
-  <!-- Same shape as link-confirm-dialog above, for the one other place this app asks
-       before doing something it can't undo. `#delete-confirm-body` is filled in per entry
-       (see confirmDeleteEntry in app.js) rather than a fixed string, so a reader deleting
-       the wrong row by name has one more chance to notice. -->
-  <dialog class="passphrase" id="delete-confirm-dialog" aria-labelledby="delete-confirm-heading">
-    <form method="dialog" id="delete-confirm-form">
-      <h2 id="delete-confirm-heading">Delete this check?</h2>
-      <p id="delete-confirm-body"></p>
-      <div class="actions">
-        <button type="button" class="secondary" id="delete-confirm-cancel">Cancel</button>
-        <button type="submit" class="danger" id="delete-confirm-proceed">Delete</button>
       </div>
     </form>
   </dialog>

@@ -163,7 +163,21 @@ unmirrored. The larger pieces:
   push" these mostly do not become components; but `BrandHud`/`LoadingDial` were retuned
   and those two *are* components.
 
-### 3. Naming: the mirror and the remote call the same things different names
+### 3. Delete-a-check is now undo, not confirm (new pattern, nothing in either DS copy)
+
+The confirmation dialog that stood in front of deleting a library row is gone. Deleting is
+immediate, and an **undo banner** (`.undo-banner` — text + an `Undo` text button, under
+`.lib-list` in the sidebar, self-retiring after 8s) is the safety net instead. Neither the
+mirror nor the remote has any equivalent, and the remote's `LibraryItem`/sidebar work
+assumes the dialog.
+
+What the DS is owed: the banner as a component (it is generic — a one-line message plus a
+single inline action, hidden in the collapsed rail along with the list it belongs to), and
+a note that the delete-confirm dialog pattern is retired product-side. The tokens it uses
+(`--surface-raised`, `--border`, `--ink-dim`, `--accent`) are all existing ones, so this
+costs no new token — but see §1: the values it renders against are still stale.
+
+### 4. Naming: the mirror and the remote call the same things different names
 
 Ported in, the DS's `Matrix`/`MatrixLoader` were renamed to fit the product's existing
 `.iris-wrap` container. Nothing has reconciled that since, so a naive push creates
@@ -180,7 +194,7 @@ duplicates rather than updates.
 **Decide the naming before pushing**, and search the remote for the *renamed* classes, not
 the originals.
 
-### 4. The README disagrees with the product in two places
+### 5. The README disagrees with the product in two places
 
 - **`--font-display`.** The README and the remote `tokens.css` both say one grotesque
   ("Instrument Sans") for display and body, "differentiated by weight rather than a
