@@ -26,8 +26,11 @@ import {
   activeAt,
 } from "./timestamps.js";
 import { parseBlocks } from "./markdown.js";
-import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
+import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
+import { filterLibrary, platformsIn, verdictsIn } from "./library-search.js";
+import { TIERS, TIER_LABELS, ALL_TIERS, classifySource, normaliseTiers } from "./source-quality.js";
 
 const LIBRARY_KEY = "trase.library.v1";
 const ACTIVITY_KEY = "trase.activity.v1";
@@ -137,6 +140,7 @@ const el = {
   newCheckBtn: document.getElementById("newCheckBtn"),
   libList: document.getElementById("libList"),
   searchInput: document.getElementById("searchInput"),
+  libFilters: document.getElementById("libFilters"),
   claimsPane: document.getElementById("claimsPane"),
   claimsScrollHint: document.getElementById("claimsScrollHint"),
   videoTitle: document.getElementById("videoTitle"),
@@ -178,6 +182,10 @@ const el = {
   settingLegacyCards: document.getElementById("setting-legacy-cards"),
   settingFontSize: document.getElementById("setting-font-size"),
   settingTheme: document.getElementById("setting-theme"),
+  settingSourceTiers: document.getElementById("setting-source-tiers"),
+  exportDataBtn: document.getElementById("exportDataBtn"),
+  deleteAllBtn: document.getElementById("deleteAllBtn"),
+  deleteAllSub: document.getElementById("deleteAllSub"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
   searchStatus: document.getElementById("searchStatus"),
   imageBtn: document.getElementById("imageBtn"),
@@ -205,6 +213,9 @@ const el = {
   accountHeading: document.getElementById("accountHeading"),
   accountSub: document.getElementById("accountSub"),
   accountSwitch: document.getElementById("accountSwitch"),
+  accountOAuth: document.getElementById("accountOAuth"),
+  accountPasswordToggle: document.getElementById("accountPasswordToggle"),
+  accountForgotBtn: document.getElementById("accountForgotBtn"),
   accountEmail: document.getElementById("account-email"),
   accountPassword: document.getElementById("account-password"),
   accountMessage: document.getElementById("account-message"),
@@ -297,7 +308,7 @@ let pendingChat = null; // { question, error? }
 
 const SETTINGS_KEY = "trase.settings.v1";
 const DEFAULT_SETTINGS = {
-  theme: "dark", // "dark" | "light"
+  theme: "dark", // "dark" | "light" | "system"
   reducedMotion: false,
   highContrast: false,
   fontSize: "normal", // "normal" | "large"
@@ -307,6 +318,11 @@ const DEFAULT_SETTINGS = {
   legacyCards: false,
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
+  // Which kinds of publisher a check may cite (see public/source-quality.js). Sent with every
+  // request and applied server-side to the search results themselves, so this is a filter
+  // on the evidence rather than on the list under the answer. All four by default — the
+  // app must not quietly narrow what it will look at without being asked.
+  sourceTiers: [...ALL_TIERS],
 };
 
 function loadSettings() {
@@ -332,9 +348,27 @@ let serverConfig = null; // last /api/config response, so the settings dialog ca
 
 /** Stamps the accessibility settings onto the root element so the CSS in index.html can
  * key off them. Called once at startup and again on every settings change. */
+/**
+ * `prefers-color-scheme`, watched rather than sampled.
+ *
+ * "System" is only worth having if it keeps following the system: a laptop that switches to
+ * light at sunrise should take the app with it, without a reload. The listener is attached
+ * once, at module scope, and does nothing while the setting is Dark or Light.
+ */
+const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)");
+systemDark?.addEventListener?.("change", () => {
+  if (settings.theme === "system") applySettings();
+});
+
+/** Dark or light, resolving "system" against what the OS is asking for right now. */
+function resolvedTheme() {
+  if (settings.theme === "system") return systemDark?.matches === false ? "light" : "dark";
+  return settings.theme === "light" ? "light" : "dark";
+}
+
 function applySettings() {
   const root = document.documentElement;
-  setAttrIf(root, "data-theme", settings.theme === "light", "light");
+  setAttrIf(root, "data-theme", resolvedTheme() === "light", "light");
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
   // Purely a CSS switch: every claim pane already carries its `verdict-*` class whichever
@@ -1345,6 +1379,31 @@ function renderInline(text, sources, seekable) {
 }
 
 /**
+ * A claim's `[[claim: …]]` label as the heading of its card.
+ *
+ * Two things this is not allowed to be, both of which it was while it went through
+ * `escapeHTML` alone:
+ *
+ * - **Raw app syntax.** The model writes `[t=0:01-0:03]` wherever it names the moment a
+ *   claim is made, and that is as often in the label as in the body. The body ran through
+ *   `renderInline` and got a chip; the title didn't and showed the marker verbatim — so
+ *   whether a claim got a tappable chip came down to where the model happened to put the
+ *   marker, which reads as a broken parser because it is one. Same for a `[n]` citation.
+ * - **The claim stated as fact.** "NASA faked the moon landing" set in heading type, with a
+ *   Contradicted badge beside it, is the app appearing to assert the thing it is about to
+ *   refute — and a reader scrolling past the badge takes the heading at face value. The
+ *   label says whose sentence this is. It is a `<span>` inside the heading rather than part
+ *   of the text so that copy, share and the stored answer are untouched: this is framing
+ *   the app adds for the reader, not words put in the model's mouth.
+ */
+function claimTitleHTML(title, sources, seekable) {
+  return (
+    `<span class="claim-title-label">Claim:</span> ` +
+    `<span class="claim-title-text">${renderInline(String(title ?? ""), sources, seekable)}</span>`
+  );
+}
+
+/**
  * A parsed block (see markdown.js) as HTML.
  *
  * markdown.js decides the shape — what is a list, what nests inside what — and this
@@ -2023,13 +2082,88 @@ el.claimsScrollHint.addEventListener("click", () => {
 
 /* ---------------------------------------------------------------- sidebar */
 
+/**
+ * Which chips are on. Deliberately not persisted: a filter is a thing you are doing right
+ * now, and coming back tomorrow to a library that silently shows two of its twelve rows is
+ * the app hiding work with no visible cause.
+ */
+let libraryFilters = { verdict: null, platform: null };
+
+/**
+ * The chip row under the search box — one per verdict and platform the library actually
+ * holds (see `verdictsIn`/`platformsIn`).
+ *
+ * Rebuilt on every `renderLibrary` rather than diffed: it is at most a dozen buttons, and
+ * the alternative is keeping a second model of what is on screen in step with the library,
+ * which is the bug this kind of code always eventually has. A chip that disappears because
+ * its last row was deleted takes its own filter with it — otherwise the library would be
+ * filtered by a control no longer on screen.
+ */
+function renderLibraryFilters() {
+  const verdicts = verdictsIn(library);
+  const platforms = platformsIn(library);
+
+  if (libraryFilters.verdict && !verdicts.includes(libraryFilters.verdict)) libraryFilters.verdict = null;
+  if (libraryFilters.platform && !platforms.includes(libraryFilters.platform)) libraryFilters.platform = null;
+
+  // One kind of thing is not a choice: a library of nothing but TikToks has no use for a
+  // "TikTok" chip, and offering it is a control that can only ever do nothing or hide
+  // everything.
+  const showVerdicts = verdicts.length > 1;
+  const showPlatforms = platforms.length > 1;
+  el.libFilters.hidden = !showVerdicts && !showPlatforms;
+  el.libFilters.replaceChildren();
+  if (el.libFilters.hidden) return;
+
+  const chip = (kind, value, label, withDot) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "lib-chip";
+    button.dataset.filter = kind;
+    button.dataset.value = value;
+    if (withDot) button.dataset.verdict = value;
+    const on = libraryFilters[kind] === value;
+    button.setAttribute("aria-pressed", String(on));
+    // The chip's own name is the filter, not "toggle": a screen reader reading
+    // "Contradicted, pressed" says both what it does and whether it is doing it.
+    button.setAttribute("aria-label", label);
+    if (withDot) {
+      const dot = document.createElement("span");
+      dot.className = "lib-chip-dot";
+      button.append(dot);
+    }
+    button.append(document.createTextNode(label));
+    return button;
+  };
+
+  if (showVerdicts) {
+    for (const key of verdicts) el.libFilters.append(chip("verdict", key, VERDICTS[key].label, true));
+  }
+  if (showPlatforms) {
+    for (const name of platforms) el.libFilters.append(chip("platform", name, name, false));
+  }
+}
+
+/** A chip click: on, or off if it was already the one on. One value per kind — these are
+ * radio-ish rather than multi-select, because "contradicted or disputed" is a query nobody
+ * has yet asked for and a set of half-lit chips is harder to read than one lit one. */
+el.libFilters?.addEventListener("click", (event) => {
+  const chip = event.target.closest(".lib-chip");
+  if (!chip) return;
+  const { filter, value } = chip.dataset;
+  libraryFilters[filter] = libraryFilters[filter] === value ? null : value;
+  renderLibrary(el.searchInput.value);
+});
+
 function renderLibrary(filter = "") {
   // The open check's own title and status live in the shell title bar too, and both change
   // under a running check without the selection ever changing — see `updateShellTopbar`.
   updateShellTopbar();
   el.libList.replaceChildren();
-  const needle = filter.trim().toLowerCase();
-  const visible = needle ? library.filter((e) => e.title.toLowerCase().includes(needle)) : library;
+  renderLibraryFilters();
+  // Text plus whichever chips are on — see public/library-search.js for what a row is
+  // searched by, and why it is no longer only the title.
+  const visible = filterLibrary(library, { ...libraryFilters, text: filter });
 
   if (visible.length === 0) {
     const empty = document.createElement("li");
@@ -2166,12 +2300,36 @@ function fillLibThumb(thumb, entry) {
   icon.src = `${origin}/favicon.ico`;
 }
 
+/**
+ * A finished check of a post that turned up no claim at all.
+ *
+ * Every condition here is something the app knows rather than infers: the check ran to the
+ * end (not running, not errored, not cut short), it had a post as its subject (`url` — a
+ * link-less conversation is a different thing entirely, see `runChat`), and the model
+ * opened no `[[claim: …]]` block. See `NO_CLAIMS` in claims.js for why that last fact is a
+ * state of its own and not the "Insufficient evidence" it used to be shown as.
+ *
+ * `claims` is `null` for an answer with no markers and an array otherwise, so an empty
+ * array is impossible here — but it is tested for anyway, because the difference between
+ * "no claims" and "zero claims" is exactly what this function is about.
+ */
+function foundNoClaims(entry) {
+  return Boolean(
+    entry?.url &&
+      entry.status === "done" &&
+      !entry.incomplete &&
+      !(entry.claims?.length > 0) &&
+      !entry.verdictKey,
+  );
+}
+
 function dotClassFor(entry) {
   if (entry.status === "running") return "warn";
   if (entry.status === "error") return "muted";
   // A saved link-less conversation (see `runChat`) has no single verdict — it's a stack of
   // independently-answered questions, not one claim under examination.
   if (!entry.url) return "muted";
+  if (foundNoClaims(entry)) return NO_CLAIMS.css;
   return VERDICTS[entry.verdictKey]?.css ?? "muted";
 }
 
@@ -2211,6 +2369,7 @@ function statusLabel(entry) {
   // not be filed in the library under one. "Unclassified" would be a truthful label and a
   // useless one — it reads as a property of the claim rather than of the check.
   if (entry.incomplete && !entry.verdictKey) return entry.incomplete.label;
+  if (foundNoClaims(entry)) return NO_CLAIMS.label;
   return VERDICTS[entry.verdictKey]?.label ?? "Unclassified";
 }
 
@@ -2370,7 +2529,84 @@ function openEntryInPane(entry) {
   else renderErrorCard({ ...entry, error: entry.error ?? RUNNING_ELSEWHERE_MESSAGE });
 }
 
-function selectEntry(id) {
+/* ---------------------------------------------------------------- the address bar
+
+ * A check's own URL, `/c/<id>` (see public/deeplink.js for the shape and for why it is
+ * local to this browser). Three things it buys, none of which `/` could: a check can be
+ * bookmarked, it can be opened in a second tab, and the browser's Back button walks back
+ * through the checks that were read rather than straight out of the app.
+ *
+ * `pushState`/`replaceState` only — never an assignment to `location`, which would reload
+ * the page and throw away the whole in-memory run state (`inFlight`, the stream, the video
+ * element) to arrive at markup the app was already showing.
+ */
+
+/** The address the browser should be showing for whatever is selected right now. */
+function currentCheckPath() {
+  const entry = selectedId ? findEntry(selectedId) : null;
+  // Only a real, saved check gets an address. A free-standing chat turn has a library entry
+  // but no `url`, and pointing a shareable link at "a conversation on this device" is a
+  // promise the local-only storage can't keep as well as it can for a check.
+  return entry?.url ? pathForCheck(entry.id) : "/";
+}
+
+/**
+ * Points the address bar at what is on screen.
+ *
+ * `replace` for anything that isn't the reader navigating — restoring at startup, a
+ * selected entry being deleted — so those don't become Back-button steps to a check that
+ * no longer exists or was never chosen.
+ */
+function syncCheckLocation({ replace = false } = {}) {
+  const path = currentCheckPath();
+  if (path === location.pathname) return;
+  try {
+    history[replace ? "replaceState" : "pushState"]({ checkId: selectedId }, "", path + location.search);
+  } catch {
+    // A sandboxed or `file://` document refuses history writes. The app is fully usable
+    // without an address bar that tracks it; this is the one feature that quietly isn't.
+  }
+}
+
+/** The link the Share button hands out, or the app's own address if this entry has none. */
+function shareLinkFor(entry) {
+  return (entry?.url ? shareURL(location.origin, entry.id) : null) ?? location.origin + "/";
+}
+
+/** What the share sheet calls it — the post's own title when one resolved, which is what a
+ * recipient recognises, rather than "Trase fact-check" for every check ever shared. */
+function shareTitleFor(entry) {
+  const title = String(entry?.title ?? "").trim();
+  return title && title !== entry?.url ? `Fact-check: ${title}` : "Trase fact-check";
+}
+
+/**
+ * Back/Forward between checks.
+ *
+ * Guarded on `inFlight` for the same reason `selectEntry` is — a running turn writes into
+ * the pane it was started against — and the address is put back where it was so the button
+ * having done nothing is at least consistent with what the URL says.
+ */
+window.addEventListener("popstate", () => {
+  const id = checkIdFromPath(location.pathname);
+  if (inFlight) {
+    syncCheckLocation({ replace: true });
+    return;
+  }
+  if (id && findEntry(id)) {
+    selectEntry(id, { fromHistory: true });
+    return;
+  }
+  if (id) {
+    // A Back into a check that has since been deleted. Say so rather than silently landing
+    // on the empty state, which reads as the app having lost it.
+    showMissingCheck(id);
+    return;
+  }
+  startNewCheck({ fromHistory: true });
+});
+
+function selectEntry(id, { fromHistory = false } = {}) {
   if (inFlight) return; // Don't let a click yank the pane out from under a running turn.
   // Picking a check is the whole reason the drawer was opened, so it has done its job.
   // No-op above phone width, where the sidebar is a permanent column.
@@ -2381,6 +2617,9 @@ function selectEntry(id) {
   renderLibrary(el.searchInput.value);
   openEntryInPane(findEntry(id));
   updateComposerMode();
+  // A Back/Forward press is the browser telling us where it already is — pushing another
+  // entry for it would make the button walk on the spot.
+  if (!fromHistory) syncCheckLocation();
 }
 
 /** Removes one entry from the library — local storage immediately, the cloud row
@@ -2411,6 +2650,9 @@ function deleteEntry(id) {
     pendingChat = null;
     renderEmptyState();
     updateComposerMode();
+    // Replace rather than push: the check just went away, so a Back press must not offer
+    // to return to its address. The undo banner is what brings it back, and it re-selects.
+    syncCheckLocation({ replace: true });
   }
   persistLibrary();
   renderLibrary(el.searchInput.value);
@@ -2530,7 +2772,7 @@ function turnBodyHTML(turn, sources, animate, seekable) {
   return turn.claims
     .map(
       (claim) => `
-      <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+      <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, sources, seekable)}</p>
       <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
       ${badgeHTML(claim.verdictKey, animate)}`,
     )
@@ -2540,6 +2782,12 @@ function turnBodyHTML(turn, sources, animate, seekable) {
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
  * `threadHTML` — but with no `entry` behind it. */
 function chatThreadHTML(newestIndex) {
+  // The conversation is filed in the library on its first answered turn (see `runChat`), so
+  // until that lands there is no entry id for an action row to act on. Rendering a row
+  // whose buttons could not resolve an entry would be worse than the missing row this
+  // replaces — the very next render, a moment later, has the id and draws them.
+  const chatEntry = selectedId ? findEntry(selectedId) : null;
+  const chatEntryId = chatEntry && !chatEntry.url ? chatEntry.id : null;
   return chatThread
     .map((c, index) => {
       const animate = index === newestIndex;
@@ -2549,6 +2797,7 @@ function chatThreadHTML(newestIndex) {
           ${turnBodyHTML(c, c.sources, animate)}
           ${incompleteHTML(c.incomplete, animate)}
           ${durationHTML(c.durationMs, animate, "Answered in")}
+          ${chatEntryId ? actionRowHTML(chatEntryId, index, "turn") : ""}
           ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
@@ -2734,7 +2983,7 @@ async function runChat(question) {
  * this app is running — one at a time is still the rule, and it is now visible in the one
  * control that would otherwise start a second.
  */
-function startNewCheck() {
+function startNewCheck({ fromHistory = false } = {}) {
   // The one turn that cannot simply be left running: a chat or a follow-up writes into
   // `chatThread`/`pendingFollowup`, which is the pane state this function is about to
   // clear, so it would finish by drawing the conversation the reader just left on top of
@@ -2753,7 +3002,39 @@ function startNewCheck() {
   renderLibrary(el.searchInput.value);
   renderEmptyState();
   updateComposerMode();
+  if (!fromHistory) syncCheckLocation();
   el.linkInput.focus();
+}
+
+/**
+ * `/c/<id>` for a check this browser doesn't have.
+ *
+ * The honest state for a local-only address: the link is well-formed and the check it names
+ * was run somewhere else — another browser, another device, or here before the library was
+ * cleared. Worth its own card because the alternative, the ordinary empty state, reads as
+ * the app having lost the check rather than never having had it.
+ */
+function showMissingCheck(id) {
+  selectedId = null;
+  pendingFollowup = null;
+  chatThread = [];
+  pendingChat = null;
+  updatePaneMode();
+  renderLibrary(el.searchInput.value);
+  setClaimsPaneHTML(`
+    <div class="claim-card" role="status">
+      <p class="claim-title in"><span class="claim-title-text">This check isn't on this device</span></p>
+      <p class="claim-text in">
+        Checks are kept in the browser that ran them, so a <code>/c/…</code> link opens only
+        for the person who made it, on the device they made it on. Paste the original link
+        below to run the check here.
+      </p>
+    </div>`);
+  revealIn(el.claimsPane);
+  updateComposerMode();
+  // Kept in the address bar deliberately: a reload should land on the same explanation, and
+  // the reader may still want to copy the id out of it.
+  void id;
 }
 
 /* ---------------------------------------------------------------- video pane */
@@ -3636,7 +3917,7 @@ function loadingClaimHTML(claim, index, sources, seekable) {
   return `
     <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       ${done ? badgeHTML(claim.verdictKey, false) : ""}
-      <p class="claim-title in">${escapeHTML(claim.title)}</p>
+      <p class="claim-title in">${claimTitleHTML(claim.title, sources, seekable)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
     </div>`;
 }
@@ -3873,6 +4154,15 @@ function badgeHTML(verdictKey, animate) {
  */
 function verdictHTML(entry, animate) {
   if (entry.incomplete && !entry.verdictKey) return "";
+  // A finished check that found nothing to check says so, rather than borrowing the one
+  // verdict that means "we looked and couldn't settle it" — see `NO_CLAIMS` in claims.js.
+  if (foundNoClaims(entry)) {
+    const icon = BADGE_ICONS[NO_CLAIMS.css] ?? "";
+    return `
+    <div class="badges">
+      <span ${revealAttrs(`badge verdict ${NO_CLAIMS.css}`, animate)}><svg class="badge-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">${icon}</svg>${escapeHTML(NO_CLAIMS.label)}</span>
+    </div>`;
+  }
   return badgeHTML(entry.verdictKey ?? "insufficient", animate);
 }
 
@@ -3918,16 +4208,35 @@ function durationHTML(ms, animate, label = "Checked in") {
  * different width. `excerpt` isn't fetched by anything today, so this is always just the
  * domain and title in practice; the field is still handled here so a future ledger entry
  * that does carry one needs no template changes. */
+/**
+ * What kind of publisher a source is, as a small badge beside its domain.
+ *
+ * The failure it exists for: a claim answered **Corroborated** citing a Reddit thread looks
+ * exactly like one citing a statistics office, because a pill is a pill. The badge is the
+ * difference, said in one word the reader can weigh for themselves — it labels provenance,
+ * it does not rate truth. See public/source-quality.js.
+ *
+ * The tier is taken off the row when the server sent one and derived here when it didn't,
+ * so answers stored before this existed get labelled on the way to the screen rather than
+ * needing a migration.
+ */
+function tierBadgeHTML(s) {
+  const tier = s?.tier ?? classifySource(s ?? {});
+  const meta = TIER_LABELS[tier];
+  if (!meta) return "";
+  return `<span class="source-tier" data-tier="${tier}" title="${escapeHTML(meta.hint)}">${escapeHTML(meta.label)}</span>`;
+}
+
 function sourceDetailHTML(s) {
   return `
-    <span class="source-expand-domain">${escapeHTML(s.domain)}</span>
+    <span class="source-expand-domain">${escapeHTML(s.domain)}${tierBadgeHTML(s)}</span>
     ${s.title ? `<span class="source-expand-title">${escapeHTML(s.title)}</span>` : ""}
     ${s.excerpt ? `<span class="source-expand-excerpt">“${escapeHTML(s.excerpt)}”</span>` : ""}`;
 }
 
 function sourcePillHTML(s) {
   const hasDetail = Boolean(s.title || s.excerpt);
-  return `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer"><span class="source-pill-domain">${escapeHTML(s.domain)}</span>${
+  return `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" data-tier="${s?.tier ?? classifySource(s ?? {})}"><span class="source-pill-domain">${escapeHTML(s.domain)}</span>${tierBadgeHTML(s)}${
     hasDetail ? `<span class="source-pill-popover">${sourceDetailHTML(s)}</span>` : ""
   }</a>`;
 }
@@ -4053,11 +4362,21 @@ function collapseSourcePillsOverflow(root) {
  * rather than baking it into the HTML, where a long answer with quotes in it would be
  * awkward to embed safely.
  */
-function actionRowHTML(entryId, followupIndex) {
-  const liked = feedback[feedbackKey(entryId, followupIndex)];
-  const followupAttr = followupIndex == null ? "" : ` data-followup-index="${followupIndex}"`;
+/**
+ * Copy / share / like / dislike for one answer.
+ *
+ * `index` names which answer within the entry, and `kind` says which list it is in: a
+ * check's `followups`, or a link-less conversation's `turns`. Null index means the entry's
+ * own main analysis. The third case is the one that was missing entirely — a question asked
+ * with no link got a rendered answer and no action row at all, so the one kind of turn a
+ * reader is most likely to want to copy was the one kind they could not.
+ */
+function actionRowHTML(entryId, index, kind = "followup") {
+  const liked = feedback[feedbackKey(entryId, index)];
+  const indexAttr =
+    index == null ? "" : ` data-${kind === "turn" ? "turn" : "followup"}-index="${index}"`;
   return `
-    <div class="action-row" data-entry-id="${escapeHTML(entryId)}"${followupAttr}>
+    <div class="action-row" data-entry-id="${escapeHTML(entryId)}"${indexAttr}>
       <button type="button" class="action-btn" data-action="copy" aria-label="Copy answer" title="Copy">
         <svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M5 15V6a2 2 0 012-2h9" stroke="currentColor" stroke-width="1.6"/></svg>
       </button>
@@ -4072,6 +4391,49 @@ function actionRowHTML(entryId, followupIndex) {
       </button>
       <span class="action-feedback"></span>
     </div>`;
+}
+
+/**
+ * Text onto the clipboard, by whichever of the two routes this browser actually allows.
+ *
+ * `navigator.clipboard` is the right API and it is missing or throws in more places than is
+ * comfortable: any page not on a secure origin (a phone opening a LAN dev server by IP),
+ * Safari outside a user gesture the engine still recognises, and permission policies that
+ * reject the write without saying so. The old code treated that rejection as "couldn't
+ * share" and stopped, which is how a desktop browser with no Web Share API ended up
+ * offering nothing at all.
+ *
+ * So the deprecated `execCommand("copy")` stays as the floor. It is synchronous, it works
+ * on insecure origins, and it is what every "copy" button on the web fell back to before
+ * the async API existed. The textarea is positioned off-screen rather than hidden —
+ * `display: none` and `visibility: hidden` both make the selection uncopyable — and
+ * `readOnly` keeps the on-screen keyboard down on a phone while still allowing selection.
+ *
+ * @returns whether the text is now on the clipboard, so the caller can say so honestly.
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through: a rejection here says this route is unavailable, not that copying is.
+  }
+  try {
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.setAttribute("readonly", "");
+    field.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+    document.body.append(field);
+    field.select();
+    field.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    field.remove();
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 function flashActionFeedback(row, message) {
@@ -4137,8 +4499,17 @@ async function handleClaimsPaneClick(event) {
   const row = btn.closest(".action-row");
   const entry = row ? findEntry(row.dataset.entryId) : null;
   if (!entry) return;
+  // Which answer in this entry: a follow-up under a check, a turn of a link-less
+  // conversation, or — neither attribute present — the entry's own main analysis.
+  const turnIndex = row.dataset.turnIndex != null ? Number(row.dataset.turnIndex) : null;
   const followupIndex = row.dataset.followupIndex != null ? Number(row.dataset.followupIndex) : null;
-  const stored = followupIndex == null ? entry.answer : entry.followups[followupIndex]?.answer;
+  const answerIndex = turnIndex ?? followupIndex;
+  const stored =
+    turnIndex != null
+      ? entry.turns?.[turnIndex]?.answer
+      : followupIndex == null
+        ? entry.answer
+        : entry.followups[followupIndex]?.answer;
   if (stored == null) return;
   // `[t=0:12]` is this app's own syntax for a control that exists on this screen and
   // nowhere else. Copied or shared, it should read as what it means: a moment in the clip.
@@ -4146,33 +4517,32 @@ async function handleClaimsPaneClick(event) {
 
   const action = btn.dataset.action;
   if (action === "copy") {
-    try {
-      await navigator.clipboard.writeText(text);
-      flashActionFeedback(row, "Copied");
-    } catch {
-      flashActionFeedback(row, "Couldn't copy");
-    }
+    flashActionFeedback(row, (await copyText(text)) ? "Copied" : "Couldn't copy");
     return;
   }
   if (action === "share") {
+    // What a reader means by sharing a check is the check, not a transcript of it — so the
+    // link comes first and the answer rides along as the text. `shareLinkFor` is a real
+    // openable address (see the `/c/<id>` router), which is the thing the old code could
+    // never offer and the reason its fallback read as a failure.
+    const link = shareLinkFor(entry);
     if (navigator.share) {
       try {
-        await navigator.share({ title: "Trase fact-check", text, url: entry.url });
-      } catch {
-        // AbortError from the user cancelling the share sheet isn't a failure worth reporting.
+        await navigator.share({ title: shareTitleFor(entry), text, url: link });
+        return;
+      } catch (error) {
+        // Cancelling the sheet is not a failure. Anything else is the sheet refusing the
+        // share outright (a non-secure context, a payload it won't take, a desktop build
+        // that advertises `share` and then throws), and falling through to the clipboard is
+        // strictly better than telling the reader it didn't work.
+        if (error?.name === "AbortError") return;
       }
-      return;
     }
-    try {
-      await navigator.clipboard.writeText(`${text}\n\n${entry.url}`);
-      flashActionFeedback(row, "Copied to share");
-    } catch {
-      flashActionFeedback(row, "Couldn't share");
-    }
+    flashActionFeedback(row, (await copyText(`${text}\n\n${link}`)) ? "Link copied" : "Couldn't copy");
     return;
   }
   if (action === "like" || action === "dislike") {
-    const key = feedbackKey(entry.id, followupIndex);
+    const key = feedbackKey(entry.id, answerIndex);
     feedback[key] = feedback[key] === action ? undefined : action; // click again to un-set
     if (!feedback[key]) delete feedback[key];
     persistFeedback();
@@ -4260,8 +4630,18 @@ function claimPanesHTML(entry, animate, newestFollowup) {
                label that used to sit here is gone, since the boxes are laid out side by
                side and counting them off was numbering what the reader can already see. -->
           ${badgeHTML(claim.verdictKey, animate)}
-          <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+          <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, entry.sources, seekableEntry(entry))}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
+          <!-- The tap affordance. On the phone layout this box is clipped to two lines of
+               title and two of analysis, and until now the only thing saying so was the
+               fade at the bottom of the text, which reads as a rendering fault at least as
+               often as it reads as "there is more". Marked aria-hidden because the box
+               itself is already a button carrying aria-expanded: a screen reader is told
+               the state properly, and this would only repeat it as stray text. Hidden by
+               CSS at every width where nothing is clipped. -->
+          <span class="claim-expand-cue" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" focusable="false"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
           ${footer}
         </div>`;
     })
@@ -4445,7 +4825,15 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
-    body: JSON.stringify(clipHints ? { messages, clipHints } : { messages }),
+    // `sourceTiers` rides along on every turn rather than being remembered server-side:
+    // the API is stateless and the rate limiter's in-memory store already shows what
+    // happens to per-client state on a serverless host. See `normaliseTiers` in api/chat.js
+    // for the validation that makes accepting it from the browser safe.
+    body: JSON.stringify({
+      messages,
+      ...(clipHints ? { clipHints } : {}),
+      sourceTiers: normaliseTiers(settings.sourceTiers),
+    }),
     signal,
   });
 
@@ -5136,6 +5524,13 @@ async function runCheck(url, existingId, hint) {
   inFlightKind = "check";
   stopRequested = false;
   setComposerRunning(true);
+  // The link has been consumed by this run, and the moment the check lands the composer
+  // relabels itself "Ask a follow-up…" — so leaving the URL sitting in the field means the
+  // one key a reader is most likely to press next (Enter, on what reads like an empty
+  // follow-up box) silently re-checks the same link and spends another turn. `runChat` and
+  // `runFollowup` already clear it for exactly this reason; this is the path that didn't.
+  el.linkInput.value = "";
+  updateComposerMode();
 
   await playLandingExit(url);
 
@@ -5163,6 +5558,10 @@ async function runCheck(url, existingId, hint) {
   updatePaneMode();
   pendingFollowup = null;
   persistLibrary();
+  // The check now has an address, and it gets one the moment it starts rather than when it
+  // finishes: a reader who reloads mid-run, or who wants the tab in their history, should
+  // find the check they were watching and not the home page.
+  syncCheckLocation();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
   // Held back on the phone flow, where the strip is behind the interstitial right now and
@@ -5678,15 +6077,115 @@ function setAccountMode(mode) {
   el.accountSwitch.innerHTML = isSignup
     ? `<span>Already have an account?</span> <button type="button" class="auth-switch-link" data-mode="signin">Sign in</button>`
     : `<span>New to Trase?</span> <button type="button" class="auth-switch-link" data-mode="signup">Create an account</button>`;
+  // Nothing to forget yet while creating an account, and a "Forgot password?" under a
+  // field the reader is about to invent a password for is noise.
+  if (el.accountForgotBtn) el.accountForgotBtn.hidden = isSignup;
+  // A revealed password must not survive the dialog being closed and reopened — the next
+  // person at this screen did not ask to see it.
+  if (el.accountPassword) el.accountPassword.type = "password";
+  if (el.accountPasswordToggle) {
+    el.accountPasswordToggle.setAttribute("aria-pressed", "false");
+    el.accountPasswordToggle.setAttribute("aria-label", "Show password");
+    el.accountPasswordToggle.title = "Show password";
+  }
   el.accountMessage.textContent = "";
   el.accountMessage.classList.remove("error");
 }
+
+/**
+ * Offers only the OAuth providers this Supabase project actually has enabled.
+ *
+ * Asked once per session and cached, because the answer cannot change while the page is
+ * open and each question is a round trip. Both buttons off means the whole block stays
+ * hidden — including its "or" divider, which would otherwise sit under the form dividing
+ * it from nothing.
+ */
+let oauthProviders = null;
+async function renderOAuthButtons() {
+  if (!el.accountOAuth) return;
+  if (!accounts.isConfigured()) {
+    el.accountOAuth.hidden = true;
+    return;
+  }
+  if (oauthProviders === null) {
+    const names = ["google", "apple"];
+    const enabled = await Promise.all(names.map((name) => accounts.providerEnabled(name)));
+    oauthProviders = names.filter((_, i) => enabled[i]);
+  }
+  for (const button of el.accountOAuth.querySelectorAll("[data-provider]")) {
+    button.hidden = !oauthProviders.includes(button.dataset.provider);
+  }
+  el.accountOAuth.hidden = oauthProviders.length === 0;
+}
+
+el.accountOAuth?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-provider]");
+  if (!button) return;
+  el.accountMessage.textContent = "";
+  el.accountMessage.classList.remove("error");
+  try {
+    // Ends in a full-page redirect, so there is no success branch to write — the next
+    // thing that happens is this document being replaced by the provider's.
+    await accounts.signInWithProvider(button.dataset.provider);
+  } catch (error) {
+    el.accountMessage.textContent = error?.message || "That sign-in provider isn't available.";
+    el.accountMessage.classList.add("error");
+  }
+});
+
+/** Reveal/hide the password. The button's label names what it will do next, not what it
+ * just did, so it is correct whether it is read before or after the press. */
+el.accountPasswordToggle?.addEventListener("click", () => {
+  const shown = el.accountPassword.type === "text";
+  el.accountPassword.type = shown ? "password" : "text";
+  el.accountPasswordToggle.setAttribute("aria-pressed", String(!shown));
+  const label = shown ? "Show password" : "Hide password";
+  el.accountPasswordToggle.setAttribute("aria-label", label);
+  el.accountPasswordToggle.title = label;
+  // The caret goes to the end rather than to wherever the type change left it, and focus
+  // comes back to the field — pressing this is a step in typing a password, not a detour.
+  el.accountPassword.focus();
+  const end = el.accountPassword.value.length;
+  el.accountPassword.setSelectionRange?.(end, end);
+});
+
+/**
+ * "Forgot password?" — sends the reset email.
+ *
+ * The message is the same whether or not the address has an account, deliberately: saying
+ * "no account with that email" turns this box into a way of finding out who has one. See
+ * `requestPasswordReset` in auth.js.
+ */
+el.accountForgotBtn?.addEventListener("click", async () => {
+  const email = el.accountEmail.value.trim();
+  el.accountMessage.classList.remove("error");
+  if (!email) {
+    el.accountMessage.textContent = "Enter your email address first, then tap Forgot password.";
+    el.accountEmail.focus();
+    return;
+  }
+  el.accountForgotBtn.disabled = true;
+  el.accountMessage.textContent = "Sending…";
+  try {
+    await accounts.requestPasswordReset(email);
+    el.accountMessage.textContent = `If there's an account for ${email}, a reset link is on its way.`;
+  } catch (error) {
+    el.accountMessage.textContent = error?.message || "Couldn't send the reset email.";
+    el.accountMessage.classList.add("error");
+  } finally {
+    el.accountForgotBtn.disabled = false;
+  }
+});
 
 /** Opened from the settings dialog's Profile tab ("Sign in" button) rather than its own
  * icon — see the account-dialog comment in index.html for why sign-in/up still needs a
  * dialog of its own even though the rest of account state moved into Settings. */
 function openAccountDialog() {
   setAccountMode("signin");
+  // Not awaited: the dialog opens now, and the buttons appear a moment later if this
+  // project has them. Waiting on two network round trips before showing a sign-in form
+  // would be the feature charging everyone for the case where it is switched off.
+  renderOAuthButtons();
   el.accountDialog.showModal();
 }
 
@@ -5727,6 +6226,141 @@ function setSettingsTab(tab) {
   });
 }
 
+/**
+ * The four source-tier checkboxes in Settings → Search.
+ *
+ * Built from `TIERS` rather than written out in the markup, so the rows, their labels and
+ * what the server actually filters on all come from one list. Unticking a tier means the
+ * model is never shown a result from it — see `sourceTiers` in api/chat.js.
+ */
+function renderSourceTierSettings() {
+  if (!el.settingSourceTiers) return;
+  const allowed = new Set(normaliseTiers(settings.sourceTiers));
+  el.settingSourceTiers.replaceChildren();
+  for (const tier of TIERS) {
+    const { label, hint } = TIER_LABELS[tier];
+    const row = document.createElement("label");
+    row.className = "tier-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.tier = tier;
+    box.checked = allowed.has(tier);
+    const text = document.createElement("span");
+    text.className = "tier-row-text";
+    const name = document.createElement("span");
+    name.className = "settings-row-label";
+    name.textContent = label;
+    const sub = document.createElement("span");
+    sub.className = "settings-row-sub";
+    sub.textContent = hint;
+    text.append(name, sub);
+    row.append(box, text);
+    el.settingSourceTiers.append(row);
+  }
+}
+
+el.settingSourceTiers?.addEventListener("change", (event) => {
+  const box = event.target.closest("input[type=checkbox][data-tier]");
+  if (!box) return;
+  const chosen = [...el.settingSourceTiers.querySelectorAll("input[type=checkbox][data-tier]")]
+    .filter((input) => input.checked)
+    .map((input) => input.dataset.tier);
+  // Unticking the last box is a contradiction — "check this with no sources" — and the
+  // server would read it as "all of them" anyway (see `normaliseTiers`). Rather than let
+  // the two disagree, the box springs back and says why.
+  if (chosen.length === 0) {
+    box.checked = true;
+    return;
+  }
+  settings.sourceTiers = chosen;
+  persistSettings();
+});
+
+/** Settings → Data: the count on the delete button, so it says what it is about to remove. */
+function renderDataSettings() {
+  if (!el.deleteAllSub) return;
+  const n = library.length;
+  el.deleteAllSub.textContent =
+    n === 0
+      ? "There are no checks stored in this browser."
+      : `Removes ${n === 1 ? "the 1 check" : `all ${n} checks`} from this browser. This can't be undone.`;
+  if (el.deleteAllBtn) el.deleteAllBtn.disabled = n === 0;
+  if (el.exportDataBtn) el.exportDataBtn.disabled = n === 0;
+}
+
+/**
+ * Every check in this browser, as one JSON file.
+ *
+ * The library's own stored shape, not a flattened report: this is the reader's data, and
+ * the useful thing to hand them is the thing the app itself holds — answers, claims,
+ * sources, follow-ups and timestamps included — rather than a prettier subset they cannot
+ * reload from. Written client-side with a blob URL, because there is no server-side copy
+ * to ask for unless they are signed in.
+ */
+el.exportDataBtn?.addEventListener("click", () => {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    app: "trase",
+    version: 1,
+    checks: library,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  const stamp = new Date().toISOString().slice(0, 10);
+  link.download = `trase-checks-${stamp}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoked on the next turn of the event loop rather than immediately: some engines
+  // haven't started reading the blob by the time `click()` returns.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+});
+
+/**
+ * Delete everything, with a confirm in front of it.
+ *
+ * Deliberately not the undo banner `deleteEntry` uses. That banner is proportionate to one
+ * row; this throws away the reader's whole history, and "are you sure" before is worth more
+ * than "undo" after when the after is a banner they may not see. The cloud copy goes too
+ * when they are signed in, because a "delete all" that leaves the rows to sync back down on
+ * the next sign-in has not deleted anything.
+ */
+el.deleteAllBtn?.addEventListener("click", async () => {
+  if (inFlight) return;
+  const n = library.length;
+  if (n === 0) return;
+  const ok = window.confirm(
+    `Delete ${n === 1 ? "the 1 check" : `all ${n} checks`} stored in this browser? This can't be undone.`,
+  );
+  if (!ok) return;
+
+  const ids = library.map((entry) => entry.id);
+  library = [];
+  selectedId = null;
+  pendingFollowup = null;
+  chatThread = [];
+  pendingChat = null;
+  persistLibrary();
+  updatePaneMode();
+  renderLibrary(el.searchInput.value);
+  renderEmptyState();
+  updateComposerMode();
+  syncCheckLocation({ replace: true });
+  renderDataSettings();
+  // Best-effort, one row at a time and after the local state is already clean — the same
+  // posture `deleteEntry` takes. A failure here must not leave the reader looking at rows
+  // they just deleted.
+  for (const id of ids) {
+    try {
+      await accounts.deleteConversation?.(id);
+    } catch {
+      // Signed out, offline, or the row was never synced. Nothing to report.
+    }
+  }
+});
+
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
@@ -5734,6 +6368,8 @@ function openSettingsDialog() {
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   updateThemeButtons();
+  renderSourceTierSettings();
+  renderDataSettings();
   renderSearchStatus();
   renderAccountUI();
   setSettingsTab(settingsTab);
@@ -6376,13 +7012,25 @@ for (const type of ["pointerdown", "keydown"]) {
 // yields entries without ids, and then every branch here was skipped and the claims pane
 // was left literally empty: no card, no placeholder, no way to tell a broken read from a
 // blank app. Falling through to the empty state makes that case say something.
+//
+// A `/c/<id>` in the address bar outranks all of that: it is the reader saying which check
+// they came for — a bookmark, a second tab, a link they sent themselves — and it must win
+// over both `library[0]` and the `startedFresh` reset that would otherwise blank the pane.
+const requestedId = checkIdFromPath(location.pathname);
+if (requestedId) selectedId = findEntry(requestedId) ? requestedId : null;
 const startupEntry = selectedId ? findEntry(selectedId) : null;
 if (startupEntry) {
   openEntryInPane(startupEntry);
+} else if (requestedId) {
+  showMissingCheck(requestedId);
 } else {
   selectedId = null;
   renderEmptyState();
 }
+// `replace`, not push: this is the address the browser is already at (or, for a restored
+// `library[0]`, the address it should have been at all along). Either way it is not a step
+// the reader took, so it must not become one they can press Back to.
+if (!requestedId) syncCheckLocation({ replace: true });
 // The markup's own `single-pane` class on #contentGrid is only right for a first-ever
 // visit — a returning reader's `selectedId` can restore to a real entry right here (see
 // the comment above), which should show the shell immediately, not grow into it. A reader

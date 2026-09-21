@@ -123,6 +123,73 @@ export async function signIn(email, password) {
   if (error) throw error;
 }
 
+/**
+ * Starts an OAuth sign-in and hands the browser to the provider.
+ *
+ * Nothing comes back here: the call ends in a full-page redirect, and the session is picked
+ * up when the provider returns to `redirectTo` — `createClient` consumes the code or the
+ * hash fragment on that load (see `completeEmailConfirmation` for the same mechanism), and
+ * `onAuthStateChange` then fires as it does for any other sign-in. So there is no
+ * post-conditions to check and nothing for the caller to await except the redirect itself.
+ *
+ * A provider that is not enabled on the Supabase project fails here rather than silently:
+ * Supabase answers with an error instead of a URL, which is why `providerEnabled` below
+ * exists and why app.js only offers the buttons it has confirmed.
+ */
+export async function signInWithProvider(provider) {
+  const redirectTo = globalThis.location?.origin ?? undefined;
+  const { error } = await requireClient().auth.signInWithOAuth({
+    provider,
+    ...(redirectTo ? { options: { redirectTo } } : {}),
+  });
+  if (error) throw error;
+}
+
+/**
+ * Whether this Supabase project has a provider turned on.
+ *
+ * There is no public endpoint that lists enabled providers, so this asks the one question
+ * that can be asked: request the authorize URL *without* following it
+ * (`skipBrowserRedirect`) and see whether Supabase produces one. A disabled provider
+ * answers with an error and no URL, which is exactly the case the caller needs to know
+ * about — the alternative is offering a "Continue with Apple" button that lands the reader
+ * on a Supabase error page, which is worse than not offering it.
+ *
+ * Never throws. An unreachable project answers the same as a disabled provider: no button.
+ */
+export async function providerEnabled(provider) {
+  if (!client) return false;
+  try {
+    const { data, error } = await client.auth.signInWithOAuth({
+      provider,
+      options: { skipBrowserRedirect: true, redirectTo: globalThis.location?.origin ?? undefined },
+    });
+    return Boolean(data?.url) && !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sends the "reset your password" email.
+ *
+ * Points at the same confirmation page the sign-up link uses: supabase-js consumes the
+ * recovery token on that load exactly as it consumes a confirmation one, so the reader
+ * arrives back in the app already signed in and can set a new password from Settings.
+ * Distinguishing recovery from confirmation there would need a second screen; landing them
+ * signed in is the shorter true path.
+ *
+ * Deliberately does not report whether the address has an account. That answer is an
+ * account-enumeration oracle, and Supabase does not give it to us either.
+ */
+export async function requestPasswordReset(email) {
+  const redirectTo = emailRedirectUrl(globalThis.location?.origin ?? "");
+  const { error } = await requireClient().auth.resetPasswordForEmail(email, {
+    ...(redirectTo ? { redirectTo } : {}),
+  });
+  if (error) throw error;
+}
+
 export async function signOut() {
   if (!client) return;
   await client.auth.signOut();

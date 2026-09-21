@@ -194,7 +194,46 @@ duplicates rather than updates.
 **Decide the naming before pushing**, and search the remote for the *renamed* classes, not
 the originals.
 
-### 5. The README disagrees with the product in two places
+### 5. Six new product-side patterns, none of them in either DS copy
+
+All added in one session (trust bugs + the high/medium feature list). Each is generic
+enough to be a component; none has a counterpart in the mirror or the remote.
+
+- **Claim heading, relabelled.** `.claim-title` is no longer a bare text node. It is
+  `<span class="claim-title-label">Claim:</span>` + `<span class="claim-title-text">`, and
+  the text half runs through the same inline pass the body does, so a `[t=…]` in the label
+  renders as a `.ts-chip` rather than as literal syntax. The DS's `ClaimCard` title has
+  neither the label nor the inline pass. The label is framing the app adds for the reader —
+  a heading reading "NASA faked the moon landing" beside a Contradicted badge reads as an
+  assertion — so it is markup, never part of the stored answer.
+- **`.claim-expand-cue`** — a "Read more" / "Show less" chevron inside `.claim-pane`,
+  `display: none` above the phone breakpoint. The word is CSS `content` keyed off
+  `.expanded`, because the box already carries `aria-expanded`. The DS's card has no
+  clipped-summary state at all, so this is net-new.
+- **`.lib-filters` / `.lib-chip`** — verdict and platform filter chips under the sidebar
+  search box. Verdict chips carry a `.lib-chip-dot` in the verdict's own colour and a
+  `data-verdict` attribute; state is `aria-pressed`, not a class. The remote's sidebar work
+  has a search field and no chips. Note when porting: the chip row is built from the rows
+  the library holds, so a library with one platform shows no platform chips.
+- **`.source-tier`** — a tiny uppercase badge on `.source-pill` and in the expanded source
+  row, one of Primary / News / Reference / Forum, coloured `--good` / `--accent` /
+  `--accent-2` / `--warn`. It labels provenance, not truth, and `--warn` on Forum is
+  deliberate: weak provenance is "careful", not "wrong". The DS's `SourcePills` has no
+  per-source qualifier.
+- **`.tier-row`** in `SettingsMenu` — a checkbox plus a two-line label, four of them, under
+  a new Search-tab heading. A checkbox rather than the DS's switch, because these are four
+  members of one set being included or excluded. Also owed on `SettingsMenu`: a third
+  segment ("System") in the theme `seg-control`, and a whole new **Data** tab (export /
+  delete-all) whose destructive button is a new `.retry-button.danger` variant.
+- **Auth dialog extras** — `.field-with-button` + `.field-btn` (a reveal toggle positioned
+  inside the password input's box), `.auth-inline-link` (a text link that is a `<button>`),
+  and `.auth-divider` + `.auth-oauth-btn` for Google/Apple. The OAuth block is hidden
+  unless the backend confirms the provider is enabled, so the DS component needs the empty
+  state to collapse the divider with it.
+
+None of these introduces a token. `--on-accent` from §1 is still the only new one.
+
+### 6. The README disagrees with the product in two places
 
 - **`--font-display`.** The README and the remote `tokens.css` both say one grotesque
   ("Instrument Sans") for display and body, "differentiated by weight rather than a

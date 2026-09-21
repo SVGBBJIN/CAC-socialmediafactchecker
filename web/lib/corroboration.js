@@ -52,6 +52,7 @@
 // the coverage rule below is strict about entities and why the whole thing is one-way.
 
 import { markersIn } from "./citations.js";
+import { TIMESTAMP_MARKER } from "../public/timestamps.js";
 import { splitClaims, VERDICTS } from "../public/claims.js";
 import { tokenise, queryTerms, tokenSimilarity } from "./fuzzy.js";
 
@@ -269,8 +270,31 @@ function numberCovered(number, evidence) {
  * and starts being the thing asserted, and `wordPresent` is forgiving enough about endings
  * that requiring them does not turn every paraphrase into a downgrade.
  */
+/**
+ * App syntax stripped out of a claim label before its specifics are read.
+ *
+ * A `[[claim: …]]` line is prose the model wrote, but it can carry two markers that are
+ * this app's own notation rather than anything the claim asserts: `[t=0:01-0:03]`, the
+ * moment in the clip (see public/timestamps.js), and `[3]`, a citation into the ledger.
+ * Left in, the number rule below reads their digits as figures the sources must quote —
+ * a claim marked `[t=1:13]` silently acquires required figures 1 and 13, no page carries
+ * them, and the claim is downgraded with a note reading "none of them mentions 1 or 13".
+ * That is the audit demanding the sources confirm a timecode, and the reader being shown
+ * bare digits as the reason a verdict was withdrawn.
+ *
+ * Both are removed rather than only excluded from the number rule, because neither is a
+ * word of the claim either: `t` is not a term and a marker is not a name.
+ */
+function withoutMarkers(text) {
+  return String(text ?? "")
+    .replace(TIMESTAMP_MARKER, " ")
+    .replace(/\[\d+(?:\s*[,;]\s*\d+)*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function claimSpecifics(claim) {
-  const text = String(claim ?? "");
+  const text = withoutMarkers(claim);
   const entities = [];
   const demoted = [];
   const seen = new Set();

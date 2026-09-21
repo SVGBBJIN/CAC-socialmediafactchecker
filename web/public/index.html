@@ -261,6 +261,38 @@
   }
   .search::placeholder { color: #616977; }
   .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* When there is a chip row, the gap below the box belongs to the chips rather than
+     doubling up with theirs. */
+  .search:has(+ .lib-filters:not([hidden])) { margin-bottom: 8px; }
+
+  /* Verdict and platform chips. Wraps rather than scrolls: the sidebar is ~200px and a
+     horizontal scroller there hides its own overflow with no affordance, whereas two short
+     rows of chips are simply two rows. See `renderLibraryFilters` in app.js. */
+  .lib-filters {
+    display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; flex-shrink: 0;
+  }
+  .lib-chip {
+    font-family: var(--font-body); font-size: 11px; line-height: 1;
+    padding: 5px 9px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-raised); color: var(--ink-dim);
+    display: inline-flex; align-items: center; gap: 5px;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .lib-chip:hover { color: var(--ink); border-color: var(--accent); }
+  .lib-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* `aria-pressed` is what actually says a chip is on, so the styling keys off it rather
+     than off a class kept in parallel with it. */
+  .lib-chip[aria-pressed="true"] {
+    color: var(--ink); border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 16%, transparent);
+  }
+  /* The verdict's own colour, the same four `.badge` uses, as a dot — so a chip is
+     recognisable as "the contradicted ones" before its label is read. */
+  .lib-chip-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+  .lib-chip[data-verdict="contradicted"] .lib-chip-dot { background: var(--bad); }
+  .lib-chip[data-verdict="disputed"] .lib-chip-dot { background: var(--warn); }
+  .lib-chip[data-verdict="corroborated"] .lib-chip-dot { background: var(--good); }
+  .lib-chip[data-verdict="insufficient"] .lib-chip-dot { background: var(--muted); }
 
   .lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
 
@@ -1570,6 +1602,23 @@
   }
   .claim-title.in { opacity: 1; transform: translateY(0); }
 
+  /* Off everywhere by default. The claim box is only ever clipped on the phone layout, and
+     a "Read more" under a box that is already showing everything it has is a control that
+     lies. The phone breakpoint turns it on — see `.claim-expand-cue` there. */
+  .claim-expand-cue { display: none; }
+
+  /* "Claim:" — the app's own word, not the model's, saying whose sentence the heading is.
+     Set quieter than the claim so the claim still reads as the heading, and `select-none`
+     is deliberately NOT used: someone copying the heading by hand should get the framing
+     too, the same as the badge beside it. See `claimTitleHTML` in app.js. */
+  .claim-title-label {
+    font-weight: 500; color: var(--ink-dim); letter-spacing: 0.01em;
+  }
+  /* A `[t=…]` in the label renders as the same chip the body uses (see `claimTitleHTML`),
+     and a heading's line-height is tighter than a paragraph's — so the chip is pulled back
+     to the text's own size rather than setting the line's height on its own. */
+  .claim-title .ts-chip { font-size: 0.82em; vertical-align: baseline; }
+
   .claim-text {
     font-family: var(--font-display); font-size: 16.5px; line-height: 1.55; color: var(--ink);
     margin: 0 0 16px;
@@ -2451,6 +2500,38 @@
   .retry-button:hover { border-color: var(--accent); color: var(--accent); }
   .retry-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .retry-button:disabled { opacity: 0.5; cursor: default; }
+  /* Destructive, so it reads as destructive before it is pressed rather than only in the
+     confirmation that follows. Same shape as its neighbours — this is a colour, not a
+     different kind of control. */
+  .retry-button.danger { color: var(--bad); border-color: color-mix(in oklab, var(--bad) 45%, transparent); }
+  .retry-button.danger:hover { border-color: var(--bad); color: var(--bad); background: color-mix(in oklab, var(--bad) 12%, transparent); }
+
+  /* One row per source tier in Settings → Search. A checkbox rather than a switch: these
+     are four members of one set being included or excluded, which is what a checkbox says
+     and what a row of switches does not. */
+  .tier-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .tier-row:last-child { border-bottom: none; }
+  .tier-row input { margin-top: 2px; accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
+  .tier-row-text { display: flex; flex-direction: column; gap: 2px; }
+
+  /* The tier badge on a source pill and in its expanded row — see `tierBadgeHTML`. Tiny
+     and unemphatic on purpose: it labels a link, it does not rate it. */
+  .source-tier {
+    font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 4px; flex: none;
+    border: 1px solid currentColor; opacity: 0.85;
+  }
+  .source-tier[data-tier="primary"] { color: var(--good); }
+  .source-tier[data-tier="news"] { color: var(--accent); }
+  .source-tier[data-tier="reference"] { color: var(--accent-2); }
+  /* The one the reader most needs to notice, so it gets the colour that means "careful"
+     rather than the one that means "wrong" — a forum thread is weak provenance, not a
+     false claim. */
+  .source-tier[data-tier="forum"] { color: var(--warn); }
+  /* Inside a pill the badge sits after the domain and must not make the pill taller than
+     the row of them, so it borrows the pill's own line-height rather than setting one. */
+  .source-pill .source-tier { margin-left: 5px; line-height: inherit; }
+  .source-expand-domain .source-tier { margin-left: 6px; }
 
   /* ---------- Follow-up thread ---------- */
   .thread {
@@ -2744,6 +2825,54 @@
   .auth-switch-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   #account-dialog .account-message { font-size: 12px; color: var(--ink-dim); margin: -4px 0 12px; text-align: center; }
+
+  /* An input with a button living inside its box. The button is absolutely positioned
+     rather than flexed beside the field so the input keeps its full width and its own
+     focus ring, and the padding on the right is what keeps typed text from running under
+     the icon. */
+  #account-dialog .field-with-button { position: relative; }
+  #account-dialog .field-with-button input { width: 100%; padding-right: 40px; }
+  #account-dialog .field-btn {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    width: 30px; height: 30px; display: grid; place-items: center;
+    border: none; background: none; cursor: pointer; border-radius: 6px;
+    color: var(--ink-dim);
+  }
+  #account-dialog .field-btn:hover { color: var(--ink); background: var(--surface-raised); }
+  #account-dialog .field-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #account-dialog .field-btn svg { width: 17px; height: 17px; }
+  /* Pressed = the password is currently visible, so the icon shows the action that undoes
+     it: a struck-through eye, drawn with a border rather than a second SVG. */
+  #account-dialog .field-btn[aria-pressed="true"] { color: var(--accent); }
+
+  /* A text link that is a <button>, because it opens nothing and navigates nowhere. */
+  #account-dialog .auth-inline-link {
+    background: none; border: none; padding: 6px 0 0; cursor: pointer;
+    font-family: var(--font-body); font-size: 12px; color: var(--ink-dim); text-align: left;
+  }
+  #account-dialog .auth-inline-link:hover { color: var(--accent); text-decoration: underline; }
+  #account-dialog .auth-inline-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+  #account-dialog .auth-oauth { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  /* "or" with a rule either side, drawn with one flex row rather than pseudo-elements so
+     the word keeps its own background and the rules stop where it starts. */
+  #account-dialog .auth-divider {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11.5px; color: var(--muted); margin: 2px 0 6px;
+  }
+  #account-dialog .auth-divider::before,
+  #account-dialog .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  #account-dialog .auth-oauth-btn {
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    width: 100%; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface-raised); color: var(--ink);
+    font-family: var(--font-body); font-size: 13.5px; font-weight: 500; cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  #account-dialog .auth-oauth-btn:hover { border-color: var(--accent); }
+  #account-dialog .auth-oauth-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #account-dialog .auth-oauth-btn svg { width: 17px; height: 17px; flex: none; }
+  #account-dialog .auth-oauth-btn:disabled { opacity: 0.55; cursor: default; }
   .account-message.error { color: var(--bad); }
   .account-message:empty { display: none; }
 
@@ -3377,6 +3506,24 @@
     .claim-pane.expanded .action-row,
     .claim-pane.expanded .thread,
     .claim-pane.expanded .check-duration { display: block; }
+
+    /* "Read more" / "Show less" — the cue that says this box is a summary that opens.
+       The word is in CSS rather than in the markup because it is purely a state readout:
+       the box carries `aria-expanded` for anyone not looking at it (see `claimPanesHTML`),
+       and duplicating the word in the DOM would have it read out twice. */
+    .claim-expand-cue {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-family: var(--font-body); font-size: 11.5px; font-weight: 500;
+      color: var(--accent);
+      margin-top: 2px;
+    }
+    .claim-expand-cue::after { content: "Read more"; }
+    .claim-expand-cue svg {
+      width: 13px; height: 13px; order: 1;
+      transition: transform 0.2s ease;
+    }
+    .claim-pane.expanded .claim-expand-cue::after { content: "Show less"; }
+    .claim-pane.expanded .claim-expand-cue svg { transform: rotate(180deg); }
     .claim-pane.expanded .action-row { display: flex; }
 
     /* With the video expanded there is only a sliver of sheet left, so each claim shrinks to
@@ -3726,7 +3873,13 @@
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="new-check-label">New chat</span>
       </button>
-      <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks…" />
+      <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks, claims, sources…" />
+      <!-- Verdict and platform chips, filled by `renderLibraryFilters` from the rows the
+           library actually holds — an empty row here means a library with nothing to narrow
+           yet, which is why the container starts empty rather than listing all four
+           verdicts. `role="group"` so the chips announce as one control rather than as a
+           run of unrelated toggle buttons. -->
+      <div class="lib-filters" id="libFilters" role="group" aria-label="Filter checks" hidden></div>
       <ul class="lib-list" id="libList"></ul>
       <!-- The undo half of deleting a check. Deleting is immediate now (no confirmation
            dialog in front of it — see deleteEntry in app.js); this is the safety net that
@@ -4029,7 +4182,19 @@
       </div>
       <div class="field">
         <label for="account-password">Password</label>
-        <input type="password" id="account-password" placeholder="••••••••" autocomplete="current-password" />
+        <!-- The reveal toggle lives inside the field box so it reads as part of the input
+             rather than as a control beside it. `aria-pressed` carries the state; the
+             label changes with it so a screen reader is told what the button will do
+             next, not what it just did. -->
+        <div class="field-with-button">
+          <input type="password" id="account-password" placeholder="••••••••" autocomplete="current-password" />
+          <button type="button" class="field-btn" id="accountPasswordToggle" aria-pressed="false" aria-label="Show password" title="Show password">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="2.8" stroke="currentColor" stroke-width="1.6"/></svg>
+          </button>
+        </div>
+        <!-- Password reset. Hidden while the form is in sign-up mode (see
+             `setAccountMode`), where there is no password to forget yet. -->
+        <button type="button" class="auth-inline-link" id="accountForgotBtn">Forgot password?</button>
       </div>
       <!-- Sign-in's only feedback channel, success and failure both — a colour change on a
            line of text, which is nothing at all to a screen reader. `role="status"` makes it
@@ -4045,6 +4210,21 @@
         <span id="accountSubmitLabel">Sign in</span>
       </button>
     </form>
+    <!-- OAuth, offered only where the project actually has the provider enabled — the
+         container stays empty and hidden otherwise, because a Google button that opens a
+         Supabase error page is worse than no Google button. See `renderOAuthButtons` in
+         app.js. -->
+    <div class="auth-oauth" id="accountOAuth" hidden>
+      <div class="auth-divider"><span>or</span></div>
+      <button type="button" class="auth-oauth-btn" data-provider="google">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.23c0-.68-.06-1.34-.17-1.96H12v3.71h5.38a4.6 4.6 0 01-2 3.02v2.51h3.24c1.89-1.74 2.98-4.3 2.98-7.28z"/><path fill="#34A853" d="M12 22c2.7 0 4.96-.9 6.62-2.43l-3.24-2.51c-.9.6-2.04.96-3.38.96-2.6 0-4.8-1.76-5.59-4.12H3.06v2.59A10 10 0 0012 22z"/><path fill="#FBBC05" d="M6.41 13.9a6 6 0 010-3.8V7.51H3.06a10 10 0 000 8.98l3.35-2.59z"/><path fill="#EA4335" d="M12 5.98c1.47 0 2.79.5 3.83 1.5l2.87-2.87C16.95 2.99 14.7 2 12 2a10 10 0 00-8.94 5.51l3.35 2.59C7.2 7.74 9.4 5.98 12 5.98z"/></svg>
+        Continue with Google
+      </button>
+      <button type="button" class="auth-oauth-btn" data-provider="apple">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.4 12.7c0-2.3 1.9-3.4 2-3.5-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.2-2.8.9-3.5.9-.7 0-1.8-.8-3-.8-1.5 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.9-2.3.9-1.3 1.3-2.6 1.3-2.7-.1 0-2.6-1-2.6-3.7zM14.2 5.6c.6-.8 1.1-1.9 1-3-.9 0-2.1.6-2.8 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.8-1.3z"/></svg>
+        Continue with Apple
+      </button>
+    </div>
     <div class="auth-switch" id="accountSwitch"></div>
     <!-- Esc already closes any <dialog> opened via showModal() — this and a backdrop click
          (see the accountDialog click listener in app.js) are the other two ways out that
@@ -4087,6 +4267,7 @@
           <button type="button" class="settings-nav-item" data-tab="general" role="tab" aria-selected="false">General</button>
           <button type="button" class="settings-nav-item" data-tab="search" role="tab" aria-selected="false">Search</button>
           <button type="button" class="settings-nav-item" data-tab="instructions" role="tab" aria-selected="false">Instructions</button>
+          <button type="button" class="settings-nav-item" data-tab="data" role="tab" aria-selected="false">Data</button>
         </div>
         <button type="submit" class="settings-close">Done</button>
       </nav>
@@ -4132,6 +4313,10 @@
             <div class="seg-control" id="setting-theme" role="group" aria-label="Theme">
               <button type="button" data-value="dark">Dark</button>
               <button type="button" data-value="light">Light</button>
+              <!-- Follows `prefers-color-scheme` and keeps following it: the app re-themes
+                   when the OS flips at sunset without the page being reloaded. See
+                   `applySettings` and `watchSystemTheme` in app.js. -->
+              <button type="button" data-value="system">System</button>
             </div>
           </div>
           <div class="settings-row">
@@ -4183,6 +4368,38 @@
             <div class="search-status" id="searchStatus">
               <span class="dot muted"></span><span>Checking…</span>
             </div>
+          </div>
+
+          <h2 style="margin-top: 22px;">Which sources a check may use</h2>
+          <p class="settings-row-sub" style="margin: 0 0 4px;">
+            Unticking a kind removes it from the search results the model is given, so it
+            can't be cited — this filters the evidence, not just the list. These are
+            judgements about who publishes a page, not about whether it is true.
+          </p>
+          <!-- Filled by `renderSourceTierSettings` from TIERS, so the four rows and the
+               four labels can't drift apart. -->
+          <div id="setting-source-tiers"></div>
+        </section>
+
+        <section class="settings-section" data-tab-panel="data" hidden>
+          <h2>Your data</h2>
+          <p class="settings-row-sub" style="margin: 0 0 10px;">
+            Checks are kept in this browser. Signing in copies them to your account as well;
+            signing out does not remove the copy here.
+          </p>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Export checks</div>
+              <div class="settings-row-sub">Downloads every check, follow-up and source as one JSON file.</div>
+            </div>
+            <button type="button" class="retry-button" id="exportDataBtn">Export</button>
+          </div>
+          <div class="settings-row" style="border-bottom: none;">
+            <div>
+              <div class="settings-row-label">Delete all checks</div>
+              <div class="settings-row-sub" id="deleteAllSub">Removes every check from this browser. This can't be undone.</div>
+            </div>
+            <button type="button" class="retry-button danger" id="deleteAllBtn">Delete all</button>
           </div>
         </section>
 

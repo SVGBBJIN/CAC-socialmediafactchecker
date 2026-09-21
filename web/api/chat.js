@@ -15,6 +15,7 @@ import { validateHints } from "../lib/resolve-hint.js";
 import { browserWorkerFromEnv } from "../lib/browser-resolve.js";
 import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "../lib/verified-chat.js";
 import { authorize, config, validateMessages, GuardError } from "../lib/guard.js";
+import { normaliseTiers } from "../public/source-quality.js";
 
 // `SYSTEM_PROMPT` still overrides, but the default is the fact-checking prompt in
 // lib/verified-chat.js — the one that tells the model its facts come from `web_search`
@@ -83,6 +84,7 @@ export default async function handler(req, res) {
 
   let messages;
   let clipHints = null;
+  let sourceTiers;
   let usage = { pressure: 0 };
   try {
     usage = authorize(req, limits) ?? usage;
@@ -96,6 +98,12 @@ export default async function handler(req, res) {
       body?.clipHints,
       findClipLinks(String(messages.at(-1)?.content ?? "")),
     );
+    // Which kinds of source this reader allows (Settings → Sources). Untrusted input, so it
+    // is normalised rather than believed: `normaliseTiers` drops anything that isn't one of
+    // the four names and treats an empty list as all of them, which is what keeps a
+    // hand-rolled request from either injecting a tier name or silently asking for a check
+    // with no sources at all. See public/source-quality.js.
+    sourceTiers = normaliseTiers(body?.sourceTiers);
   } catch (error) {
     if (error instanceof GuardError) {
       const headers = error.retryAfter ? { "retry-after": String(error.retryAfter) } : {};
@@ -206,6 +214,10 @@ export default async function handler(req, res) {
       // fetch safe and the fencing that keeps the page's own words from being read as
       // instructions.
       attachPages: true,
+      // Applied to every search this turn runs, so an excluded tier never enters the
+      // ledger and therefore cannot be cited — this is a filter on the evidence, not a
+      // display option. See `sourceTiers` in lib/verified-chat.js.
+      sourceTiers,
     })) {
       if (frame.type === "stage") trace(frame.stage + (frame.model ? ` (${frame.model})` : ""));
       if (frame.type === "search") trace(`search: ${frame.query || frame.error}`);

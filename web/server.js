@@ -16,6 +16,7 @@ import resolveMediaHandler from "./api/resolve-media.js";
 import probeLinkHandler from "./api/probe-link.js";
 import pageOutlineHandler from "./api/page-outline.js";
 import { resolveStaticPath, contentType } from "./lib/static.js";
+import { checkIdFromPath } from "./public/deeplink.js";
 import { providerFromEnv } from "./lib/search.js";
 import { searchEnabled } from "./lib/verified-chat.js";
 
@@ -52,9 +53,19 @@ const loadedEnv = [".env.local", ".env"].filter((name) => loadEnvFile(join(ROOT,
  * and an allowlist written without the `.html` should reach the page rather than the 404. */
 const PATH_ALIASES = { "/auth/confirm": "/auth/confirm.html" };
 
+/* A check's own address, `/c/<id>` (see public/deeplink.js). It names no file on disk — the
+ * app reads the id out of `location.pathname` and opens that library entry itself — so the
+ * path has to serve the app shell rather than 404. The same rewrite exists in the root
+ * vercel.json; this is what keeps `node server.js` behaving the same way. `checkIdFromPath`
+ * is deliberately strict about the shape, so `/c/anything-else` still gets a real 404. */
+function rewrite(pathname) {
+  if (PATH_ALIASES[pathname]) return PATH_ALIASES[pathname];
+  return checkIdFromPath(pathname) ? "/index.html" : pathname;
+}
+
 async function serveStatic(req, res) {
   const requested = new URL(req.url, "http://localhost").pathname;
-  const path = resolveStaticPath(PATH_ALIASES[requested] ?? requested, PUBLIC_DIR);
+  const path = resolveStaticPath(rewrite(requested), PUBLIC_DIR);
 
   if (path === null) {
     res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });

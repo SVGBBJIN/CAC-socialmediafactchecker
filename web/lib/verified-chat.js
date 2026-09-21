@@ -42,6 +42,7 @@ import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
 import { auditCorroboration } from "./corroboration.js";
 import { captionQuery, captionSearchEnabled } from "./caption-search.js";
+import { normaliseTiers, classifySource, ALL_TIERS } from "../public/source-quality.js";
 
 /**
  * The system prompt.
@@ -137,6 +138,14 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "Never omit it when there is a claim to check, and never write one when there is not: a",
   "greeting or a follow-up about the conversation itself (see WHEN THERE IS NOTHING TO CHECK",
   "above) gets no claim blocks and no verdict at all, the same as it always has.",
+  "",
+  "That applies to a post as much as to a message. Plenty of what people paste here asserts",
+  "nothing checkable — a music video, a comedy sketch, a recipe, a dog. When that is what a",
+  "post turns out to be, say so in a sentence and write no claim block and no VERDICT line.",
+  "Do not reach for `Insufficient evidence` to fill the gap: that verdict means you looked",
+  "for evidence on a specific claim and could not settle it, and using it here reports a",
+  "failed check of a claim that was never made. The app has its own way of showing that a",
+  "post had nothing to check, and it reads off the absence of your claim blocks.",
   "",
   "Each block renders in its own compact card, side by side with the others, not one long",
   "scrolling page — write what actually settles the claim, not everything you found. Keep the",
@@ -373,7 +382,7 @@ export const PREFETCH_PER_TURN = 9;
  * download gives it a window to finish in, and taking only what has already arrived on a
  * photo post, where it does not. See `note()`.
  */
-function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled }) {
+function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled, tiers }) {
   let pending = null;
   let started = false;
   // What the search actually produced, kept for the case where `note()` is not allowed to
@@ -403,7 +412,7 @@ function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled
       // on video.
       blocking = resolved?.kind !== "images";
 
-      pending = Promise.resolve(searchImpl(query, { env, fetchImpl, signal }))
+      pending = Promise.resolve(searchImpl(query, { env, fetchImpl, signal, tiers }))
         .then((result) => {
           const entries = ledger.record(result);
           if (entries.length === 0) return null;
@@ -416,7 +425,7 @@ function makeCaptionSearch({ ledger, env, fetchImpl, signal, searchImpl, enabled
             query: result.query,
             claim: result.claim,
             provider: result.provider,
-            results: entries.map(({ n, title, url, domain }) => ({ n, title, url, domain })),
+            results: entries.map(({ n, title, url, domain, tier }) => ({ n, title, url, domain, tier })),
           });
           settledNote = CitationLedger.describePresearch(entries, result);
           return settledNote;
@@ -483,6 +492,9 @@ function makeToolRunner({
   findImpl,
   apiKey,
   pages,
+  // Which kinds of publisher this turn may cite — passed straight to every search so an
+  // excluded tier never reaches the ledger. See ../public/source-quality.js.
+  tiers,
   prefetchPerSearch = PREFETCH_PER_SEARCH,
   prefetchPerTurn = PREFETCH_PER_TURN,
 }) {
@@ -574,7 +586,7 @@ function makeToolRunner({
       let pending = seen.get(key);
       if (!pending) {
         pending = Promise.resolve(
-          searchImpl(call.args, { env, fetchImpl, signal: callSignal ?? signal }),
+          searchImpl(call.args, { env, fetchImpl, signal: callSignal ?? signal, tiers }),
         );
         // A failure must not be remembered as one — the model is told what went wrong and
         // is entitled to try the same query again once.
@@ -596,7 +608,7 @@ function makeToolRunner({
           query: result.query,
           claim: result.claim,
           provider: result.provider,
-          results: entries.map(({ n, title, url, domain }) => ({ n, title, url, domain })),
+          results: entries.map(({ n, title, url, domain, tier }) => ({ n, title, url, domain, tier })),
         },
       };
     } catch (error) {
@@ -697,12 +709,18 @@ async function runFind(call, { ledger, apiKey, fetchImpl, pages, findImpl, signa
  * sentence the citation rests on without opening anything.
  */
 function sourceRows(sources) {
-  return sources.map(({ n, title, url, domain, published, passages }) => ({
+  return sources.map(({ n, title, url, domain, published, passages, tier }) => ({
     n,
     title,
     url,
     domain,
     published,
+    // What kind of publisher this is — primary, news, reference or forum. Classified when
+    // the search returned it (see public/source-quality.js) and carried through here so the
+    // reader can see, on the pill itself, that a citation is a forum thread rather than a
+    // records office. Re-derived on the browser side if an older stored answer has no tier
+    // on its rows, so nothing has to be migrated.
+    tier: tier ?? classifySource({ url, domain }),
     quote: passages?.[0]?.text ?? undefined,
   }));
 }
@@ -798,8 +816,14 @@ export async function* verifiedChat({
   // the caller's own clip options (the API route sets the cache, hints and browser worker
   // there) silently replace the callback instead of merging with it.
   clipOptions = {},
+  // Which kinds of publisher this turn may cite — the reader's own setting, arriving from
+  // the browser (see api/chat.js). Every search this layer runs is filtered by it, the
+  // speculative caption search included, so a tier that is switched off never reaches the
+  // ledger and therefore can never be cited. See public/source-quality.js.
+  sourceTiers = ALL_TIERS,
   ...geminiOptions
 }) {
+  const tiers = normaliseTiers(sourceTiers);
   const enabled = searchEnabled(env);
   const ledger = new CitationLedger();
   // Only on a fresh check. A follow-up replays the whole history, so the clip resolves
@@ -814,6 +838,7 @@ export async function* verifiedChat({
     signal,
     searchImpl,
     enabled: enabled && firstTurn && captionSearchEnabled(env),
+    tiers,
   });
   // One cache for the whole turn, so a second find on a page already open costs the ranking
   // and nothing else. The model is expected to come back to a good source for another claim —
@@ -829,6 +854,7 @@ export async function* verifiedChat({
         findImpl,
         apiKey,
         pages,
+        tiers,
         prefetchPerSearch,
         prefetchPerTurn,
       })
