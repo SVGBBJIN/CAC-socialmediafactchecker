@@ -26,9 +26,11 @@ import {
   activeAt,
 } from "./timestamps.js";
 import { parseBlocks } from "./markdown.js";
-import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
+import { filterLibrary, platformsIn, verdictsIn } from "./library-search.js";
+import { TIERS, TIER_LABELS, ALL_TIERS, classifySource, normaliseTiers } from "./source-quality.js";
 
 const LIBRARY_KEY = "trase.library.v1";
 const ACTIVITY_KEY = "trase.activity.v1";
@@ -138,6 +140,7 @@ const el = {
   newCheckBtn: document.getElementById("newCheckBtn"),
   libList: document.getElementById("libList"),
   searchInput: document.getElementById("searchInput"),
+  libFilters: document.getElementById("libFilters"),
   claimsPane: document.getElementById("claimsPane"),
   claimsScrollHint: document.getElementById("claimsScrollHint"),
   videoTitle: document.getElementById("videoTitle"),
@@ -179,6 +182,10 @@ const el = {
   settingLegacyCards: document.getElementById("setting-legacy-cards"),
   settingFontSize: document.getElementById("setting-font-size"),
   settingTheme: document.getElementById("setting-theme"),
+  settingSourceTiers: document.getElementById("setting-source-tiers"),
+  exportDataBtn: document.getElementById("exportDataBtn"),
+  deleteAllBtn: document.getElementById("deleteAllBtn"),
+  deleteAllSub: document.getElementById("deleteAllSub"),
   settingSystemPrompt: document.getElementById("setting-system-prompt"),
   searchStatus: document.getElementById("searchStatus"),
   imageBtn: document.getElementById("imageBtn"),
@@ -298,7 +305,7 @@ let pendingChat = null; // { question, error? }
 
 const SETTINGS_KEY = "trase.settings.v1";
 const DEFAULT_SETTINGS = {
-  theme: "dark", // "dark" | "light"
+  theme: "dark", // "dark" | "light" | "system"
   reducedMotion: false,
   highContrast: false,
   fontSize: "normal", // "normal" | "large"
@@ -308,6 +315,11 @@ const DEFAULT_SETTINGS = {
   legacyCards: false,
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
+  // Which kinds of publisher a check may cite (see public/source-quality.js). Sent with every
+  // request and applied server-side to the search results themselves, so this is a filter
+  // on the evidence rather than on the list under the answer. All four by default — the
+  // app must not quietly narrow what it will look at without being asked.
+  sourceTiers: [...ALL_TIERS],
 };
 
 function loadSettings() {
@@ -333,9 +345,27 @@ let serverConfig = null; // last /api/config response, so the settings dialog ca
 
 /** Stamps the accessibility settings onto the root element so the CSS in index.html can
  * key off them. Called once at startup and again on every settings change. */
+/**
+ * `prefers-color-scheme`, watched rather than sampled.
+ *
+ * "System" is only worth having if it keeps following the system: a laptop that switches to
+ * light at sunrise should take the app with it, without a reload. The listener is attached
+ * once, at module scope, and does nothing while the setting is Dark or Light.
+ */
+const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)");
+systemDark?.addEventListener?.("change", () => {
+  if (settings.theme === "system") applySettings();
+});
+
+/** Dark or light, resolving "system" against what the OS is asking for right now. */
+function resolvedTheme() {
+  if (settings.theme === "system") return systemDark?.matches === false ? "light" : "dark";
+  return settings.theme === "light" ? "light" : "dark";
+}
+
 function applySettings() {
   const root = document.documentElement;
-  setAttrIf(root, "data-theme", settings.theme === "light", "light");
+  setAttrIf(root, "data-theme", resolvedTheme() === "light", "light");
   setAttrIf(root, "data-motion", settings.reducedMotion, "reduced");
   setAttrIf(root, "data-contrast", settings.highContrast, "high");
   // Purely a CSS switch: every claim pane already carries its `verdict-*` class whichever
@@ -2049,13 +2079,88 @@ el.claimsScrollHint.addEventListener("click", () => {
 
 /* ---------------------------------------------------------------- sidebar */
 
+/**
+ * Which chips are on. Deliberately not persisted: a filter is a thing you are doing right
+ * now, and coming back tomorrow to a library that silently shows two of its twelve rows is
+ * the app hiding work with no visible cause.
+ */
+let libraryFilters = { verdict: null, platform: null };
+
+/**
+ * The chip row under the search box — one per verdict and platform the library actually
+ * holds (see `verdictsIn`/`platformsIn`).
+ *
+ * Rebuilt on every `renderLibrary` rather than diffed: it is at most a dozen buttons, and
+ * the alternative is keeping a second model of what is on screen in step with the library,
+ * which is the bug this kind of code always eventually has. A chip that disappears because
+ * its last row was deleted takes its own filter with it — otherwise the library would be
+ * filtered by a control no longer on screen.
+ */
+function renderLibraryFilters() {
+  const verdicts = verdictsIn(library);
+  const platforms = platformsIn(library);
+
+  if (libraryFilters.verdict && !verdicts.includes(libraryFilters.verdict)) libraryFilters.verdict = null;
+  if (libraryFilters.platform && !platforms.includes(libraryFilters.platform)) libraryFilters.platform = null;
+
+  // One kind of thing is not a choice: a library of nothing but TikToks has no use for a
+  // "TikTok" chip, and offering it is a control that can only ever do nothing or hide
+  // everything.
+  const showVerdicts = verdicts.length > 1;
+  const showPlatforms = platforms.length > 1;
+  el.libFilters.hidden = !showVerdicts && !showPlatforms;
+  el.libFilters.replaceChildren();
+  if (el.libFilters.hidden) return;
+
+  const chip = (kind, value, label, withDot) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "lib-chip";
+    button.dataset.filter = kind;
+    button.dataset.value = value;
+    if (withDot) button.dataset.verdict = value;
+    const on = libraryFilters[kind] === value;
+    button.setAttribute("aria-pressed", String(on));
+    // The chip's own name is the filter, not "toggle": a screen reader reading
+    // "Contradicted, pressed" says both what it does and whether it is doing it.
+    button.setAttribute("aria-label", label);
+    if (withDot) {
+      const dot = document.createElement("span");
+      dot.className = "lib-chip-dot";
+      button.append(dot);
+    }
+    button.append(document.createTextNode(label));
+    return button;
+  };
+
+  if (showVerdicts) {
+    for (const key of verdicts) el.libFilters.append(chip("verdict", key, VERDICTS[key].label, true));
+  }
+  if (showPlatforms) {
+    for (const name of platforms) el.libFilters.append(chip("platform", name, name, false));
+  }
+}
+
+/** A chip click: on, or off if it was already the one on. One value per kind — these are
+ * radio-ish rather than multi-select, because "contradicted or disputed" is a query nobody
+ * has yet asked for and a set of half-lit chips is harder to read than one lit one. */
+el.libFilters?.addEventListener("click", (event) => {
+  const chip = event.target.closest(".lib-chip");
+  if (!chip) return;
+  const { filter, value } = chip.dataset;
+  libraryFilters[filter] = libraryFilters[filter] === value ? null : value;
+  renderLibrary(el.searchInput.value);
+});
+
 function renderLibrary(filter = "") {
   // The open check's own title and status live in the shell title bar too, and both change
   // under a running check without the selection ever changing — see `updateShellTopbar`.
   updateShellTopbar();
   el.libList.replaceChildren();
-  const needle = filter.trim().toLowerCase();
-  const visible = needle ? library.filter((e) => e.title.toLowerCase().includes(needle)) : library;
+  renderLibraryFilters();
+  // Text plus whichever chips are on — see public/library-search.js for what a row is
+  // searched by, and why it is no longer only the title.
+  const visible = filterLibrary(library, { ...libraryFilters, text: filter });
 
   if (visible.length === 0) {
     const empty = document.createElement("li");
@@ -2192,12 +2297,36 @@ function fillLibThumb(thumb, entry) {
   icon.src = `${origin}/favicon.ico`;
 }
 
+/**
+ * A finished check of a post that turned up no claim at all.
+ *
+ * Every condition here is something the app knows rather than infers: the check ran to the
+ * end (not running, not errored, not cut short), it had a post as its subject (`url` — a
+ * link-less conversation is a different thing entirely, see `runChat`), and the model
+ * opened no `[[claim: …]]` block. See `NO_CLAIMS` in claims.js for why that last fact is a
+ * state of its own and not the "Insufficient evidence" it used to be shown as.
+ *
+ * `claims` is `null` for an answer with no markers and an array otherwise, so an empty
+ * array is impossible here — but it is tested for anyway, because the difference between
+ * "no claims" and "zero claims" is exactly what this function is about.
+ */
+function foundNoClaims(entry) {
+  return Boolean(
+    entry?.url &&
+      entry.status === "done" &&
+      !entry.incomplete &&
+      !(entry.claims?.length > 0) &&
+      !entry.verdictKey,
+  );
+}
+
 function dotClassFor(entry) {
   if (entry.status === "running") return "warn";
   if (entry.status === "error") return "muted";
   // A saved link-less conversation (see `runChat`) has no single verdict — it's a stack of
   // independently-answered questions, not one claim under examination.
   if (!entry.url) return "muted";
+  if (foundNoClaims(entry)) return NO_CLAIMS.css;
   return VERDICTS[entry.verdictKey]?.css ?? "muted";
 }
 
@@ -2237,6 +2366,7 @@ function statusLabel(entry) {
   // not be filed in the library under one. "Unclassified" would be a truthful label and a
   // useless one — it reads as a property of the claim rather than of the check.
   if (entry.incomplete && !entry.verdictKey) return entry.incomplete.label;
+  if (foundNoClaims(entry)) return NO_CLAIMS.label;
   return VERDICTS[entry.verdictKey]?.label ?? "Unclassified";
 }
 
@@ -4014,6 +4144,15 @@ function badgeHTML(verdictKey, animate) {
  */
 function verdictHTML(entry, animate) {
   if (entry.incomplete && !entry.verdictKey) return "";
+  // A finished check that found nothing to check says so, rather than borrowing the one
+  // verdict that means "we looked and couldn't settle it" — see `NO_CLAIMS` in claims.js.
+  if (foundNoClaims(entry)) {
+    const icon = BADGE_ICONS[NO_CLAIMS.css] ?? "";
+    return `
+    <div class="badges">
+      <span ${revealAttrs(`badge verdict ${NO_CLAIMS.css}`, animate)}><svg class="badge-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">${icon}</svg>${escapeHTML(NO_CLAIMS.label)}</span>
+    </div>`;
+  }
   return badgeHTML(entry.verdictKey ?? "insufficient", animate);
 }
 
@@ -4059,16 +4198,35 @@ function durationHTML(ms, animate, label = "Checked in") {
  * different width. `excerpt` isn't fetched by anything today, so this is always just the
  * domain and title in practice; the field is still handled here so a future ledger entry
  * that does carry one needs no template changes. */
+/**
+ * What kind of publisher a source is, as a small badge beside its domain.
+ *
+ * The failure it exists for: a claim answered **Corroborated** citing a Reddit thread looks
+ * exactly like one citing a statistics office, because a pill is a pill. The badge is the
+ * difference, said in one word the reader can weigh for themselves — it labels provenance,
+ * it does not rate truth. See public/source-quality.js.
+ *
+ * The tier is taken off the row when the server sent one and derived here when it didn't,
+ * so answers stored before this existed get labelled on the way to the screen rather than
+ * needing a migration.
+ */
+function tierBadgeHTML(s) {
+  const tier = s?.tier ?? classifySource(s ?? {});
+  const meta = TIER_LABELS[tier];
+  if (!meta) return "";
+  return `<span class="source-tier" data-tier="${tier}" title="${escapeHTML(meta.hint)}">${escapeHTML(meta.label)}</span>`;
+}
+
 function sourceDetailHTML(s) {
   return `
-    <span class="source-expand-domain">${escapeHTML(s.domain)}</span>
+    <span class="source-expand-domain">${escapeHTML(s.domain)}${tierBadgeHTML(s)}</span>
     ${s.title ? `<span class="source-expand-title">${escapeHTML(s.title)}</span>` : ""}
     ${s.excerpt ? `<span class="source-expand-excerpt">“${escapeHTML(s.excerpt)}”</span>` : ""}`;
 }
 
 function sourcePillHTML(s) {
   const hasDetail = Boolean(s.title || s.excerpt);
-  return `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer"><span class="source-pill-domain">${escapeHTML(s.domain)}</span>${
+  return `<a class="source-pill" href="${escapeHTML(s.url)}" target="_blank" rel="noopener noreferrer" data-tier="${s?.tier ?? classifySource(s ?? {})}"><span class="source-pill-domain">${escapeHTML(s.domain)}</span>${tierBadgeHTML(s)}${
     hasDetail ? `<span class="source-pill-popover">${sourceDetailHTML(s)}</span>` : ""
   }</a>`;
 }
@@ -4628,7 +4786,15 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: requestHeaders(),
-    body: JSON.stringify(clipHints ? { messages, clipHints } : { messages }),
+    // `sourceTiers` rides along on every turn rather than being remembered server-side:
+    // the API is stateless and the rate limiter's in-memory store already shows what
+    // happens to per-client state on a serverless host. See `normaliseTiers` in api/chat.js
+    // for the validation that makes accepting it from the browser safe.
+    body: JSON.stringify({
+      messages,
+      ...(clipHints ? { clipHints } : {}),
+      sourceTiers: normaliseTiers(settings.sourceTiers),
+    }),
     signal,
   });
 
@@ -5921,6 +6087,141 @@ function setSettingsTab(tab) {
   });
 }
 
+/**
+ * The four source-tier checkboxes in Settings → Search.
+ *
+ * Built from `TIERS` rather than written out in the markup, so the rows, their labels and
+ * what the server actually filters on all come from one list. Unticking a tier means the
+ * model is never shown a result from it — see `sourceTiers` in api/chat.js.
+ */
+function renderSourceTierSettings() {
+  if (!el.settingSourceTiers) return;
+  const allowed = new Set(normaliseTiers(settings.sourceTiers));
+  el.settingSourceTiers.replaceChildren();
+  for (const tier of TIERS) {
+    const { label, hint } = TIER_LABELS[tier];
+    const row = document.createElement("label");
+    row.className = "tier-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.tier = tier;
+    box.checked = allowed.has(tier);
+    const text = document.createElement("span");
+    text.className = "tier-row-text";
+    const name = document.createElement("span");
+    name.className = "settings-row-label";
+    name.textContent = label;
+    const sub = document.createElement("span");
+    sub.className = "settings-row-sub";
+    sub.textContent = hint;
+    text.append(name, sub);
+    row.append(box, text);
+    el.settingSourceTiers.append(row);
+  }
+}
+
+el.settingSourceTiers?.addEventListener("change", (event) => {
+  const box = event.target.closest("input[type=checkbox][data-tier]");
+  if (!box) return;
+  const chosen = [...el.settingSourceTiers.querySelectorAll("input[type=checkbox][data-tier]")]
+    .filter((input) => input.checked)
+    .map((input) => input.dataset.tier);
+  // Unticking the last box is a contradiction — "check this with no sources" — and the
+  // server would read it as "all of them" anyway (see `normaliseTiers`). Rather than let
+  // the two disagree, the box springs back and says why.
+  if (chosen.length === 0) {
+    box.checked = true;
+    return;
+  }
+  settings.sourceTiers = chosen;
+  persistSettings();
+});
+
+/** Settings → Data: the count on the delete button, so it says what it is about to remove. */
+function renderDataSettings() {
+  if (!el.deleteAllSub) return;
+  const n = library.length;
+  el.deleteAllSub.textContent =
+    n === 0
+      ? "There are no checks stored in this browser."
+      : `Removes ${n === 1 ? "the 1 check" : `all ${n} checks`} from this browser. This can't be undone.`;
+  if (el.deleteAllBtn) el.deleteAllBtn.disabled = n === 0;
+  if (el.exportDataBtn) el.exportDataBtn.disabled = n === 0;
+}
+
+/**
+ * Every check in this browser, as one JSON file.
+ *
+ * The library's own stored shape, not a flattened report: this is the reader's data, and
+ * the useful thing to hand them is the thing the app itself holds — answers, claims,
+ * sources, follow-ups and timestamps included — rather than a prettier subset they cannot
+ * reload from. Written client-side with a blob URL, because there is no server-side copy
+ * to ask for unless they are signed in.
+ */
+el.exportDataBtn?.addEventListener("click", () => {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    app: "trase",
+    version: 1,
+    checks: library,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  const stamp = new Date().toISOString().slice(0, 10);
+  link.download = `trase-checks-${stamp}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoked on the next turn of the event loop rather than immediately: some engines
+  // haven't started reading the blob by the time `click()` returns.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+});
+
+/**
+ * Delete everything, with a confirm in front of it.
+ *
+ * Deliberately not the undo banner `deleteEntry` uses. That banner is proportionate to one
+ * row; this throws away the reader's whole history, and "are you sure" before is worth more
+ * than "undo" after when the after is a banner they may not see. The cloud copy goes too
+ * when they are signed in, because a "delete all" that leaves the rows to sync back down on
+ * the next sign-in has not deleted anything.
+ */
+el.deleteAllBtn?.addEventListener("click", async () => {
+  if (inFlight) return;
+  const n = library.length;
+  if (n === 0) return;
+  const ok = window.confirm(
+    `Delete ${n === 1 ? "the 1 check" : `all ${n} checks`} stored in this browser? This can't be undone.`,
+  );
+  if (!ok) return;
+
+  const ids = library.map((entry) => entry.id);
+  library = [];
+  selectedId = null;
+  pendingFollowup = null;
+  chatThread = [];
+  pendingChat = null;
+  persistLibrary();
+  updatePaneMode();
+  renderLibrary(el.searchInput.value);
+  renderEmptyState();
+  updateComposerMode();
+  syncCheckLocation({ replace: true });
+  renderDataSettings();
+  // Best-effort, one row at a time and after the local state is already clean — the same
+  // posture `deleteEntry` takes. A failure here must not leave the reader looking at rows
+  // they just deleted.
+  for (const id of ids) {
+    try {
+      await accounts.deleteConversation?.(id);
+    } catch {
+      // Signed out, offline, or the row was never synced. Nothing to report.
+    }
+  }
+});
+
 function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
@@ -5928,6 +6229,8 @@ function openSettingsDialog() {
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   updateThemeButtons();
+  renderSourceTierSettings();
+  renderDataSettings();
   renderSearchStatus();
   renderAccountUI();
   setSettingsTab(settingsTab);

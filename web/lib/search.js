@@ -10,6 +10,7 @@
 // and letting one through would put an uncheckable citation in a fact-check.
 
 import { SEARCH_QUERY_SCHEMA, validateSearchQuery } from "./search-schema.js";
+import { rankResults, ALL_TIERS } from "../public/source-quality.js";
 
 /** Longest one search may take before we give up on it. */
 export const SEARCH_TIMEOUT_MS = 15_000;
@@ -418,7 +419,17 @@ export function unwrapDuckDuckGoURL(href) {
  */
 export async function search(
   rawQuery,
-  { env = process.env, fetchImpl = fetch, signal, timeoutMs = SEARCH_TIMEOUT_MS, provider } = {},
+  {
+    env = process.env,
+    fetchImpl = fetch,
+    signal,
+    timeoutMs = SEARCH_TIMEOUT_MS,
+    provider,
+    // Which kinds of publisher this request may cite. Defaults to all of them, so every
+    // existing caller and every test keeps the behaviour it had; the reader's own choice
+    // arrives from the browser (see `sourceTiers` in api/chat.js).
+    tiers = ALL_TIERS,
+  } = {},
 ) {
   const query = validateSearchQuery(rawQuery);
   const chosen = provider ?? providerFromEnv(env);
@@ -450,7 +461,11 @@ export async function search(
       freshness: query.freshness ?? "any",
       provider: chosen.name,
       retrievedAt: new Date().toISOString(),
-      results: normaliseResults(raw, limit),
+      // Tagged with what kind of publisher each one is, dropped if its kind is switched off
+      // in settings, and ordered best-supported first — see public/source-quality.js. The cap
+      // is applied *after* that rather than before, so excluding forums returns a full page
+      // of the sources that are left instead of a short one with the holes still in it.
+      results: rankResults(normaliseResults(raw, Number.MAX_SAFE_INTEGER), tiers).slice(0, limit),
     };
   } catch (error) {
     if (timer.signal.aborted && !signal?.aborted) {

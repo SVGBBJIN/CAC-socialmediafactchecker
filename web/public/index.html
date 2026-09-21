@@ -261,6 +261,38 @@
   }
   .search::placeholder { color: #616977; }
   .search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* When there is a chip row, the gap below the box belongs to the chips rather than
+     doubling up with theirs. */
+  .search:has(+ .lib-filters:not([hidden])) { margin-bottom: 8px; }
+
+  /* Verdict and platform chips. Wraps rather than scrolls: the sidebar is ~200px and a
+     horizontal scroller there hides its own overflow with no affordance, whereas two short
+     rows of chips are simply two rows. See `renderLibraryFilters` in app.js. */
+  .lib-filters {
+    display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; flex-shrink: 0;
+  }
+  .lib-chip {
+    font-family: var(--font-body); font-size: 11px; line-height: 1;
+    padding: 5px 9px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-raised); color: var(--ink-dim);
+    display: inline-flex; align-items: center; gap: 5px;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .lib-chip:hover { color: var(--ink); border-color: var(--accent); }
+  .lib-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* `aria-pressed` is what actually says a chip is on, so the styling keys off it rather
+     than off a class kept in parallel with it. */
+  .lib-chip[aria-pressed="true"] {
+    color: var(--ink); border-color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 16%, transparent);
+  }
+  /* The verdict's own colour, the same four `.badge` uses, as a dot — so a chip is
+     recognisable as "the contradicted ones" before its label is read. */
+  .lib-chip-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+  .lib-chip[data-verdict="contradicted"] .lib-chip-dot { background: var(--bad); }
+  .lib-chip[data-verdict="disputed"] .lib-chip-dot { background: var(--warn); }
+  .lib-chip[data-verdict="corroborated"] .lib-chip-dot { background: var(--good); }
+  .lib-chip[data-verdict="insufficient"] .lib-chip-dot { background: var(--muted); }
 
   .lib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
 
@@ -2463,6 +2495,38 @@
   .retry-button:hover { border-color: var(--accent); color: var(--accent); }
   .retry-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .retry-button:disabled { opacity: 0.5; cursor: default; }
+  /* Destructive, so it reads as destructive before it is pressed rather than only in the
+     confirmation that follows. Same shape as its neighbours — this is a colour, not a
+     different kind of control. */
+  .retry-button.danger { color: var(--bad); border-color: color-mix(in oklab, var(--bad) 45%, transparent); }
+  .retry-button.danger:hover { border-color: var(--bad); color: var(--bad); background: color-mix(in oklab, var(--bad) 12%, transparent); }
+
+  /* One row per source tier in Settings → Search. A checkbox rather than a switch: these
+     are four members of one set being included or excluded, which is what a checkbox says
+     and what a row of switches does not. */
+  .tier-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .tier-row:last-child { border-bottom: none; }
+  .tier-row input { margin-top: 2px; accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
+  .tier-row-text { display: flex; flex-direction: column; gap: 2px; }
+
+  /* The tier badge on a source pill and in its expanded row — see `tierBadgeHTML`. Tiny
+     and unemphatic on purpose: it labels a link, it does not rate it. */
+  .source-tier {
+    font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 4px; flex: none;
+    border: 1px solid currentColor; opacity: 0.85;
+  }
+  .source-tier[data-tier="primary"] { color: var(--good); }
+  .source-tier[data-tier="news"] { color: var(--accent); }
+  .source-tier[data-tier="reference"] { color: var(--accent-2); }
+  /* The one the reader most needs to notice, so it gets the colour that means "careful"
+     rather than the one that means "wrong" — a forum thread is weak provenance, not a
+     false claim. */
+  .source-tier[data-tier="forum"] { color: var(--warn); }
+  /* Inside a pill the badge sits after the domain and must not make the pill taller than
+     the row of them, so it borrows the pill's own line-height rather than setting one. */
+  .source-pill .source-tier { margin-left: 5px; line-height: inherit; }
+  .source-expand-domain .source-tier { margin-left: 6px; }
 
   /* ---------- Follow-up thread ---------- */
   .thread {
@@ -3738,7 +3802,13 @@
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="new-check-label">New chat</span>
       </button>
-      <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks…" />
+      <input class="search" id="searchInput" aria-label="Search checks" placeholder="Search checks, claims, sources…" />
+      <!-- Verdict and platform chips, filled by `renderLibraryFilters` from the rows the
+           library actually holds — an empty row here means a library with nothing to narrow
+           yet, which is why the container starts empty rather than listing all four
+           verdicts. `role="group"` so the chips announce as one control rather than as a
+           run of unrelated toggle buttons. -->
+      <div class="lib-filters" id="libFilters" role="group" aria-label="Filter checks" hidden></div>
       <ul class="lib-list" id="libList"></ul>
       <!-- The undo half of deleting a check. Deleting is immediate now (no confirmation
            dialog in front of it — see deleteEntry in app.js); this is the safety net that
@@ -4099,6 +4169,7 @@
           <button type="button" class="settings-nav-item" data-tab="general" role="tab" aria-selected="false">General</button>
           <button type="button" class="settings-nav-item" data-tab="search" role="tab" aria-selected="false">Search</button>
           <button type="button" class="settings-nav-item" data-tab="instructions" role="tab" aria-selected="false">Instructions</button>
+          <button type="button" class="settings-nav-item" data-tab="data" role="tab" aria-selected="false">Data</button>
         </div>
         <button type="submit" class="settings-close">Done</button>
       </nav>
@@ -4144,6 +4215,10 @@
             <div class="seg-control" id="setting-theme" role="group" aria-label="Theme">
               <button type="button" data-value="dark">Dark</button>
               <button type="button" data-value="light">Light</button>
+              <!-- Follows `prefers-color-scheme` and keeps following it: the app re-themes
+                   when the OS flips at sunset without the page being reloaded. See
+                   `applySettings` and `watchSystemTheme` in app.js. -->
+              <button type="button" data-value="system">System</button>
             </div>
           </div>
           <div class="settings-row">
@@ -4195,6 +4270,38 @@
             <div class="search-status" id="searchStatus">
               <span class="dot muted"></span><span>Checking…</span>
             </div>
+          </div>
+
+          <h2 style="margin-top: 22px;">Which sources a check may use</h2>
+          <p class="settings-row-sub" style="margin: 0 0 4px;">
+            Unticking a kind removes it from the search results the model is given, so it
+            can't be cited — this filters the evidence, not just the list. These are
+            judgements about who publishes a page, not about whether it is true.
+          </p>
+          <!-- Filled by `renderSourceTierSettings` from TIERS, so the four rows and the
+               four labels can't drift apart. -->
+          <div id="setting-source-tiers"></div>
+        </section>
+
+        <section class="settings-section" data-tab-panel="data" hidden>
+          <h2>Your data</h2>
+          <p class="settings-row-sub" style="margin: 0 0 10px;">
+            Checks are kept in this browser. Signing in copies them to your account as well;
+            signing out does not remove the copy here.
+          </p>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label">Export checks</div>
+              <div class="settings-row-sub">Downloads every check, follow-up and source as one JSON file.</div>
+            </div>
+            <button type="button" class="retry-button" id="exportDataBtn">Export</button>
+          </div>
+          <div class="settings-row" style="border-bottom: none;">
+            <div>
+              <div class="settings-row-label">Delete all checks</div>
+              <div class="settings-row-sub" id="deleteAllSub">Removes every check from this browser. This can't be undone.</div>
+            </div>
+            <button type="button" class="retry-button danger" id="deleteAllBtn">Delete all</button>
           </div>
         </section>
 

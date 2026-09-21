@@ -18,6 +18,28 @@ export const VERDICTS = {
 };
 
 /**
+ * The outcome that is not a verdict: a check ran, and the post had no factual claim in it.
+ *
+ * This is **not** a fifth verdict and must never be added to `VERDICTS` — nothing may parse
+ * to it, no `VERDICT:` line may name it, and `VERDICT_ALIASES` must never gain a spelling
+ * of it. It is a display state the app reaches on its own, from a fact it already knows for
+ * certain: the check completed, the subject was a post, and the model opened no
+ * `[[claim: …]]` block at all.
+ *
+ * Why it is worth having. "Insufficient evidence" is a finding about a claim — *we looked
+ * and could not settle this*. Showing it for a music video reads as the check having failed
+ * at its job, when what actually happened is that the job was completed and came back
+ * empty. Those are opposite messages and the app was sending the wrong one.
+ *
+ * Why it is safe. It rests on the absence of the model's own marker, not on a guess about
+ * prose — the same thing `splitClaims` returning `null` already means, just said out loud
+ * instead of quietly falling back to a verdict nobody wrote. It is the exact opposite of
+ * the sentence-level claim detection this codebase tore out (see lib/verified-chat.js): it
+ * asks nothing of the text.
+ */
+export const NO_CLAIMS = { label: "No factual claims", css: "muted" };
+
+/**
  * The system prompt asks for exactly one of the four `VERDICTS` labels, and that is what a
  * compliant answer writes. This is the net under that, not a replacement for it: a model
  * that drifts to a close synonym — "False" instead of "Contradicted", "Unverified" instead

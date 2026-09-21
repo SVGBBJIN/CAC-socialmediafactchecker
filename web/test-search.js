@@ -300,18 +300,26 @@ test("the DuckDuckGo parser reads the markup DuckDuckGo actually serves", async 
 
   assert.equal(requested.searchParams.get("q"), "who won the 2022 world cup");
   assert.equal(requested.searchParams.get("df"), "y");
+  // Every result the page held, in the order `rankResults` puts them in rather than the
+  // order DuckDuckGo listed them: the two newsroom results outrank the encyclopedia entry,
+  // which is the source-quality ordering doing its job on real markup. See
+  // public/source-quality.js.
   assert.deepEqual(
     result.results.map((r) => r.url),
     [
-      "https://en.wikipedia.org/wiki/2022_FIFA_World_Cup_final",
       "https://www.fifa.com/en/match-centre/match/17/255711/285077/400128145",
       // The redirect wrapper is unwrapped, so the citation points at the BBC, not at DDG.
       "https://www.bbc.co.uk/sport/football/63997238",
+      "https://en.wikipedia.org/wiki/2022_FIFA_World_Cup_final",
     ],
   );
-  assert.equal(result.results[1].title, "Argentina vs France 3-3 | Final | FIFA World Cup Qatar 2022™ | FIFA");
-  assert.match(result.results[0].snippet, /^The final match of the 2022 FIFA World Cup was played/);
-  assert.ok(!result.results[0].snippet.includes("<b>"));
+  assert.deepEqual(result.results.map((r) => r.tier), ["news", "news", "reference"]);
+
+  const wiki = result.results.find((r) => r.domain === "en.wikipedia.org");
+  const fifa = result.results.find((r) => r.domain === "fifa.com");
+  assert.equal(fifa.title, "Argentina vs France 3-3 | Final | FIFA World Cup Qatar 2022™ | FIFA");
+  assert.match(wiki.snippet, /^The final match of the 2022 FIFA World Cup was played/);
+  assert.ok(!wiki.snippet.includes("<b>"));
 });
 
 test("a challenge page is reported, not returned as an empty search", async () => {
