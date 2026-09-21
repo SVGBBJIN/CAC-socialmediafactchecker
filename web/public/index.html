@@ -1570,6 +1570,18 @@
   }
   .claim-title.in { opacity: 1; transform: translateY(0); }
 
+  /* "Claim:" — the app's own word, not the model's, saying whose sentence the heading is.
+     Set quieter than the claim so the claim still reads as the heading, and `select-none`
+     is deliberately NOT used: someone copying the heading by hand should get the framing
+     too, the same as the badge beside it. See `claimTitleHTML` in app.js. */
+  .claim-title-label {
+    font-weight: 500; color: var(--ink-dim); letter-spacing: 0.01em;
+  }
+  /* A `[t=…]` in the label renders as the same chip the body uses (see `claimTitleHTML`),
+     and a heading's line-height is tighter than a paragraph's — so the chip is pulled back
+     to the text's own size rather than setting the line's height on its own. */
+  .claim-title .ts-chip { font-size: 0.82em; vertical-align: baseline; }
+
   .claim-text {
     font-family: var(--font-display); font-size: 16.5px; line-height: 1.55; color: var(--ink);
     margin: 0 0 16px;

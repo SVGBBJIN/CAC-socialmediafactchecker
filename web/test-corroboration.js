@@ -86,6 +86,25 @@ test("claimSpecifics drops framing words from the terms it requires", () => {
   assert.deepEqual(claimSpecifics("Keir Starmer is currently Prime Minister").terms, []);
 });
 
+test("claimSpecifics ignores the app's own timestamp and citation markers", () => {
+  // `[t=0:01-0:03]` is where in the clip the claim is made, not a figure the sources have
+  // to quote. Read as one, it required "0" and "01" of every page, nothing carried them,
+  // and the claim was downgraded with a note naming bare digits at the reader.
+  const marked = claimSpecifics("The elephants are in front of the San Diego Zoo [t=0:01-0:03]");
+  assert.deepEqual(marked.numbers, []);
+  assert.deepEqual(marked, claimSpecifics("The elephants are in front of the San Diego Zoo"));
+
+  // Nor is `t` a word of the claim, so the term list must not grow one either.
+  assert.ok(!marked.terms.includes("t"));
+
+  // A citation marker is the same kind of app syntax, and its number is just as fictional
+  // as a required figure.
+  assert.deepEqual(claimSpecifics("Apollo 11 landed in 1969 [3]").numbers, ["11", "1969"]);
+
+  // What a marker must never do is hide a real figure that sits beside it.
+  assert.deepEqual(claimSpecifics("Inflation fell to 4.2% in 2024 [t=1:13]").numbers, ["4.2", "2024"]);
+});
+
 /* ---------------------------------------------------------------- sourceEvidenceText */
 
 test("sourceEvidenceText reads the page, including its slug and its read passages", () => {

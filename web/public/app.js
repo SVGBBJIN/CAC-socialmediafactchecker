@@ -28,6 +28,7 @@ import {
 import { parseBlocks } from "./markdown.js";
 import { VERDICTS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
+import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
 
 const LIBRARY_KEY = "trase.library.v1";
 const ACTIVITY_KEY = "trase.activity.v1";
@@ -1345,6 +1346,31 @@ function renderInline(text, sources, seekable) {
 }
 
 /**
+ * A claim's `[[claim: …]]` label as the heading of its card.
+ *
+ * Two things this is not allowed to be, both of which it was while it went through
+ * `escapeHTML` alone:
+ *
+ * - **Raw app syntax.** The model writes `[t=0:01-0:03]` wherever it names the moment a
+ *   claim is made, and that is as often in the label as in the body. The body ran through
+ *   `renderInline` and got a chip; the title didn't and showed the marker verbatim — so
+ *   whether a claim got a tappable chip came down to where the model happened to put the
+ *   marker, which reads as a broken parser because it is one. Same for a `[n]` citation.
+ * - **The claim stated as fact.** "NASA faked the moon landing" set in heading type, with a
+ *   Contradicted badge beside it, is the app appearing to assert the thing it is about to
+ *   refute — and a reader scrolling past the badge takes the heading at face value. The
+ *   label says whose sentence this is. It is a `<span>` inside the heading rather than part
+ *   of the text so that copy, share and the stored answer are untouched: this is framing
+ *   the app adds for the reader, not words put in the model's mouth.
+ */
+function claimTitleHTML(title, sources, seekable) {
+  return (
+    `<span class="claim-title-label">Claim:</span> ` +
+    `<span class="claim-title-text">${renderInline(String(title ?? ""), sources, seekable)}</span>`
+  );
+}
+
+/**
  * A parsed block (see markdown.js) as HTML.
  *
  * markdown.js decides the shape — what is a list, what nests inside what — and this
@@ -2370,7 +2396,84 @@ function openEntryInPane(entry) {
   else renderErrorCard({ ...entry, error: entry.error ?? RUNNING_ELSEWHERE_MESSAGE });
 }
 
-function selectEntry(id) {
+/* ---------------------------------------------------------------- the address bar
+
+ * A check's own URL, `/c/<id>` (see public/deeplink.js for the shape and for why it is
+ * local to this browser). Three things it buys, none of which `/` could: a check can be
+ * bookmarked, it can be opened in a second tab, and the browser's Back button walks back
+ * through the checks that were read rather than straight out of the app.
+ *
+ * `pushState`/`replaceState` only — never an assignment to `location`, which would reload
+ * the page and throw away the whole in-memory run state (`inFlight`, the stream, the video
+ * element) to arrive at markup the app was already showing.
+ */
+
+/** The address the browser should be showing for whatever is selected right now. */
+function currentCheckPath() {
+  const entry = selectedId ? findEntry(selectedId) : null;
+  // Only a real, saved check gets an address. A free-standing chat turn has a library entry
+  // but no `url`, and pointing a shareable link at "a conversation on this device" is a
+  // promise the local-only storage can't keep as well as it can for a check.
+  return entry?.url ? pathForCheck(entry.id) : "/";
+}
+
+/**
+ * Points the address bar at what is on screen.
+ *
+ * `replace` for anything that isn't the reader navigating — restoring at startup, a
+ * selected entry being deleted — so those don't become Back-button steps to a check that
+ * no longer exists or was never chosen.
+ */
+function syncCheckLocation({ replace = false } = {}) {
+  const path = currentCheckPath();
+  if (path === location.pathname) return;
+  try {
+    history[replace ? "replaceState" : "pushState"]({ checkId: selectedId }, "", path + location.search);
+  } catch {
+    // A sandboxed or `file://` document refuses history writes. The app is fully usable
+    // without an address bar that tracks it; this is the one feature that quietly isn't.
+  }
+}
+
+/** The link the Share button hands out, or the app's own address if this entry has none. */
+function shareLinkFor(entry) {
+  return (entry?.url ? shareURL(location.origin, entry.id) : null) ?? location.origin + "/";
+}
+
+/** What the share sheet calls it — the post's own title when one resolved, which is what a
+ * recipient recognises, rather than "Trase fact-check" for every check ever shared. */
+function shareTitleFor(entry) {
+  const title = String(entry?.title ?? "").trim();
+  return title && title !== entry?.url ? `Fact-check: ${title}` : "Trase fact-check";
+}
+
+/**
+ * Back/Forward between checks.
+ *
+ * Guarded on `inFlight` for the same reason `selectEntry` is — a running turn writes into
+ * the pane it was started against — and the address is put back where it was so the button
+ * having done nothing is at least consistent with what the URL says.
+ */
+window.addEventListener("popstate", () => {
+  const id = checkIdFromPath(location.pathname);
+  if (inFlight) {
+    syncCheckLocation({ replace: true });
+    return;
+  }
+  if (id && findEntry(id)) {
+    selectEntry(id, { fromHistory: true });
+    return;
+  }
+  if (id) {
+    // A Back into a check that has since been deleted. Say so rather than silently landing
+    // on the empty state, which reads as the app having lost it.
+    showMissingCheck(id);
+    return;
+  }
+  startNewCheck({ fromHistory: true });
+});
+
+function selectEntry(id, { fromHistory = false } = {}) {
   if (inFlight) return; // Don't let a click yank the pane out from under a running turn.
   // Picking a check is the whole reason the drawer was opened, so it has done its job.
   // No-op above phone width, where the sidebar is a permanent column.
@@ -2381,6 +2484,9 @@ function selectEntry(id) {
   renderLibrary(el.searchInput.value);
   openEntryInPane(findEntry(id));
   updateComposerMode();
+  // A Back/Forward press is the browser telling us where it already is — pushing another
+  // entry for it would make the button walk on the spot.
+  if (!fromHistory) syncCheckLocation();
 }
 
 /** Removes one entry from the library — local storage immediately, the cloud row
@@ -2411,6 +2517,9 @@ function deleteEntry(id) {
     pendingChat = null;
     renderEmptyState();
     updateComposerMode();
+    // Replace rather than push: the check just went away, so a Back press must not offer
+    // to return to its address. The undo banner is what brings it back, and it re-selects.
+    syncCheckLocation({ replace: true });
   }
   persistLibrary();
   renderLibrary(el.searchInput.value);
@@ -2530,7 +2639,7 @@ function turnBodyHTML(turn, sources, animate, seekable) {
   return turn.claims
     .map(
       (claim) => `
-      <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+      <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, sources, seekable)}</p>
       <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
       ${badgeHTML(claim.verdictKey, animate)}`,
     )
@@ -2734,7 +2843,7 @@ async function runChat(question) {
  * this app is running — one at a time is still the rule, and it is now visible in the one
  * control that would otherwise start a second.
  */
-function startNewCheck() {
+function startNewCheck({ fromHistory = false } = {}) {
   // The one turn that cannot simply be left running: a chat or a follow-up writes into
   // `chatThread`/`pendingFollowup`, which is the pane state this function is about to
   // clear, so it would finish by drawing the conversation the reader just left on top of
@@ -2753,7 +2862,39 @@ function startNewCheck() {
   renderLibrary(el.searchInput.value);
   renderEmptyState();
   updateComposerMode();
+  if (!fromHistory) syncCheckLocation();
   el.linkInput.focus();
+}
+
+/**
+ * `/c/<id>` for a check this browser doesn't have.
+ *
+ * The honest state for a local-only address: the link is well-formed and the check it names
+ * was run somewhere else — another browser, another device, or here before the library was
+ * cleared. Worth its own card because the alternative, the ordinary empty state, reads as
+ * the app having lost the check rather than never having had it.
+ */
+function showMissingCheck(id) {
+  selectedId = null;
+  pendingFollowup = null;
+  chatThread = [];
+  pendingChat = null;
+  updatePaneMode();
+  renderLibrary(el.searchInput.value);
+  setClaimsPaneHTML(`
+    <div class="claim-card" role="status">
+      <p class="claim-title in"><span class="claim-title-text">This check isn't on this device</span></p>
+      <p class="claim-text in">
+        Checks are kept in the browser that ran them, so a <code>/c/…</code> link opens only
+        for the person who made it, on the device they made it on. Paste the original link
+        below to run the check here.
+      </p>
+    </div>`);
+  revealIn(el.claimsPane);
+  updateComposerMode();
+  // Kept in the address bar deliberately: a reload should land on the same explanation, and
+  // the reader may still want to copy the id out of it.
+  void id;
 }
 
 /* ---------------------------------------------------------------- video pane */
@@ -3636,7 +3777,7 @@ function loadingClaimHTML(claim, index, sources, seekable) {
   return `
     <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
       ${done ? badgeHTML(claim.verdictKey, false) : ""}
-      <p class="claim-title in">${escapeHTML(claim.title)}</p>
+      <p class="claim-title in">${claimTitleHTML(claim.title, sources, seekable)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
     </div>`;
 }
@@ -4074,6 +4215,49 @@ function actionRowHTML(entryId, followupIndex) {
     </div>`;
 }
 
+/**
+ * Text onto the clipboard, by whichever of the two routes this browser actually allows.
+ *
+ * `navigator.clipboard` is the right API and it is missing or throws in more places than is
+ * comfortable: any page not on a secure origin (a phone opening a LAN dev server by IP),
+ * Safari outside a user gesture the engine still recognises, and permission policies that
+ * reject the write without saying so. The old code treated that rejection as "couldn't
+ * share" and stopped, which is how a desktop browser with no Web Share API ended up
+ * offering nothing at all.
+ *
+ * So the deprecated `execCommand("copy")` stays as the floor. It is synchronous, it works
+ * on insecure origins, and it is what every "copy" button on the web fell back to before
+ * the async API existed. The textarea is positioned off-screen rather than hidden —
+ * `display: none` and `visibility: hidden` both make the selection uncopyable — and
+ * `readOnly` keeps the on-screen keyboard down on a phone while still allowing selection.
+ *
+ * @returns whether the text is now on the clipboard, so the caller can say so honestly.
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through: a rejection here says this route is unavailable, not that copying is.
+  }
+  try {
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.setAttribute("readonly", "");
+    field.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+    document.body.append(field);
+    field.select();
+    field.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    field.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function flashActionFeedback(row, message) {
   const span = row.querySelector(".action-feedback");
   if (!span) return;
@@ -4146,29 +4330,28 @@ async function handleClaimsPaneClick(event) {
 
   const action = btn.dataset.action;
   if (action === "copy") {
-    try {
-      await navigator.clipboard.writeText(text);
-      flashActionFeedback(row, "Copied");
-    } catch {
-      flashActionFeedback(row, "Couldn't copy");
-    }
+    flashActionFeedback(row, (await copyText(text)) ? "Copied" : "Couldn't copy");
     return;
   }
   if (action === "share") {
+    // What a reader means by sharing a check is the check, not a transcript of it — so the
+    // link comes first and the answer rides along as the text. `shareLinkFor` is a real
+    // openable address (see the `/c/<id>` router), which is the thing the old code could
+    // never offer and the reason its fallback read as a failure.
+    const link = shareLinkFor(entry);
     if (navigator.share) {
       try {
-        await navigator.share({ title: "Trase fact-check", text, url: entry.url });
-      } catch {
-        // AbortError from the user cancelling the share sheet isn't a failure worth reporting.
+        await navigator.share({ title: shareTitleFor(entry), text, url: link });
+        return;
+      } catch (error) {
+        // Cancelling the sheet is not a failure. Anything else is the sheet refusing the
+        // share outright (a non-secure context, a payload it won't take, a desktop build
+        // that advertises `share` and then throws), and falling through to the clipboard is
+        // strictly better than telling the reader it didn't work.
+        if (error?.name === "AbortError") return;
       }
-      return;
     }
-    try {
-      await navigator.clipboard.writeText(`${text}\n\n${entry.url}`);
-      flashActionFeedback(row, "Copied to share");
-    } catch {
-      flashActionFeedback(row, "Couldn't share");
-    }
+    flashActionFeedback(row, (await copyText(`${text}\n\n${link}`)) ? "Link copied" : "Couldn't copy");
     return;
   }
   if (action === "like" || action === "dislike") {
@@ -4260,7 +4443,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
                label that used to sit here is gone, since the boxes are laid out side by
                side and counting them off was numbering what the reader can already see. -->
           ${badgeHTML(claim.verdictKey, animate)}
-          <p ${revealAttrs("claim-title", animate)}>${escapeHTML(claim.title)}</p>
+          <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, entry.sources, seekableEntry(entry))}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
           ${footer}
         </div>`;
@@ -5136,6 +5319,13 @@ async function runCheck(url, existingId, hint) {
   inFlightKind = "check";
   stopRequested = false;
   setComposerRunning(true);
+  // The link has been consumed by this run, and the moment the check lands the composer
+  // relabels itself "Ask a follow-up…" — so leaving the URL sitting in the field means the
+  // one key a reader is most likely to press next (Enter, on what reads like an empty
+  // follow-up box) silently re-checks the same link and spends another turn. `runChat` and
+  // `runFollowup` already clear it for exactly this reason; this is the path that didn't.
+  el.linkInput.value = "";
+  updateComposerMode();
 
   await playLandingExit(url);
 
@@ -5163,6 +5353,10 @@ async function runCheck(url, existingId, hint) {
   updatePaneMode();
   pendingFollowup = null;
   persistLibrary();
+  // The check now has an address, and it gets one the moment it starts rather than when it
+  // finishes: a reader who reloads mid-run, or who wants the tab in their history, should
+  // find the check they were watching and not the home page.
+  syncCheckLocation();
   renderLibrary(el.searchInput.value);
   renderVideoPane(entry);
   // Held back on the phone flow, where the strip is behind the interstitial right now and
@@ -6376,13 +6570,25 @@ for (const type of ["pointerdown", "keydown"]) {
 // yields entries without ids, and then every branch here was skipped and the claims pane
 // was left literally empty: no card, no placeholder, no way to tell a broken read from a
 // blank app. Falling through to the empty state makes that case say something.
+//
+// A `/c/<id>` in the address bar outranks all of that: it is the reader saying which check
+// they came for — a bookmark, a second tab, a link they sent themselves — and it must win
+// over both `library[0]` and the `startedFresh` reset that would otherwise blank the pane.
+const requestedId = checkIdFromPath(location.pathname);
+if (requestedId) selectedId = findEntry(requestedId) ? requestedId : null;
 const startupEntry = selectedId ? findEntry(selectedId) : null;
 if (startupEntry) {
   openEntryInPane(startupEntry);
+} else if (requestedId) {
+  showMissingCheck(requestedId);
 } else {
   selectedId = null;
   renderEmptyState();
 }
+// `replace`, not push: this is the address the browser is already at (or, for a restored
+// `library[0]`, the address it should have been at all along). Either way it is not a step
+// the reader took, so it must not become one they can press Back to.
+if (!requestedId) syncCheckLocation({ replace: true });
 // The markup's own `single-pane` class on #contentGrid is only right for a first-ever
 // visit — a returning reader's `selectedId` can restore to a real entry right here (see
 // the comment above), which should show the shell immediately, not grow into it. A reader
