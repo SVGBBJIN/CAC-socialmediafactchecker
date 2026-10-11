@@ -2342,3 +2342,114 @@ test("a turn with every verdict cited makes no extra search and no extra model c
   assert.equal(searches, 1);
   assert.ok(!frames.some((f) => f.type === "stage" && f.stage === "rechecking"));
 });
+
+/* ---------------------------------------------------------------- the corroboration judge */
+
+function surveyResult(claim) {
+  return {
+    query: claim,
+    claim,
+    provider: "test",
+    retrievedAt: "2026-07-28T00:00:00.000Z",
+    results: [
+      {
+        title: "Survey results",
+        url: "https://stats.example/survey",
+        domain: "stats.example",
+        snippet: "Usage of the service across Europe.",
+        published: null,
+      },
+    ],
+  };
+}
+
+const SURVEY_ANSWER =
+  "[[claim: 33% of adults in Spain used the service last year]]\nThe survey reports that share [1].\nVERDICT: Corroborated";
+
+test("a verdict the word match would lower is read against its page and kept when the page states it", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "spain usage", claim: "33% of adults in Spain" } }] },
+    { text: SURVEY_ANSWER },
+    { text: "CLAIM 1: SUPPORTED — [1] says a third of adults in Spain" },
+  ]);
+  const reads = [];
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      prefetchPerSearch: 0,
+      searchImpl: async (args) => surveyResult(args.claim),
+      findImpl: async (query) => {
+        reads.push(query);
+        return { url: query.url, find: query.find, passages: [{ text: "A third of adults in Spain used it last year." }] };
+      },
+    }),
+  );
+
+  assert.deepEqual(reads.map((r) => [r.url, r.find]), [
+    ["https://stats.example/survey", "33% of adults in Spain used the service last year"],
+  ]);
+  assert.equal(sent.length, 3);
+  const judgeRequest = JSON.stringify(sent[2]);
+  assert.match(judgeRequest, /You check whether sources state a claim/);
+  assert.match(judgeRequest, /A third of adults in Spain used it last year/);
+  assert.equal(sent[2].tools, undefined);
+  assert.ok(frames.some((f) => f.type === "stage" && f.stage === "judging"));
+
+  const shown = readerSees(frames);
+  assert.ok(!shown.includes("Checked by the app"), shown);
+  assert.match(shown, /VERDICT: Corroborated$/);
+});
+
+test("a verdict the judge does not find in its page is lowered as before", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "spain usage", claim: "33% of adults in Spain" } }] },
+    { text: SURVEY_ANSWER },
+    { text: "CLAIM 1: NOT SUPPORTED — no share is given" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      prefetchPerSearch: 0,
+      searchImpl: async (args) => surveyResult(args.claim),
+      findImpl: async (query) => ({ url: query.url, find: query.find, passages: [] }),
+    }),
+  );
+
+  const shown = readerSees(frames);
+  assert.match(shown, /Checked by the app/);
+  assert.match(shown, /VERDICT: Insufficient evidence$/);
+});
+
+test("with the judge switched off the word match decides alone, with no extra call", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "spain usage", claim: "33% of adults in Spain" } }] },
+    { text: SURVEY_ANSWER },
+    { text: "CLAIM 1: SUPPORTED" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: { CORROBORATION_JUDGE_ENABLED: "false" },
+      fetchImpl,
+      attachMedia: false,
+      prefetchPerSearch: 0,
+      searchImpl: async (args) => surveyResult(args.claim),
+      findImpl: async () => assert.fail("no page should be read"),
+    }),
+  );
+
+  assert.equal(sent.length, 2);
+  assert.match(readerSees(frames), /VERDICT: Insufficient evidence$/);
+});

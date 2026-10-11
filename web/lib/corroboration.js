@@ -50,6 +50,13 @@
 // its sources still linked underneath. The cost of the false positive it prevents is a
 // false claim stamped **Corroborated** in green. Those are not the same size, which is why
 // the coverage rule below is strict about entities and why the whole thing is one-way.
+//
+// ## It is not the last word
+//
+// Matching words cannot read, so this pass only proposes a downgrade. Before one is applied,
+// lib/corroboration-judge.js reads the cited pages for the claim and asks the model whether
+// they state it; a claim it finds supported is passed back here as `spare` and keeps its
+// verdict. The strictness above is what keeps that second call rare, not what decides.
 
 import { markersIn } from "./citations.js";
 import { TIMESTAMP_MARKER } from "../public/timestamps.js";
@@ -708,10 +715,15 @@ function downgradeNote(claim, missing, cited) {
  * sources do confirm it, and — because there is nothing to check against — a turn with an
  * empty ledger.
  *
+ * `spare` is a set of claim indices (positions in `splitClaims`) to leave alone whatever
+ * the word match says — the claims lib/corroboration-judge.js read the pages for and found
+ * supported. The usual call passes nothing and gets the word match's verdict on everything.
+ *
  * @returns `{text, changed, downgrades}` where each downgrade is
- *   `{title, cited, missing}`, for logging and for tests.
+ *   `{index, title, body, cited, missing}` — `index` and `body` are what the judge needs to
+ *   take a second look; the rest is for logging and for tests.
  */
-export function auditCorroboration(answer, ledger) {
+export function auditCorroboration(answer, ledger, { spare = null } = {}) {
   const text = String(answer ?? "");
   const claims = splitClaims(text);
   if (!claims || !ledger || ledger.size === 0) return { text, changed: false, downgrades: [] };
@@ -719,8 +731,12 @@ export function auditCorroboration(answer, ledger) {
   const downgrades = [];
   const edits = [];
 
-  for (const claim of claims) {
-    if (claim.verdictKey !== "corroborated" || !claim.verdict) continue;
+  claims.forEach((claim, index) => {
+    if (claim.verdictKey !== "corroborated" || !claim.verdict) return;
+    // A second opinion already read the cited pages and found the claim in them — see
+    // lib/corroboration-judge.js. The word match is a tool for spotting the topical-only
+    // citation, not the last word on it.
+    if (spare?.has(index)) return;
 
     const cited = [...new Set(markersIn(claim.text))].filter((n) => ledger.has(n));
     // The claim says confirmed and points at nothing. Whatever it rests on, it is not a
@@ -730,9 +746,9 @@ export function auditCorroboration(answer, ledger) {
       claim.title,
       cited.map((n) => ledger.sources[n - 1]),
     );
-    if (confirms) continue;
+    if (confirms) return;
 
-    downgrades.push({ title: claim.title, cited, missing });
+    downgrades.push({ index, title: claim.title, body: claim.text, cited, missing });
     edits.push({
       start: claim.verdict.start,
       end: claim.verdict.end,
@@ -743,7 +759,7 @@ export function auditCorroboration(answer, ledger) {
         (claim.verdict.text.startsWith("\n") ? "\n" : "") +
         `VERDICT: ${VERDICTS.insufficient.label}`,
     });
-  }
+  });
 
   if (edits.length === 0) return { text, changed: false, downgrades: [] };
 

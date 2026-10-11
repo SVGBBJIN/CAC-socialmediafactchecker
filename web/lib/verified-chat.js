@@ -42,6 +42,7 @@ import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
 import { auditCorroboration } from "./corroboration.js";
 import { repairUncitedClaims } from "./claim-repair.js";
+import { judgeDowngrades } from "./corroboration-judge.js";
 import { captionQuery, captionSearchEnabled } from "./caption-search.js";
 import { normaliseTiers, classifySource, ALL_TIERS } from "../public/source-quality.js";
 
@@ -530,6 +531,16 @@ export function searchEnabled(env = process.env) {
   // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
   // than either honouring it or complaining about it.
   return (readEnv(env, "WEB_SEARCH_ENABLED") ?? "true").toLowerCase() !== "false";
+}
+
+/**
+ * Whether a downgrade the corroboration word match proposes gets a second opinion from the
+ * model before it is applied — see lib/corroboration-judge.js. On unless switched off: the
+ * call only happens when the word match has already flagged a claim, so a turn whose
+ * verdicts all match their sources costs nothing extra.
+ */
+export function corroborationJudgeEnabled(env = process.env) {
+  return (readEnv(env, "CORROBORATION_JUDGE_ENABLED") ?? "true").toLowerCase() !== "false";
 }
 
 /**
@@ -1144,6 +1155,33 @@ export async function* verifiedChat({
     yield { type: "delta", text: answer };
   }
 
+  /**
+   * One model call with no tools and no media, collected rather than streamed — for the
+   * passes after the answer that need the model's judgement on a few lines of text and
+   * nothing else. Re-attaching the clip would re-send the whole video for a rewrite or a
+   * judgement of a few lines, and the history's links would otherwise be resolved and
+   * attached all over again.
+   */
+  async function askOnce({ system: callSystem, messages: callMessages, ...options }) {
+    let reply = "";
+    for await (const frame of streamChat({
+      ...geminiOptions,
+      ...options,
+      apiKey,
+      system: callSystem,
+      signal,
+      fetchImpl,
+      messages: callMessages,
+      attachMedia: false,
+      attachPages: false,
+      tools: null,
+      toolRunner: null,
+    })) {
+      if (frame.type === "delta") reply += frame.text;
+    }
+    return reply;
+  }
+
   // A claim given a decisive verdict with no source under it gets the search it skipped —
   // run by the app, one per claim, then one tool-less model call to rewrite those blocks
   // against what came back. See lib/claim-repair.js. Not on a flawed answer: one cut off by
@@ -1155,27 +1193,11 @@ export async function* verifiedChat({
       ledger,
       signal,
       search: (args) => searchImpl(args, { env, fetchImpl, signal, tiers }),
-      ask: async (prompt) => {
-        let reply = "";
-        for await (const frame of streamChat({
-          ...geminiOptions,
-          apiKey,
+      ask: (prompt) =>
+        askOnce({
           system,
-          signal,
-          fetchImpl,
           messages: [...messages, { role: "assistant", content: answer }, { role: "user", content: prompt }],
-          // Everything this call needs is in the prompt. Re-attaching the clip would re-send
-          // the whole video for a rewrite of a few lines, and the history's links would
-          // otherwise be resolved and attached all over again.
-          attachMedia: false,
-          attachPages: false,
-          tools: null,
-          toolRunner: null,
-        })) {
-          if (frame.type === "delta") reply += frame.text;
-        }
-        return reply;
-      },
+        }),
     });
     let step = await recheck.next();
     while (!step.done) {
@@ -1219,7 +1241,32 @@ export async function* verifiedChat({
       //
       // It runs first, on the ledger's own numbering, so a marker still means here exactly
       // what it meant when the model wrote it; cleanup then renumbers text and note alike.
-      const audited = auditCorroboration(answer, ledger);
+      let audited = auditCorroboration(answer, ledger);
+      // The word match is a filter, not the verdict: what it would lower is first read
+      // against the cited pages by the model, and a claim found in them keeps its verdict.
+      // See lib/corroboration-judge.js. Any failure there leaves the downgrade standing.
+      if (audited.changed && !streamError && corroborationJudgeEnabled(env) && !signal?.aborted) {
+        const flagged = audited.downgrades.filter((d) => d.cited.length > 0).length;
+        if (flagged > 0) yield { type: "stage", stage: "judging", claims: flagged };
+        const spare = await judgeDowngrades(audited.downgrades, ledger, {
+          signal,
+          read: async (url, find) => {
+            const found = await findImpl(
+              { url, find, claim: find, max_passages: 3 },
+              { apiKey, fetchImpl, signal, cache: pages },
+            );
+            return found.passages.map((passage) => passage.text);
+          },
+          ask: (judgeSystem, prompt) =>
+            askOnce({
+              system: judgeSystem,
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0,
+            }),
+        });
+        if (signal?.aborted) return;
+        if (spare.size > 0) audited = auditCorroboration(answer, ledger, { spare });
+      }
       if (audited.changed) answer = audited.text;
 
       const cleaned = cleanCitations(answer, ledger, { renumber: !flawed });
