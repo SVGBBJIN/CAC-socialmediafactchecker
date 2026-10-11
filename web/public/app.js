@@ -19,14 +19,15 @@
 import { watchDevice } from "./device.js";
 import {
   TIMESTAMP_MARKER,
-  parseClock,
+  marksIn,
+  markLabel,
   formatClock,
   plainTimestamps,
   timeline,
   activeAt,
 } from "./timestamps.js";
 import { parseBlocks } from "./markdown.js";
-import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimsPreamble, claimsOverview, attributeSources, readableAnswer, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
 import { filterLibrary, platformsIn, verdictsIn } from "./library-search.js";
@@ -180,6 +181,7 @@ const el = {
   settingReducedMotion: document.getElementById("setting-reduced-motion"),
   settingHighContrast: document.getElementById("setting-high-contrast"),
   settingLegacyCards: document.getElementById("setting-legacy-cards"),
+  settingOverview: document.getElementById("setting-overview"),
   settingFontSize: document.getElementById("setting-font-size"),
   settingTheme: document.getElementById("setting-theme"),
   settingSourceTiers: document.getElementById("setting-source-tiers"),
@@ -316,6 +318,9 @@ const DEFAULT_SETTINGS = {
   // on falls back to the older single top bar. Stored rather than derived so a reader who
   // prefers the flatter box keeps it across checks — see `applySettings`.
   legacyCards: false,
+  // The expandable overview card above the claims (see `overviewCardHTML`). On by default;
+  // off hides it with CSS, so flipping it never re-renders a check.
+  showOverview: true,
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
   // Which kinds of publisher a check may cite (see public/source-quality.js). Sent with every
@@ -375,6 +380,7 @@ function applySettings() {
   // mode is on (see `verdictPaneClass`), so flipping this restyles what is on screen
   // without re-rendering — and without disturbing a check that is mid-stream.
   setAttrIf(root, "data-cards", settings.legacyCards, "legacy");
+  setAttrIf(root, "data-overview", !settings.showOverview, "off");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
   setAttrIf(root, "data-sidebar", settings.sidebarCollapsed, "collapsed");
   if (el.sidebarCollapseBtn) {
@@ -1329,21 +1335,33 @@ function linkCitations(html, sources) {
  * highlight reads its windows straight back off the DOM (see `refreshTimeline`) rather than
  * threading ids through the markup.
  */
+// A marker plus whatever punctuation closes the sentence right after it. A chip is an
+// inline-flex box, and the line may break after one, so "…said at [t=0:40]." used to leave
+// the full stop alone at the start of the next line. Kept together, they wrap as one.
+const TIMESTAMP_WITH_PUNCTUATION = new RegExp(`(?:${TIMESTAMP_MARKER.source})([.,;:!?)]*)`, "gi");
+
 function linkTimestamps(html, seekable) {
-  return html.replace(TIMESTAMP_MARKER, (raw, start, end) => {
-    const from = parseClock(start);
-    if (from == null) return raw;
-    const to = end == null ? null : parseClock(end);
-    const label = to != null && to > from ? `${formatClock(from)}–${formatClock(to)}` : formatClock(from);
-    if (!seekable) return `<span class="ts-chip static">${label}</span>`;
-    const endAttr = to != null && to > from ? ` data-end="${to}"` : "";
-    return (
-      `<button type="button" class="ts-chip" data-seek="${from}" data-start="${from}"${endAttr}` +
-      ` title="Play the video from ${formatClock(from)}" aria-label="Play the video from ${formatClock(from)}">` +
-      `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>` +
-      `${label}</button>`
-    );
+  return html.replace(TIMESTAMP_WITH_PUNCTUATION, (raw, punctuation) => {
+    const marks = marksIn(raw.slice(0, raw.length - punctuation.length));
+    if (!marks.length) return raw;
+    // One marker can hold several moments (`[t=1:05, 1:10]`) — each gets its own chip,
+    // since each is a different place to seek to.
+    const chips = marks.map((mark) => timestampChip(mark, seekable)).join(" ");
+    return punctuation ? `<span class="ts-keep">${chips}${punctuation}</span>` : chips;
   });
+}
+
+function timestampChip(mark, seekable) {
+  const label = markLabel(mark);
+  if (!seekable) return `<span class="ts-chip static">${label}</span>`;
+  const clock = formatClock(mark.start);
+  const endAttr = mark.end != null ? ` data-end="${mark.end}"` : "";
+  return (
+    `<button type="button" class="ts-chip" data-seek="${mark.start}" data-start="${mark.start}"${endAttr}` +
+    ` title="Play the video from ${clock}" aria-label="Play the video from ${clock}">` +
+    `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>` +
+    `${label}</button>`
+  );
 }
 
 /** Inline spans within one line: code, bold, italic, then timestamp and citation markers.
@@ -2199,10 +2217,10 @@ function renderLibrary(filter = "") {
     title.title = entry.title;
     const sub = document.createElement("div");
     sub.className = "lib-sub";
-    sub.append(
-      entry.status === "running" ? boltIcon() : dotIcon(dotClassFor(entry)),
-      document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`),
-    );
+    const subText = document.createElement("span");
+    subText.className = "lib-sub-text";
+    subText.textContent = `${entry.platform} · ${statusLabel(entry)}`;
+    sub.append(entry.status === "running" ? boltIcon() : dotIcon(dotClassFor(entry)), subText);
     meta.append(title, sub);
 
     const deleteBtn = document.createElement("button");
@@ -2766,17 +2784,30 @@ function stripAnswerMarkers(answer) {
 function turnBodyHTML(turn, sources, animate, seekable) {
   if (!turn.claims) {
     return `
-      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(turn.answer, sources, seekable)}</div>
+      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(readableAnswer(turn.answer, { overview: settings.showOverview }), sources, seekable)}</div>
       ${badgeHTML(turn.verdictKey, animate)}`;
   }
-  return turn.claims
-    .map(
-      (claim) => `
+  const attributed = attributeSources({ ...turn, sources });
+  return (
+    contextNoteHTML(turn.rawAnswer, sources, seekable, animate, attributed.preamble) +
+    overviewCardHTML(turn.rawAnswer, sources, seekable, animate, attributed.overview) +
+    turn.claims
+      .map(
+        (claim, index) => `
       <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, sources, seekable)}</p>
       <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
-      ${badgeHTML(claim.verdictKey, animate)}`,
-    )
-    .join("");
+      ${badgeHTML(claim.verdictKey, animate)}
+      ${sourcePillsHTML(attributed.claims[index], animate)}`,
+      )
+      .join("")
+  );
+}
+
+/** The pills under a whole thread item: every source for a plain answer, or — when the turn
+ * was split into claims, each carrying its own — only the ones none of them cites. */
+function turnSourcesHTML(turn, animate) {
+  if (!turn.claims) return sourcePillsHTML(turn.sources, animate);
+  return sourcePillsHTML(attributeSources(turn).other, animate, "Other sources");
 }
 
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
@@ -2798,7 +2829,7 @@ function chatThreadHTML(newestIndex) {
           ${incompleteHTML(c.incomplete, animate)}
           ${durationHTML(c.durationMs, animate, "Answered in")}
           ${chatEntryId ? actionRowHTML(chatEntryId, index, "turn") : ""}
-          ${sourcePillsHTML(c.sources, animate)}
+          ${turnSourcesHTML(c, animate)}
         </div>`;
     })
     .join("");
@@ -3707,10 +3738,18 @@ function renderRunningCard() {
  * or touch it), so a listener attached to one card node would need re-attaching on every one
  * of those instead of once, here, on the pane that outlives all of them.
  *
- * `mouseout`, not `mouseleave`, for the per-card reset: `mouseleave` doesn't bubble, so a
- * delegated listener for it never fires for anything but the pane's own boundary. `mouseout`
- * does bubble, and checking `relatedTarget` against `card.contains(...)` is what tells "the
- * pointer left this card" apart from "the pointer moved between two elements inside it".
+ * `pointerout`, not `pointerleave`, for the per-card reset: `pointerleave` doesn't bubble,
+ * so a delegated listener for it never fires for anything but the pane's own boundary.
+ * `pointerout` does bubble, and checking `relatedTarget` against `card.contains(...)` is what
+ * tells "the pointer left this card" apart from "the pointer moved between two elements
+ * inside it".
+ *
+ * Mouse only. A tap on a touch screen fires a compatibility `mousemove` and then nothing
+ * that ever counts as leaving, so on a phone every tapped claim box stayed tilted until the
+ * next tap landed somewhere else — a card frozen at an angle, which reads as a rendering
+ * fault rather than a hover effect. A pen hovering is a pointer the same way a mouse is, so
+ * it keeps the effect; `pointerType` is what tells the cases apart, which the mouse events
+ * this used to listen for can't.
  */
 function tiltGlare(card) {
   let glare = card.querySelector(":scope > .tilt-glare");
@@ -3724,14 +3763,17 @@ function tiltGlare(card) {
 
 function resetCardTilt(card) {
   card.style.transform = "";
+  card.style.willChange = "";
   const glare = card.querySelector(":scope > .tilt-glare");
   if (glare) glare.style.opacity = "0";
 }
 
-el.claimsPane.addEventListener("mousemove", (e) => {
-  if (prefersReducedMotion()) return;
+el.claimsPane.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "touch" || prefersReducedMotion()) return;
   const card = e.target.closest(".claim-card");
   if (!card) return;
+  // Promoted only while it is actually moving — see the note on `.claim-card` in index.html.
+  card.style.willChange = "transform";
   const rect = card.getBoundingClientRect();
   const px = (e.clientX - rect.left) / rect.width;
   const py = (e.clientY - rect.top) / rect.height;
@@ -3742,77 +3784,11 @@ el.claimsPane.addEventListener("mousemove", (e) => {
   glare.style.opacity = "1";
   glare.style.background = `radial-gradient(circle at ${px * 100}% ${py * 100}%, rgba(156,140,240,0.12), transparent 60%)`;
 });
-el.claimsPane.addEventListener("mouseout", (e) => {
+el.claimsPane.addEventListener("pointerout", (e) => {
   const card = e.target.closest(".claim-card");
   if (!card || card.contains(e.relatedTarget)) return;
   resetCardTilt(card);
 });
-
-/* ---------------------------------------------------------------- claim grid split (FLIP)
- *
- * The loading view grows from one big card into a grid of skeleton boxes as `[[claim: …]]`
- * markers stream in (see renderClaimSkeletons below) — ported from the TRASE Design System's
- * ClaimGridSplit, which animates that growth as the original panel visibly dividing into its
- * new cells rather than boxes simply appearing in a bigger grid.
- *
- * The DS component drives this from React state with a hand-picked pixel layout per stage
- * (1/2/4 claims, its demo's fixed ceiling); nothing here knows in advance how many claims a
- * real check will find. So instead of
- * pre-computing target rects, this reads whatever the grid's own CSS actually put on screen
- * before and after a rebuild and animates the difference — the standard "FLIP" technique
- * (First, Last, Invert, Play): measure every `.claim-card`'s rect, let `render` replace the
- * pane's markup as it already does, then for each box now on screen, animate *from* its old
- * rect *to* its new one via the Web Animations API (independent of the CSS `transition`
- * property, so it can't collide with `.claim-grid-loading .claim-pane.in`'s own opacity
- * transition on the same element — see that rule's comment in index.html).
- *
- * Boxes are matched old-to-new by `data-claim` index; the single running card from
- * renderRunningCard (no `data-claim`) uses the key `"__single__"`. A box with no direct
- * predecessor — claim 3 appearing for the first time, or every box on the very first
- * rebuild — falls back to the one old rect there was, if there was exactly one (the usual
- * case: the lone running card splitting into the first grid), so it grows out of that rather
- * than snapping in from nowhere.
- */
-function flipClaimsPane(render) {
-  if (prefersReducedMotion()) {
-    render();
-    return;
-  }
-  const before = new Map();
-  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
-    before.set(node.dataset.claim ?? "__single__", node.getBoundingClientRect());
-  });
-  const fallback =
-    before.size === 1 ? [...before.values()][0] : el.claimsPane.getBoundingClientRect();
-
-  render();
-
-  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
-    const from = before.get(node.dataset.claim ?? "__single__") ?? fallback;
-    const to = node.getBoundingClientRect();
-    if (!from || !to.width || !to.height) return;
-    const dx = from.left - to.left;
-    const dy = from.top - to.top;
-    const sx = from.width / to.width;
-    const sy = from.height / to.height;
-    if (!dx && !dy && sx === 1 && sy === 1) return; // already where it lands — nothing to play
-    node.animate(
-      [
-        { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: "top left" },
-        { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left" },
-      ],
-      // Slower than a typical UI transition on purpose — this is the one moment the reader
-      // sees the card visibly become the grid, so it should read as a deliberate motion
-      // rather than a snap. The easing is a pure ease-out (fast start, long gentle settle)
-      // rather than the old ease-in-out S-curve, which had a harsh accelerating start that
-      // read as a jump-cut before the eye had registered the box moving at all. 1100ms
-      // rather than the original 800ms — a check with several claims can fire this every
-      // few seconds as markers stream in, and at 800ms the next split could start before a
-      // reader had finished following the last one, which read as hectic rather than lively.
-      { duration: 1100, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
-    );
-  });
-}
 
 /**
  * The sources retrieved so far, on screen while they are still being read.
@@ -3904,18 +3880,18 @@ function settledBodyHTML(claim, sources, seekable, animate = true) {
   return `<div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>`;
 }
 
-/** One box in the loading grid: title always real (lifted straight off the `[[claim: …]]`
- * marker that streamed in), body either settled or shimmering. */
-function loadingClaimHTML(claim, index, sources, seekable) {
+/** One box in the loading stack: title always real (lifted straight off the `[[claim: …]]`
+ * marker that streamed in), body either settled or shimmering.
+ *
+ * `isNew` is whether this box is arriving with this render. Only a new box plays the
+ * design system's ClaimStack entrance (`.stack-in`: up 16px and in, once). Every box that
+ * was already on screen is redrawn exactly as it was — the stack is rebuilt whenever a new
+ * marker lands, and replaying the boxes the reader is already looking at is what made each
+ * new claim set the whole column flickering. */
+function loadingClaimHTML(claim, index, sources, seekable, isNew) {
   const done = Boolean(claim.verdictKey);
-  // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
-  // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
-  // status strip is another <div> ahead of these, so nth-of-type would be off by one.
-  // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
-  // box has visibly finished sliding into place, instead of outrunning it.
-  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s`;
   return `
-    <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
+    <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}${isNew ? " stack-in" : ""}" data-claim="${index}">
       ${done ? badgeHTML(claim.verdictKey, false) : ""}
       <p class="claim-title in">${claimTitleHTML(claim.title, sources, seekable)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
@@ -3936,7 +3912,7 @@ function loadingClaimHTML(claim, index, sources, seekable) {
  * real text rather than reverting to a shimmer — see `settleClaimPane` for the in-place
  * version that runs when no redraw is needed.
  */
-function renderClaimSkeletons(claims, stage, sources, seekable) {
+function renderClaimSkeletons(claims, stage, sources, seekable, previousCount = 0) {
   // Whether the reader is currently reading the bottom of the stack, measured *before* the
   // rebuild — see `stickToNewestClaim`.
   const atBottom = claimsPaneAtBottom();
@@ -3948,9 +3924,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
     summaryCardHTML(claims) +
       claimGridStatusHTML(stage) +
       claims
-        .map((claim, i) =>
-          loadingClaimHTML(claim, i, sources, seekable),
-        )
+        .map((claim, i) => loadingClaimHTML(claim, i, sources, seekable, i >= previousCount))
         .join(""),
   );
   revealIn(el.claimsPane);
@@ -4024,7 +3998,6 @@ function settleClaimPane(index, claim, sources, seekable) {
   // `trim()` because `verdictPaneClass` returns the leading space the templates want.
   const paneVerdict = verdictPaneClass(claim.verdictKey).trim();
   if (paneVerdict) pane.classList.add(paneVerdict);
-  if (!prefersReducedMotion()) pane.classList.add("just-settled");
   revealIn(pane);
   // The `[t=…]` chips this box just gained are seek controls like any other — read them
   // back now rather than at the end, so a settled claim's timestamps play the clip
@@ -4094,6 +4067,61 @@ function renderErrorCard(entry) {
  * it says, then how much of it there is, then what it concluded — and on an incomplete turn
  * the third one is usually missing, which this is the explanation for.
  */
+/**
+ * The line of context the model may write before its first claim — "this is a sketch, and
+ * these are the real claims under the jokes" — as a note above the claims rather than
+ * nowhere (see `claimsPreamble`). Rendered as markdown, since it can carry a citation or a
+ * timestamp like any other sentence the model writes.
+ */
+function contextNoteHTML(rawAnswer, sources, seekable, animate, ownSources = []) {
+  const preamble = claimsPreamble(rawAnswer);
+  if (!preamble) return "";
+  return `
+    <div ${revealAttrs("context-note", animate)}>
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5.5M12 7.6v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <div class="context-note-body">
+        <div class="context-note-text">${renderMarkdown(preamble, sources, seekable)}</div>
+        ${sourcePillsHTML(ownSources, false)}
+      </div>
+    </div>`;
+}
+
+/**
+ * The model's overall read of the post — what it argues as a whole and how that holds up —
+ * as a collapsed card above the claims (see `claimsOverview`). Closed, it is one line: the
+ * label and the start of the summary. Hidden entirely by the Overview card setting, via CSS
+ * (`data-overview="off"`), so the switch never has to re-render a check.
+ */
+function overviewCardHTML(rawAnswer, sources, seekable, animate, ownSources = []) {
+  const overview = claimsOverview(rawAnswer);
+  if (!overview) return "";
+  // The peek is plain text — a line of the summary, not a second rendering of it — so the
+  // markers come out rather than showing as `[2]` and `[t=0:12]` in a single-line preview.
+  const peek = plainTimestamps(overview)
+    .replace(/\s*\[\d+(?:\s*[,;]\s*\d+)*\]/g, "")
+    .replace(/[*_`#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `
+    <details ${revealAttrs("overview-card", animate)}>
+      <summary>
+        <span class="overview-label">Overview</span>
+        <span class="overview-peek">${escapeHTML(peek)}</span>
+        <svg class="overview-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </summary>
+      <div class="overview-body">
+        <div class="overview-text">${renderMarkdown(overview, sources, seekable)}</div>
+        ${sourcePillsHTML(ownSources, false)}
+      </div>
+    </details>`;
+}
+
+/** The sources nothing on screen cites, in their own labelled row after the claims. */
+function otherSourcesHTML(sources, animate) {
+  if (!sources.length) return "";
+  return `<div class="other-sources">${sourcePillsHTML(sources, animate, "Other sources")}</div>`;
+}
+
 function incompleteHTML(incomplete, animate) {
   if (!incomplete) return "";
   return `
@@ -4266,12 +4294,13 @@ const sourcePillsStore = new Map();
  * narrower thing — pills that don't fit the row's width — via `collapseSourcePillsOverflow`,
  * not a return of that old per-source detail list.
  */
-function sourcePillsHTML(sources, animate) {
+function sourcePillsHTML(sources, animate, label = null) {
   if (!sources?.length) return "";
   const key = `sp${++sourcePillsSeq}`;
   sourcePillsStore.set(key, sources);
   return `
     <div ${revealAttrs("source-pills", animate)} data-source-pills="${key}">
+      ${label ? `<div class="source-pills-label">${escapeHTML(label)}</div>` : ""}
       <div class="source-pills-row" aria-label="Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}">
         ${sources.map(sourcePillHTML).join("")}
       </div>
@@ -4513,7 +4542,9 @@ async function handleClaimsPaneClick(event) {
   if (stored == null) return;
   // `[t=0:12]` is this app's own syntax for a control that exists on this screen and
   // nowhere else. Copied or shared, it should read as what it means: a moment in the clip.
-  const text = plainTimestamps(stored);
+  // Same for the claim and overview markers — and the overview stays out of the copy when
+  // the reader has switched the card off, the same as it stays off the screen.
+  const text = plainTimestamps(readableAnswer(stored, { overview: settings.showOverview }));
 
   const action = btn.dataset.action;
   if (action === "copy") {
@@ -4566,7 +4597,7 @@ function threadHTML(entry, newestIndex) {
           ${incompleteHTML(f.incomplete, animate)}
           ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
-          ${sourcePillsHTML(f.sources, animate)}
+          ${turnSourcesHTML(f, animate)}
         </div>`;
     })
     .join("");
@@ -4605,7 +4636,7 @@ function threadHTML(entry, newestIndex) {
  * given a card of their own; they're appended to the last claim's pane, the same place
  * they'd read as "the end of the analysis" when there was only one card to put them in.
  */
-function claimPanesHTML(entry, animate, newestFollowup) {
+function claimPanesHTML(entry, animate, newestFollowup, attributed = attributeSources(entry)) {
   const { claims } = entry;
   return claims
     .map((claim, index) => {
@@ -4614,7 +4645,6 @@ function claimPanesHTML(entry, animate, newestFollowup) {
         ? `${incompleteHTML(entry.incomplete, animate)}
            ${durationHTML(entry.durationMs, animate)}
            ${actionRowHTML(entry.id, null)}
-           ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
 
@@ -4624,7 +4654,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       // toggle changes nothing visible — the alternative was rendering different markup per
       // breakpoint and re-rendering the pane on every resize.
       return `
-        <div class="claim-card claim-pane${verdictPaneClass(claim.verdictKey)}" role="button" tabindex="0" aria-expanded="false">
+        <div class="claim-card claim-pane${verdictPaneClass(claim.verdictKey)}${animate ? " stack-in" : ""}"${animate ? ` style="--stack-delay: ${Math.min(index * 0.06, 0.3)}s"` : ""} role="button" tabindex="0" aria-expanded="false">
           <!-- Verdict first, then the claim it belongs to. The finding is what a reader
                came for, so it opens the box rather than closing it; the "Claim 1 of 4"
                label that used to sit here is gone, since the boxes are laid out side by
@@ -4632,6 +4662,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
           ${badgeHTML(claim.verdictKey, animate)}
           <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, entry.sources, seekableEntry(entry))}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
+          ${sourcePillsHTML(attributed.claims[index], animate)}
           <!-- The tap affordance. On the phone layout this box is clipped to two lines of
                title and two of analysis, and until now the only thing saying so was the
                fade at the bottom of the text, which reads as a rendering fault at least as
@@ -4743,14 +4774,24 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       // and its title is already in the shell's own title bar — a third copy of the same
       // URL, styled as something the reader said, was the check quoting the paste back at
       // them before answering it.
-      summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
+      (() => {
+        const attributed = attributeSources(entry);
+        const seekable = seekableEntry(entry);
+        return (
+          summaryCardHTML(entry.claims) +
+          contextNoteHTML(entry.rawAnswer, entry.sources, seekable, animateAnalysis, attributed.preamble) +
+          overviewCardHTML(entry.rawAnswer, entry.sources, seekable, animateAnalysis, attributed.overview) +
+          claimPanesHTML(entry, animateAnalysis, newestFollowup, attributed) +
+          otherSourcesHTML(attributed.other, animateAnalysis)
+        );
+      })(),
     );
   } else {
     setClaimsGridMode(null);
     setClaimsPaneHTML(`
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
-      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
+      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(readableAnswer(entry.answer, { overview: settings.showOverview }), entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
       ${durationHTML(entry.durationMs, animateAnalysis)}
@@ -4833,6 +4874,9 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
       messages,
       ...(clipHints ? { clipHints } : {}),
       sourceTiers: normaliseTiers(settings.sourceTiers),
+      // Settings → General → Overview card. Off means the model is never asked for one —
+      // see `factCheckSystemPrompt` in lib/verified-chat.js — not just that it isn't drawn.
+      overview: settings.showOverview,
     }),
     signal,
   });
@@ -4981,14 +5025,17 @@ function composeCheckPrompt(url) {
   // invented one.
   const timestamps = isVideo
     ? "Mark each claim with when it happens in the video, as `[t=M:SS]` (or `[t=M:SS-M:SS]` " +
-      "for a stretch) written immediately after the claim. Use the video's own clock, and " +
-      "only for moments you actually observed — no guesses.\n\n"
+      "for a stretch) written immediately after the claim — exactly that shape, one moment per " +
+      "bracket. Use the video's own clock, and only for moments you actually observed — no guesses.\n\n"
     : "";
   return withCustomInstructions(
     `Fact-check this ${subject}: ${url}\n\n` +
-      "List the distinct factual claims it makes and check each one, using the CLAIM " +
+      "Start with the claim the post as a whole is making — its title, caption or thesis — " +
+      "then the distinct factual claims it relies on, and check each one, using the CLAIM " +
       `STRUCTURE from the system prompt — one \`[[claim: …]]\` block per claim, each ` +
-      `ending in its own VERDICT line. ${timestamps}`,
+      `ending in its own VERDICT line${settings.showOverview ? ", then a short \`[[overview]]\`" : ""}. ` +
+      `If it is comedy, satire or parody, say so in one line ` +
+      `first and still check the real claims under the jokes. ${timestamps}`,
   );
 }
 
@@ -5672,11 +5719,13 @@ async function runCheck(url, existingId, hint) {
         const claims = splitClaims(text) ?? [];
         const { rebuild, settled } = claimDiff(drawn, claims);
         if (!rebuild && settled.length === 0) return;
+        const previousCount = drawn.length;
         drawn = claims;
         if (rebuild) {
           // renderClaimSkeletons prepends a fresh summaryCardHTML(claims) of its own, so
           // the counts are already current the moment this lands — nothing more to patch.
-          flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
+          // Only the boxes past `previousCount` are new, and only those animate in.
+          renderClaimSkeletons(claims, stage, liveSources, seekable, previousCount);
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], liveSources, seekable);
@@ -6365,6 +6414,7 @@ function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
   el.settingLegacyCards.checked = settings.legacyCards;
+  el.settingOverview.checked = settings.showOverview;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   updateThemeButtons();
@@ -6881,6 +6931,11 @@ el.settingHighContrast.addEventListener("change", () => {
 });
 el.settingLegacyCards.addEventListener("change", () => {
   settings.legacyCards = el.settingLegacyCards.checked;
+  persistSettings();
+  applySettings();
+});
+el.settingOverview.addEventListener("change", () => {
+  settings.showOverview = el.settingOverview.checked;
   persistSettings();
   applySettings();
 });

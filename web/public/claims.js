@@ -120,9 +120,48 @@ export function splitVerdict(answer) {
  * one claim's block ends and the next begins. Digit-free by design, the same reasoning
  * `[t=…]` timestamps use (see timestamps.js): `lib/citation-cleanup.js` only ever touches a
  * `[n]`-shaped group, so this can't be mistaken for a citation and deleted on the way out.
+ *
+ * It must open its line (after an optional bullet, number, heading or emphasis) — a marker
+ * mentioned mid-sentence is prose about the syntax, not the syntax. What may follow it on
+ * the same line is the start of the claim's body: the model is asked to put the marker on a
+ * line of its own, and when it doesn't, the old `$` anchor made the whole marker invisible,
+ * so that claim's check silently merged into the card above it, verdict and all.
+ *
+ * The title may hold a bracket of its own — `[[claim: X said it [t=0:12]]]` — which is why it
+ * is matched as plain text or whole `[…]` groups rather than lazily up to the first `]]`,
+ * which landed inside the timestamp. `[[Claim 2: …]]` and a dash for the colon are the same
+ * kind of drift `VERDICT_ALIASES` absorbs.
  */
 const CLAIM_MARKER =
-  /^[ \t]*(?:[-*\u2022]|#{1,6}|\d+[.)])?[ \t]*(?:\*\*|__|\*|_)?\[\[[ \t]*claim[ \t]*:[ \t]*(.+?)[ \t]*\]\](?:\*\*|__|\*|_)?[ \t]*$/gim;
+  /^[ \t]*(?:[-*\u2022]|#{1,6}|\d+[.)])?[ \t]*(?:\*\*|__|\*|_)?\[\[[ \t]*claim(?:[ \t]*#?\d+)?[ \t]*[:\u2014\u2013-][ \t]*((?:[^[\]\n]|\[[^[\]\n]*\])+?)[ \t]*\]\](?:\*\*|__|\*|_)?[ \t]*(?:[:\u2014\u2013-][ \t]*)?/gim;
+
+/**
+ * `[[overview]]` — where the claims end and the model's short overall summary begins (see
+ * the CLAIM STRUCTURE section of the system prompt). Same opening-the-line rule as the claim
+ * marker; the summary may start on the marker's own line.
+ */
+const OVERVIEW_MARKER =
+  /^[ \t]*(?:#{1,6})?[ \t]*(?:\*\*|__|\*|_)?\[\[[ \t]*overview[ \t]*\]\](?:\*\*|__|\*|_)?[ \t]*:?[ \t]*/im;
+
+/** A VERDICT line anywhere in a block — `VERDICT_LINE` without its end-of-text anchor. */
+const ANY_VERDICT_LINE = new RegExp(
+  `^[ \\t]*(?:[-*\u2022]|#{1,6})?[ \\t]*${EMPH}?\\s*verdict\\s*${EMPH}?[ \\t]*[:\u2014\u2013-][ \\t]*${EMPH}?[ \\t]*(${ALIAS_PATTERN})[ \\t]*${EMPH}?[ \\t]*[.!]?[ \\t]*$`,
+  "gim",
+);
+
+/** A markdown rule (`---`, `***`, `___`) — a separator the model draws between blocks,
+ * never content. */
+const RULE_LINES = /^[ \t]*(?:[-*_][ \t]*){3,}$/gm;
+
+function stripRules(text) {
+  return text.replace(RULE_LINES, "").trim();
+}
+
+/** Where the claims stop: the `[[overview]]` marker if there is one, else the whole text. */
+function claimsEnd(text) {
+  const match = text.match(OVERVIEW_MARKER);
+  return match ? match.index : text.length;
+}
 
 /**
  * Splits a raw answer into one block per claim, or returns `null` if it has none.
@@ -143,41 +182,170 @@ const CLAIM_MARKER =
  * turn that was never a fact-check in the first place.
  */
 export function splitClaims(rawAnswer) {
-  const text = String(rawAnswer ?? "");
+  const parsed = parseClaims(rawAnswer);
+  return parsed ? parsed.claims : null;
+}
+
+/**
+ * The work behind `splitClaims`, plus the one thing it finds that isn't a claim: text after
+ * the last claim's verdict, which is the overview (see `claimsOverview`).
+ *
+ * A claim's verdict is the *last* VERDICT line in its own block, not only a VERDICT line
+ * that happens to be the very last line. Each block is cut at the next marker, so a VERDICT
+ * line inside it can only be its own — anchoring to the very end bought nothing on that
+ * front, and it cost the badge every time the model wrote anything after it: a `---`
+ * separator, a closing "Overall…" paragraph, a stray line before the next claim. Text after
+ * the verdict stays in that claim's body (it was written about this claim more than any
+ * other), except after the last claim, where it is the overview.
+ */
+function parseClaims(rawAnswer) {
+  const full = String(rawAnswer ?? "");
+  const end = claimsEnd(full);
+  const text = full.slice(0, end);
   const markers = [...text.matchAll(CLAIM_MARKER)];
   if (markers.length === 0) return null;
-  return markers.map((marker, index) => {
+
+  let trailing = "";
+  const claims = markers.map((marker, index) => {
     const start = marker.index + marker[0].length;
-    const end = index + 1 < markers.length ? markers[index + 1].index : text.length;
-    const slice = text.slice(start, end);
-    // Where the trimmed body actually begins in the original answer. `splitVerdict` is
-    // handed the trimmed slice, so every offset it reports has to be shifted back by this
-    // much to mean anything to a caller holding the whole answer.
-    const bodyStart = start + (slice.length - slice.trimStart().length);
-    const trimmed = slice.trim();
-    const { text: body, verdictKey } = splitVerdict(trimmed);
-    const verdictMatch = trimmed.match(VERDICT_LINE);
+    const isLast = index + 1 === markers.length;
+    const sliceEnd = isLast ? end : markers[index + 1].index;
+    const slice = text.slice(start, sliceEnd);
+
+    let verdictMatch = null;
+    for (const match of slice.matchAll(ANY_VERDICT_LINE)) verdictMatch = match;
+
+    const verdictKey = verdictMatch
+      ? VERDICT_KEY_BY_ALIAS.get(verdictMatch[1].toLowerCase().replace(/\s+/g, " ").trim()) ?? null
+      : null;
+    let body = stripRules(verdictMatch ? slice.slice(0, verdictMatch.index) : slice);
+    if (verdictMatch) {
+      const after = stripRules(slice.slice(verdictMatch.index + verdictMatch[0].length));
+      if (isLast) trailing = after;
+      else if (after) body = body ? `${body}\n\n${after}` : after;
+    }
+
     return {
       title: marker[1].trim(),
       text: body,
       verdictKey,
       // Offsets into the answer this block was parsed out of, so a caller can rewrite one
       // claim's verdict line without re-serialising — and therefore without reflowing —
-      // everything around it. `verdict` is null exactly when `verdictKey` is: a block cut
-      // off mid-turn has no line to point at. Nothing in the browser reads these; they are
-      // here because the server-side corroboration audit (lib/corroboration.js) needs to
-      // parse claims with the same code that renders them rather than a second copy of
-      // this syntax.
-      range: { start: marker.index, end },
-      verdict: verdictMatch
-        ? {
-            start: bodyStart + verdictMatch.index,
-            end: bodyStart + verdictMatch.index + verdictMatch[0].length,
-            text: verdictMatch[0],
-          }
-        : null,
+      // everything around it. `verdict` is null exactly when no VERDICT line was found: a
+      // block cut off mid-turn has no line to point at. Nothing in the browser reads these;
+      // they are here because the server-side corroboration audit (lib/corroboration.js)
+      // needs to parse claims with the same code that renders them rather than a second
+      // copy of this syntax.
+      range: { start: marker.index, end: sliceEnd },
+      verdict: verdictMatch ? verdictSpan(slice, start, verdictMatch) : null,
     };
   });
+
+  const marked = end < full.length ? full.slice(end).replace(OVERVIEW_MARKER, "").trim() : "";
+  const overview = [trailing, marked].filter(Boolean).join("\n\n");
+  return { claims, overview: overview || null };
+}
+
+/**
+ * A verdict line's place in the whole answer. The newline in front of it is part of the
+ * span, as it always was when the line had to be the block's last: the corroboration audit
+ * replaces this span with its note *and* a fresh verdict line, and relies on that leading
+ * newline to put the two on separate lines.
+ */
+function verdictSpan(slice, offset, match) {
+  const lead = match.index > 0 && slice[match.index - 1] === "\n" ? 1 : 0;
+  const start = offset + match.index - lead;
+  return { start, end: offset + match.index + match[0].length, text: slice.slice(match.index - lead, match.index + match[0].length) };
+}
+
+/**
+ * The model's short overall read of the post — what it argues as a whole and how that holds
+ * up — written after the last claim, or `null` when there is none (or no claims at all).
+ *
+ * Asked for behind an `[[overview]]` marker, but any text after the last claim's verdict is
+ * taken as the overview with or without one: a model that writes "Overall, …" after its
+ * last VERDICT line means exactly this, and gluing it onto the last claim's card instead
+ * used to cost that claim its verdict badge.
+ */
+export function claimsOverview(rawAnswer) {
+  return parseClaims(rawAnswer)?.overview ?? null;
+}
+
+/**
+ * The text an answer opens with before its first `[[claim: …]]` marker, or `null` when
+ * there is none (or no markers at all — then the whole answer is the body, not a preamble).
+ *
+ * The prompt allows exactly one thing here: a line of context about the post as a whole
+ * that no single claim owns — chiefly "this is a sketch/satire, and these are the real
+ * claims under the jokes" (see WHEN THE POST IS A SKETCH, SATIRE OR PARODY in
+ * lib/verified-chat.js). `splitClaims` starts each block at its marker, so without this the
+ * line was parsed out of every rendering and the reader never saw it — the model telling
+ * them what they were looking at, dropped on the floor by the app.
+ */
+export function claimsPreamble(rawAnswer) {
+  const text = String(rawAnswer ?? "");
+  CLAIM_MARKER.lastIndex = 0;
+  const first = CLAIM_MARKER.exec(text);
+  CLAIM_MARKER.lastIndex = 0;
+  if (!first) return null;
+  const preamble = text.slice(0, first.index).trim();
+  return preamble || null;
+}
+
+/**
+ * An answer as text a person reads outside this app — copied, shared — with the app's own
+ * block syntax turned into words: `[[claim: X]]` becomes `Claim: X`, `[[overview]]` becomes
+ * `Overview:`. With `overview: false` (the reader switched the Overview card off) the
+ * overview is left out altogether rather than relabelled.
+ */
+export function readableAnswer(text, { overview = true } = {}) {
+  let out = String(text ?? "");
+  const marker = out.match(OVERVIEW_MARKER);
+  if (marker) {
+    out = overview
+      ? out.slice(0, marker.index) + "Overview: " + out.slice(marker.index + marker[0].length).replace(/^\n+/, "")
+      : out.slice(0, marker.index).trimEnd();
+  }
+  CLAIM_MARKER.lastIndex = 0;
+  // The marker's own line break is not part of the match, so one is added only when the
+  // body began on the marker's line.
+  out = out.replace(CLAIM_MARKER, (match, title, offset, whole) => {
+    const next = whole[offset + match.length];
+    return `Claim: ${title.trim()}${next === undefined || next === "\n" ? "" : "\n"}`;
+  });
+  CLAIM_MARKER.lastIndex = 0;
+  return out.replace(/\n{3,}/g, "\n\n");
+}
+
+/** The `[n]` numbers a piece of answer text cites, in the order it first cites them. A
+ * timestamp (`[t=0:12]`, `[0:12]`) has a colon or a `t=`, so it is never read as one. */
+export function citedNumbers(text) {
+  const seen = [];
+  for (const group of String(text ?? "").matchAll(/\[(\d+(?:\s*[,;]\s*\d+)*)\]/g)) {
+    for (const n of group[1].split(/\s*[,;]\s*/)) if (!seen.includes(n)) seen.push(n);
+  }
+  return seen;
+}
+
+/**
+ * Which of a turn's sources belong on which card: `{ claims, preamble, overview, other }`,
+ * `claims` holding one list per claim.
+ *
+ * A source goes where it is cited: on the claim whose title or body cites it, in the intro
+ * note or the overview if that is where it is cited, and — only if nothing on screen cites
+ * it at all — in `other`, the row after the last claim. It used to be one pile on the last
+ * claim's card, which read as that claim's evidence: the sources of four claims under the
+ * fourth. A source two claims both cite appears on both; that is the truth about it.
+ */
+export function attributeSources({ rawAnswer, claims, sources } = {}) {
+  const all = sources ?? [];
+  const byNumber = new Map(all.map((source) => [String(source.n), source]));
+  const pick = (text) => citedNumbers(text).map((n) => byNumber.get(n)).filter(Boolean);
+  const perClaim = (claims ?? []).map((claim) => pick(`${claim.title}\n${claim.text}`));
+  const preamble = pick(claimsPreamble(rawAnswer) ?? "");
+  const overview = pick(claimsOverview(rawAnswer) ?? "");
+  const placed = new Set([...perClaim.flat(), ...preamble, ...overview]);
+  return { claims: perClaim, preamble, overview, other: all.filter((source) => !placed.has(source)) };
 }
 
 /**
