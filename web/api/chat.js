@@ -13,7 +13,7 @@ import {
 } from "../lib/gemini.js";
 import { validateHints } from "../lib/resolve-hint.js";
 import { browserWorkerFromEnv } from "../lib/browser-resolve.js";
-import { verifiedChat, FACT_CHECK_SYSTEM_PROMPT } from "../lib/verified-chat.js";
+import { verifiedChat, factCheckSystemPrompt } from "../lib/verified-chat.js";
 import { authorize, config, validateMessages, GuardError } from "../lib/guard.js";
 import { normaliseTiers } from "../public/source-quality.js";
 
@@ -23,7 +23,7 @@ import { normaliseTiers } from "../public/source-quality.js";
 // replaces the instruction, not the enforcement: `cleanCitations` still deletes every
 // marker the ledger can't resolve, whatever prompt produced it. (It does not reject or
 // regenerate an answer — that auditor was removed; see lib/citations.js.)
-const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT || FACT_CHECK_SYSTEM_PROMPT;
+const SYSTEM_PROMPT_OVERRIDE = process.env.SYSTEM_PROMPT || null;
 
 // How long the stream may go without writing before we send an SSE comment to keep it
 // open. Proxies — Vercel's included — close a connection that has been silent too long,
@@ -85,6 +85,7 @@ export default async function handler(req, res) {
   let messages;
   let clipHints = null;
   let sourceTiers;
+  let overview = true;
   let usage = { pressure: 0 };
   try {
     usage = authorize(req, limits) ?? usage;
@@ -104,6 +105,9 @@ export default async function handler(req, res) {
     // hand-rolled request from either injecting a tier name or silently asking for a check
     // with no sources at all. See public/source-quality.js.
     sourceTiers = normaliseTiers(body?.sourceTiers);
+    // Settings → General → Overview card. Only an explicit `false` switches it off, so a
+    // client that predates the setting keeps the default it always had.
+    overview = body?.overview !== false;
   } catch (error) {
     if (error instanceof GuardError) {
       const headers = error.retryAfter ? { "retry-after": String(error.retryAfter) } : {};
@@ -172,7 +176,7 @@ export default async function handler(req, res) {
     for await (const frame of verifiedChat({
       apiKey,
       messages,
-      system: SYSTEM_PROMPT,
+      system: SYSTEM_PROMPT_OVERRIDE ?? factCheckSystemPrompt({ overview }),
       models: modelChainFromEnv(),
       maxOutputTokens: limits.maxOutputTokens,
       thinkingBudgetTokens: limits.thinkingBudgetTokens,

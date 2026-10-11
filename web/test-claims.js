@@ -13,6 +13,7 @@ import {
   claimsOverview,
   attributeSources,
   citedNumbers,
+  readableAnswer,
   claimDiff,
   aggregateVerdictKey,
 } from "./public/claims.js";
@@ -428,4 +429,18 @@ test("attributeSources puts each source on the card that cites it", () => {
   assert.deepEqual(out.overview, []);
   // Nothing cites source 4, so it is the only one left for the row after the claims.
   assert.deepEqual(out.other.map((s) => s.n), [4]);
+});
+
+
+/* ---------------------------------------------------------------- readableAnswer */
+
+test("readableAnswer turns the app's block syntax into words for copying", () => {
+  const answer = "Intro.\n\n[[claim: A]]\nbody [1]\nVERDICT: Corroborated\n[[overview]]\nIt holds up.";
+  assert.equal(
+    readableAnswer(answer),
+    "Intro.\n\nClaim: A\nbody [1]\nVERDICT: Corroborated\nOverview: It holds up.",
+  );
+  // The reader switched the overview off: it stays out of the copy, too.
+  assert.equal(readableAnswer(answer, { overview: false }), "Intro.\n\nClaim: A\nbody [1]\nVERDICT: Corroborated");
+  assert.equal(readableAnswer("Just a reply."), "Just a reply.");
 });

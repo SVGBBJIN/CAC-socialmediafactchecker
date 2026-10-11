@@ -292,6 +292,31 @@ export function claimsPreamble(rawAnswer) {
   return preamble || null;
 }
 
+/**
+ * An answer as text a person reads outside this app — copied, shared — with the app's own
+ * block syntax turned into words: `[[claim: X]]` becomes `Claim: X`, `[[overview]]` becomes
+ * `Overview:`. With `overview: false` (the reader switched the Overview card off) the
+ * overview is left out altogether rather than relabelled.
+ */
+export function readableAnswer(text, { overview = true } = {}) {
+  let out = String(text ?? "");
+  const marker = out.match(OVERVIEW_MARKER);
+  if (marker) {
+    out = overview
+      ? out.slice(0, marker.index) + "Overview: " + out.slice(marker.index + marker[0].length).replace(/^\n+/, "")
+      : out.slice(0, marker.index).trimEnd();
+  }
+  CLAIM_MARKER.lastIndex = 0;
+  // The marker's own line break is not part of the match, so one is added only when the
+  // body began on the marker's line.
+  out = out.replace(CLAIM_MARKER, (match, title, offset, whole) => {
+    const next = whole[offset + match.length];
+    return `Claim: ${title.trim()}${next === undefined || next === "\n" ? "" : "\n"}`;
+  });
+  CLAIM_MARKER.lastIndex = 0;
+  return out.replace(/\n{3,}/g, "\n\n");
+}
+
 /** The `[n]` numbers a piece of answer text cites, in the order it first cites them. A
  * timestamp (`[t=0:12]`, `[0:12]`) has a colon or a `t=`, so it is never read as one. */
 export function citedNumbers(text) {

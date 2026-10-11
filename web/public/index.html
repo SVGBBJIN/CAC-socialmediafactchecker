@@ -1138,11 +1138,10 @@
      scoped to the freshly-started running card alone (`.run-enter`, see `renderRunningCard`
      in app.js) — `.landing` plays the same entrance below, just not by riding on this class
      — and that is deliberate: in this app a `.claim-card` is also a `.claim-pane` in the
-     claims grid (see `claimPanesHTML`), and those boxes are torn down and rebuilt on every
-     streamed claim while `flipClaimsPane` animates `transform` on them through the Web
-     Animations API. A CSS entrance on the same property would fight it for the same reason
-     the note on `.claim-grid-loading .claim-pane.in` gives, and would replay from the top on
-     every rebuild — a flicker per claim, not an arrival. The running card's very first paint
+     claims stack (see `claimPanesHTML`), and those boxes are torn down and rebuilt on every
+     streamed claim. An entrance riding on `.claim-card` would replay from the top on every
+     rebuild — a flicker per claim, not an arrival — which is why a box gets the DS's
+     ClaimStack entrance (`.stack-in`) only on the render it is new. The running card's very first paint
      is the one moment of that kind that mounts once and then just sits there —
      `renderRunningCard` is only ever called once per check. */
   .claim-card.run-enter {
@@ -1369,42 +1368,25 @@
     100% { background-position: 0% 50%; }
   }
 
-  /* A box that has just stopped shimmering (`settleClaimPane` in app.js). Claims settle one
-     at a time and several seconds apart, anywhere in the grid — including above where the
-     reader is looking — so the border lights up once and fades back rather than the box
-     silently swapping its contents. It is the one moment in a long check where something
-     the reader can actually *read* arrives, and it should be findable without re-scanning
-     the grid. Plays once and stops; the class is never removed because there is nothing
-     left for it to do. */
-  .claim-pane.just-settled { animation: claim-settle 1.4s ease-out 1; }
-  @keyframes claim-settle {
-    0%   { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent); }
-    100% { border-color: var(--border); box-shadow: none; }
+  /* A claim box arriving — the TRASE Design System's ClaimStack entrance, ported as is: up
+     16px and in, once, on its own easing. It goes on a box only the render it is new
+     (`loadingClaimHTML`'s `isNew`, or a finished result shown fresh in `claimPanesHTML`);
+     boxes already on screen are redrawn without it, so a new claim landing moves nothing
+     but itself. This replaced a FLIP "split" that animated every box from the old loading
+     card's rect with a non-uniform scale — text visibly squashed and stretched for a full
+     second — plus a staggered re-fade of every box on every rebuild, and a border flash on
+     each settle. The DS does none of that; a box settling into its analysis is just the
+     height transition below. `--stack-delay` is a short stagger for a whole result at once. */
+  .claim-pane.stack-in {
+    animation: claim-stack-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: var(--stack-delay, 0s);
   }
-
-  /* The single loading card growing into per-claim boxes as the model names them — see
-     renderClaimSkeletons and, for the position/size half of this, flipClaimsPane in app.js.
-     flipClaimsPane is what makes the grid read as the original card actually dividing into
-     these pieces rather than boxes appearing in a bigger grid: it measures each box before
-     and after a rebuild and animates a FLIP transform from its old rect to its new one, so a
-     box that already existed visibly slides/resizes into its new slot and a brand new box
-     grows out of whatever single box preceded it (ported from the TRASE Design System's
-     ClaimGridSplit, whose stage-keyed absolute layout this achieves the same "mitosis"
-     motion for any claim count rather than the DS demo's fixed four).
-     This opacity-only rule is deliberately *not* also animating `transform` the way it used
-     to (a plain scale/translateY pop) — flipClaimsPane sets `transform` on the same element
-     via the Web Animations API, and a class-driven CSS `transition` on the same property
-     would fight it, since the two can't agree on what "in" means for a box FLIP is actively
-     moving through space. Opacity has no such conflict, so it stays here, stagger and all. */
-  .claim-grid-loading .claim-pane[data-reveal] { opacity: 0; }
-  .claim-grid-loading .claim-pane.in {
-    opacity: 1;
-    /* Matches flipClaimsPane's slower 1100ms/ease-out FLIP transform (app.js) — the fade
-       used to finish (0.32s) well before that motion did, so a box would go fully opaque
-       mid-slide instead of arriving solid right as it settled into its cell. */
-    transition: opacity 0.6s cubic-bezier(.2,1,.3,1);
-    transition-delay: var(--split-delay, 0s);
+  @keyframes claim-stack-in {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
+  [data-motion="reduced"] .claim-pane.stack-in { animation: none; }
+  @media (prefers-reduced-motion: reduce) { .claim-pane.stack-in { animation: none; } }
   /* A box already in the stack changing height — a skeleton settling into its real analysis
      — animates rather than snapping, which is what the DS's `.claim-stack-cell` does with
      its own measured height. Here the box owns its height directly, so the transition goes
@@ -2444,27 +2426,19 @@
      sentence case in the middle of a card it read as one more label. */
     font-size: 11.5px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.03em;
-    opacity: 0; transform: scale(0.5) rotate(-6deg);
   }
-  .badge-icon {
-    width: 12px; height: 12px; flex-shrink: 0;
-    opacity: 0; transform: scale(0.3);
-  }
-  .badge.in { animation: stamp-in 0.42s cubic-bezier(.2,1.4,.4,1) forwards; }
-  /* The icon lands a beat after the badge itself settles — a little confirmation click
-     right as the stamp stops moving, rather than arriving already baked into the same
-     scale/rotate the pill stamps in with. */
-  .badge.in .badge-icon { animation: badge-icon-pop 0.3s cubic-bezier(.2,1.4,.4,1) 0.3s forwards; }
-  @keyframes stamp-in {
-    0%   { opacity: 0; transform: scale(0.5) rotate(-6deg); }
-    60%  { opacity: 1; transform: scale(1.08) rotate(2deg); }
-    100% { opacity: 1; transform: scale(1) rotate(0deg); }
-  }
-  @keyframes badge-icon-pop {
-    0%   { opacity: 0; transform: scale(0.3); }
-    70%  { opacity: 1; transform: scale(1.25); }
-    100% { opacity: 1; transform: scale(1); }
-  }
+  .badge-icon { width: 12px; height: 12px; flex-shrink: 0; }
+  /* The DS's VerdictBadge has no entrance of its own — it arrives with its card. This is the
+     least that still reads as arrival: a short fade with no movement. It used to stamp in
+     (scale from half size, a 6° twist, overshoot) with its icon popping in a beat later,
+     which inside a card that was itself sliding in was three motions for one verdict. */
+  /* Keyed on `data-reveal`, which only a badge that is actually arriving carries (see
+     `revealAttrs`): a badge redrawn already-settled — every box above a newly streamed
+     claim, and every badge again when the finished result replaces the loading stack —
+     is simply there, rather than fading out and back in under the reader. */
+  .badge[data-reveal] { opacity: 0; }
+  .badge[data-reveal].in { animation: badge-in 0.3s ease-out forwards; }
+  @keyframes badge-in { from { opacity: 0; } to { opacity: 1; } }
   /* Derived from the tokens rather than hard-coded rgba: the four verdict hues moved when
      the palette was raised for contrast, and a badge that kept the old literals would have
      been tinted one colour and lettered another. `color-mix` against `transparent` is the
@@ -3929,8 +3903,6 @@
   [data-motion="reduced"] .topbar-title,
   [data-motion="reduced"] .topbar-sub,
   [data-motion="reduced"] .skeleton-line,
-  [data-motion="reduced"] .claim-pane.just-settled,
-  [data-motion="reduced"] .claim-grid-loading .claim-pane,
   [data-motion="reduced"] .live-sources .source-pill,
   [data-motion="reduced"] .ts-chip.playing,
   [data-motion="reduced"] .listening-wave span,
@@ -3949,12 +3921,11 @@
      should never matter in practice — kept anyway, the same way every other JS-gated
      animation in this file still gets a CSS-level fallback. */
   [data-motion="reduced"] .analyzing-overlay { display: none !important; }
-  /* `.badge`/`.badge-icon` reach their visible state only through the stamp-in/pop
-     keyframes' `forwards` fill — unlike the `.in`-class/`transition` pairs above, killing
+  /* `.badge` reaches its visible state only through the badge-in keyframes' `forwards`
+     fill — unlike the `.in`-class/`transition` pairs above, killing
      the animation with nothing else in its place would leave every badge and its icon
-     stuck at their 0%-keyframe opacity (invisible) instead of just arriving instantly. */
+     stuck at its 0%-keyframe opacity (invisible) instead of just arriving instantly. */
   [data-motion="reduced"] .badge.in { opacity: 1; transform: none; }
-  [data-motion="reduced"] .badge.in .badge-icon { opacity: 1; transform: none; }
   /* The loading dial and the brand HUD each carry many descendants with their own
      `animation` — one per ring/tick/core/node, times three variants for the dial — so this
      is a wildcard rather than each one named individually the way the rest of this list is. */
@@ -3962,7 +3933,7 @@
   [data-motion="reduced"] .brand-hud * { animation: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .claim-text, .badge, .notice, .context-note, .overview-card, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
+    .claim-text, .badge, .notice, .context-note, .overview-card, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.stack-in, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
     .badge.in { opacity: 1; transform: none; }
     .badge.in .badge-icon { opacity: 1; transform: none; }
     .iris-wrap *, .brand-hud * { animation: none !important; }

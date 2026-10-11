@@ -27,7 +27,7 @@ import {
   activeAt,
 } from "./timestamps.js";
 import { parseBlocks } from "./markdown.js";
-import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimsPreamble, claimsOverview, attributeSources, claimDiff, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimsPreamble, claimsOverview, attributeSources, readableAnswer, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
 import { filterLibrary, platformsIn, verdictsIn } from "./library-search.js";
@@ -2784,7 +2784,7 @@ function stripAnswerMarkers(answer) {
 function turnBodyHTML(turn, sources, animate, seekable) {
   if (!turn.claims) {
     return `
-      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(turn.answer, sources, seekable)}</div>
+      <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(readableAnswer(turn.answer, { overview: settings.showOverview }), sources, seekable)}</div>
       ${badgeHTML(turn.verdictKey, animate)}`;
   }
   const attributed = attributeSources({ ...turn, sources });
@@ -3790,72 +3790,6 @@ el.claimsPane.addEventListener("pointerout", (e) => {
   resetCardTilt(card);
 });
 
-/* ---------------------------------------------------------------- claim grid split (FLIP)
- *
- * The loading view grows from one big card into a grid of skeleton boxes as `[[claim: …]]`
- * markers stream in (see renderClaimSkeletons below) — ported from the TRASE Design System's
- * ClaimGridSplit, which animates that growth as the original panel visibly dividing into its
- * new cells rather than boxes simply appearing in a bigger grid.
- *
- * The DS component drives this from React state with a hand-picked pixel layout per stage
- * (1/2/4 claims, its demo's fixed ceiling); nothing here knows in advance how many claims a
- * real check will find. So instead of
- * pre-computing target rects, this reads whatever the grid's own CSS actually put on screen
- * before and after a rebuild and animates the difference — the standard "FLIP" technique
- * (First, Last, Invert, Play): measure every `.claim-card`'s rect, let `render` replace the
- * pane's markup as it already does, then for each box now on screen, animate *from* its old
- * rect *to* its new one via the Web Animations API (independent of the CSS `transition`
- * property, so it can't collide with `.claim-grid-loading .claim-pane.in`'s own opacity
- * transition on the same element — see that rule's comment in index.html).
- *
- * Boxes are matched old-to-new by `data-claim` index; the single running card from
- * renderRunningCard (no `data-claim`) uses the key `"__single__"`. A box with no direct
- * predecessor — claim 3 appearing for the first time, or every box on the very first
- * rebuild — falls back to the one old rect there was, if there was exactly one (the usual
- * case: the lone running card splitting into the first grid), so it grows out of that rather
- * than snapping in from nowhere.
- */
-function flipClaimsPane(render) {
-  if (prefersReducedMotion()) {
-    render();
-    return;
-  }
-  const before = new Map();
-  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
-    before.set(node.dataset.claim ?? "__single__", node.getBoundingClientRect());
-  });
-  const fallback =
-    before.size === 1 ? [...before.values()][0] : el.claimsPane.getBoundingClientRect();
-
-  render();
-
-  el.claimsPane.querySelectorAll(".claim-card").forEach((node) => {
-    const from = before.get(node.dataset.claim ?? "__single__") ?? fallback;
-    const to = node.getBoundingClientRect();
-    if (!from || !to.width || !to.height) return;
-    const dx = from.left - to.left;
-    const dy = from.top - to.top;
-    const sx = from.width / to.width;
-    const sy = from.height / to.height;
-    if (!dx && !dy && sx === 1 && sy === 1) return; // already where it lands — nothing to play
-    node.animate(
-      [
-        { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, transformOrigin: "top left" },
-        { transform: "translate(0, 0) scale(1, 1)", transformOrigin: "top left" },
-      ],
-      // Slower than a typical UI transition on purpose — this is the one moment the reader
-      // sees the card visibly become the grid, so it should read as a deliberate motion
-      // rather than a snap. The easing is a pure ease-out (fast start, long gentle settle)
-      // rather than the old ease-in-out S-curve, which had a harsh accelerating start that
-      // read as a jump-cut before the eye had registered the box moving at all. 1100ms
-      // rather than the original 800ms — a check with several claims can fire this every
-      // few seconds as markers stream in, and at 800ms the next split could start before a
-      // reader had finished following the last one, which read as hectic rather than lively.
-      { duration: 1100, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
-    );
-  });
-}
-
 /**
  * The sources retrieved so far, on screen while they are still being read.
  *
@@ -3946,18 +3880,18 @@ function settledBodyHTML(claim, sources, seekable, animate = true) {
   return `<div ${revealAttrs("claim-body claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>`;
 }
 
-/** One box in the loading grid: title always real (lifted straight off the `[[claim: …]]`
- * marker that streamed in), body either settled or shimmering. */
-function loadingClaimHTML(claim, index, sources, seekable) {
+/** One box in the loading stack: title always real (lifted straight off the `[[claim: …]]`
+ * marker that streamed in), body either settled or shimmering.
+ *
+ * `isNew` is whether this box is arriving with this render. Only a new box plays the
+ * design system's ClaimStack entrance (`.stack-in`: up 16px and in, once). Every box that
+ * was already on screen is redrawn exactly as it was — the stack is rebuilt whenever a new
+ * marker lands, and replaying the boxes the reader is already looking at is what made each
+ * new claim set the whole column flickering. */
+function loadingClaimHTML(claim, index, sources, seekable, isNew) {
   const done = Boolean(claim.verdictKey);
-  // `--split-delay` staggers the box's entrance (see .claim-grid-loading .claim-pane.in in
-  // index.html) by claim index rather than DOM sibling position — claimGridStatusHTML's
-  // status strip is another <div> ahead of these, so nth-of-type would be off by one.
-  // Widened alongside flipClaimsPane's slower duration so the fade-in still lands after the
-  // box has visibly finished sliding into place, instead of outrunning it.
-  const style = `--split-delay: ${Math.min(index * 0.09, 0.54)}s`;
   return `
-    <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}" style="${style}" data-claim="${index}" data-reveal>
+    <div class="claim-card claim-pane${done ? verdictPaneClass(claim.verdictKey) : " skeleton"}${isNew ? " stack-in" : ""}" data-claim="${index}">
       ${done ? badgeHTML(claim.verdictKey, false) : ""}
       <p class="claim-title in">${claimTitleHTML(claim.title, sources, seekable)}</p>
       ${done ? settledBodyHTML(claim, sources, seekable, false) : SKELETON_BODY_HTML}
@@ -3978,7 +3912,7 @@ function loadingClaimHTML(claim, index, sources, seekable) {
  * real text rather than reverting to a shimmer — see `settleClaimPane` for the in-place
  * version that runs when no redraw is needed.
  */
-function renderClaimSkeletons(claims, stage, sources, seekable) {
+function renderClaimSkeletons(claims, stage, sources, seekable, previousCount = 0) {
   // Whether the reader is currently reading the bottom of the stack, measured *before* the
   // rebuild — see `stickToNewestClaim`.
   const atBottom = claimsPaneAtBottom();
@@ -3990,9 +3924,7 @@ function renderClaimSkeletons(claims, stage, sources, seekable) {
     summaryCardHTML(claims) +
       claimGridStatusHTML(stage) +
       claims
-        .map((claim, i) =>
-          loadingClaimHTML(claim, i, sources, seekable),
-        )
+        .map((claim, i) => loadingClaimHTML(claim, i, sources, seekable, i >= previousCount))
         .join(""),
   );
   revealIn(el.claimsPane);
@@ -4066,7 +3998,6 @@ function settleClaimPane(index, claim, sources, seekable) {
   // `trim()` because `verdictPaneClass` returns the leading space the templates want.
   const paneVerdict = verdictPaneClass(claim.verdictKey).trim();
   if (paneVerdict) pane.classList.add(paneVerdict);
-  if (!prefersReducedMotion()) pane.classList.add("just-settled");
   revealIn(pane);
   // The `[t=…]` chips this box just gained are seek controls like any other — read them
   // back now rather than at the end, so a settled claim's timestamps play the clip
@@ -4611,7 +4542,9 @@ async function handleClaimsPaneClick(event) {
   if (stored == null) return;
   // `[t=0:12]` is this app's own syntax for a control that exists on this screen and
   // nowhere else. Copied or shared, it should read as what it means: a moment in the clip.
-  const text = plainTimestamps(stored);
+  // Same for the claim and overview markers — and the overview stays out of the copy when
+  // the reader has switched the card off, the same as it stays off the screen.
+  const text = plainTimestamps(readableAnswer(stored, { overview: settings.showOverview }));
 
   const action = btn.dataset.action;
   if (action === "copy") {
@@ -4721,7 +4654,7 @@ function claimPanesHTML(entry, animate, newestFollowup, attributed = attributeSo
       // toggle changes nothing visible — the alternative was rendering different markup per
       // breakpoint and re-rendering the pane on every resize.
       return `
-        <div class="claim-card claim-pane${verdictPaneClass(claim.verdictKey)}" role="button" tabindex="0" aria-expanded="false">
+        <div class="claim-card claim-pane${verdictPaneClass(claim.verdictKey)}${animate ? " stack-in" : ""}"${animate ? ` style="--stack-delay: ${Math.min(index * 0.06, 0.3)}s"` : ""} role="button" tabindex="0" aria-expanded="false">
           <!-- Verdict first, then the claim it belongs to. The finding is what a reader
                came for, so it opens the box rather than closing it; the "Claim 1 of 4"
                label that used to sit here is gone, since the boxes are laid out side by
@@ -4858,7 +4791,7 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
     setClaimsPaneHTML(`
     <div class="claim-card">
       <div class="eyebrow">Analysis</div>
-      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
+      <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(readableAnswer(entry.answer, { overview: settings.showOverview }), entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
       ${durationHTML(entry.durationMs, animateAnalysis)}
@@ -4941,6 +4874,9 @@ async function streamChat(messages, { signal, onStage, onSearchCount, onDelta, o
       messages,
       ...(clipHints ? { clipHints } : {}),
       sourceTiers: normaliseTiers(settings.sourceTiers),
+      // Settings → General → Overview card. Off means the model is never asked for one —
+      // see `factCheckSystemPrompt` in lib/verified-chat.js — not just that it isn't drawn.
+      overview: settings.showOverview,
     }),
     signal,
   });
@@ -5097,7 +5033,8 @@ function composeCheckPrompt(url) {
       "Start with the claim the post as a whole is making — its title, caption or thesis — " +
       "then the distinct factual claims it relies on, and check each one, using the CLAIM " +
       `STRUCTURE from the system prompt — one \`[[claim: …]]\` block per claim, each ` +
-      `ending in its own VERDICT line, then a short \`[[overview]]\`. If it is comedy, satire or parody, say so in one line ` +
+      `ending in its own VERDICT line${settings.showOverview ? ", then a short \`[[overview]]\`" : ""}. ` +
+      `If it is comedy, satire or parody, say so in one line ` +
       `first and still check the real claims under the jokes. ${timestamps}`,
   );
 }
@@ -5782,11 +5719,13 @@ async function runCheck(url, existingId, hint) {
         const claims = splitClaims(text) ?? [];
         const { rebuild, settled } = claimDiff(drawn, claims);
         if (!rebuild && settled.length === 0) return;
+        const previousCount = drawn.length;
         drawn = claims;
         if (rebuild) {
           // renderClaimSkeletons prepends a fresh summaryCardHTML(claims) of its own, so
           // the counts are already current the moment this lands — nothing more to patch.
-          flipClaimsPane(() => renderClaimSkeletons(claims, stage, liveSources, seekable));
+          // Only the boxes past `previousCount` are new, and only those animate in.
+          renderClaimSkeletons(claims, stage, liveSources, seekable, previousCount);
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], liveSources, seekable);

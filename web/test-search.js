@@ -17,7 +17,7 @@ import {
 } from "./lib/search-schema.js";
 import { search, providerFromEnv, unwrapDuckDuckGoURL, SearchError } from "./lib/search.js";
 import { CitationLedger, markersIn } from "./lib/citations.js";
-import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
+import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT, factCheckSystemPrompt } from "./lib/verified-chat.js";
 import { PageFindError } from "./lib/page-find.js";
 
 /* ---------------- query schema ---------------- */
@@ -1006,6 +1006,17 @@ test("the system prompt puts the post's own central claim first", () => {
 test("the system prompt closes a check with an overview after the last verdict", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /\[\[overview\]\]/);
   assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /nothing follows the final VERDICT/i);
+});
+
+test("switching the overview off takes it out of the prompt, not just off the screen", () => {
+  // Hiding the card alone left the model writing an overview on every check regardless.
+  const off = factCheckSystemPrompt({ overview: false });
+  assert.doesNotMatch(off, /\[\[overview\]\]/);
+  assert.match(off, /nothing follows the final VERDICT line: no summary, no overview/);
+  // Everything else is the same prompt.
+  assert.match(off, /FIND THE CLAIM THE POST IS MAKING/);
+  assert.equal(factCheckSystemPrompt(), FACT_CHECK_SYSTEM_PROMPT);
+  assert.equal(factCheckSystemPrompt({ overview: true }), FACT_CHECK_SYSTEM_PROMPT);
 });
 
 test("the system prompt pins the one timestamp shape", () => {

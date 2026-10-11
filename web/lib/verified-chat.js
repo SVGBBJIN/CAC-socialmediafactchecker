@@ -419,6 +419,64 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
 ].join("\n");
 
 /**
+ * The system prompt for this reader: with the closing `[[overview]]` block, or — when they
+ * have switched the Overview card off (Settings → General) — without it.
+ *
+ * Off has to reach the model, not just the screen. Hiding the card alone left the model
+ * writing an overview on every check regardless, which the reader still paid for in time
+ * and output tokens and still saw wherever the card wasn't drawn (a follow-up, a copied
+ * answer). Each swap below must match exactly, and the module refuses to load if one
+ * doesn't: a prompt edit that silently stopped matching would quietly leave the overview
+ * instruction in the "off" prompt, which is the bug this exists to fix.
+ */
+const OVERVIEW_SWAPS = [
+  [
+    [
+      "Then either open the next claim's `[[claim: …]]` line, or, after the last one, close the",
+      "answer with its overview — this marker alone on its line, then two or three sentences:",
+      "",
+      "[[overview]]",
+      "",
+      "The overview says what the post argues as a whole and how that holds up, given the",
+      "verdicts above; it adds no new findings and needs no citation it did not already earn in a",
+      "claim block. Nothing follows it: no Sources list, nothing. Two claims",
+    ].join("\n"),
+    [
+      "Then either open the next claim's `[[claim: …]]` line, or, if that was the last one, stop —",
+      "nothing follows the final VERDICT line: no summary, no overview, no Sources list. Two claims",
+    ].join("\n"),
+  ],
+  [
+    [
+      "VERDICT: Contradicted",
+      "[[overview]]",
+      "The clip gets the timing of the closure right but presents routine maintenance as a",
+      "structural failure, which is the part a viewer would remember.",
+    ].join("\n"),
+    "VERDICT: Contradicted",
+  ],
+  [
+    [
+      "`[n]` for what the evidence says, sometimes both; and the answer ends on a short overview",
+      "after the final VERDICT line — no Sources list after it.",
+    ].join("\n"),
+    [
+      "`[n]` for what the evidence says, sometimes both; and nothing follows the final VERDICT",
+      "line — no summary, no Sources list.",
+    ].join("\n"),
+  ],
+];
+
+const FACT_CHECK_SYSTEM_PROMPT_NO_OVERVIEW = OVERVIEW_SWAPS.reduce((prompt, [from, to]) => {
+  if (!prompt.includes(from)) throw new Error("FACT_CHECK_SYSTEM_PROMPT changed: an overview swap no longer matches");
+  return prompt.replace(from, to);
+}, FACT_CHECK_SYSTEM_PROMPT);
+
+export function factCheckSystemPrompt({ overview = true } = {}) {
+  return overview ? FACT_CHECK_SYSTEM_PROMPT : FACT_CHECK_SYSTEM_PROMPT_NO_OVERVIEW;
+}
+
+/**
  * How many of a search's results are fetched before anyone asks for them, and how many
  * such fetches one turn will make in total.
  *

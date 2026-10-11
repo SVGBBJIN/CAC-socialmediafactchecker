@@ -283,6 +283,13 @@ pattern. None introduces a token.
   padded by `--lshell-bar`. The DS's landing screen draws a bar row above the scroller,
   which slices the page on scroll.
 
+- **Claim motion now follows the DS.** The product's FLIP "split" (boxes scaled
+  non-uniformly from the loading card's rect) and its staggered re-fade of every box on
+  every rebuild are gone. In their place is the DS's own `claim-stack-in`, played only by a
+  box on the render it is new. The badge's stamp/twist/overshoot is now a 0.3s fade on
+  arrival only, and the settle border flash is gone. The DS is owed nothing here; the
+  mirror's `ClaimGridSplit` is now doubly dead.
+
 ---
 
 ## Permanent divergences — do not "fix" these in either direction

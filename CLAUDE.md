@@ -33,7 +33,7 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 694 tests; `worker/`'s is 5.
+this writing the whole suite is 696 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
@@ -221,7 +221,9 @@ markers. A marker must open its line, but body text may follow it on the same li
 claim's verdict is the *last* VERDICT line in its own block, so a `---` or a stray line
 after it no longer costs the badge. Text after the final claim (behind an `[[overview]]`
 marker, or bare) is the overview, rendered as a collapsible card above the claims
-(`claimsOverview`; Settings → Overview card hides it). Text before the first marker is a
+(`claimsOverview`). Switching it off in Settings is sent with each request (`overview:
+false`), so the model is given `factCheckSystemPrompt({ overview: false })` and never asked
+for one. The CSS switch only covers answers stored before the change. Text before the first marker is a
 context note (`claimsPreamble`): the "this is satire" line. Source pills go on the card
 whose text cites them (`attributeSources`), and anything no card cites goes in an "Other
 sources" row after the claims, never into the last card.
