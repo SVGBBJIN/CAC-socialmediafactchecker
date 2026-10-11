@@ -41,6 +41,7 @@ import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
 import { auditCorroboration } from "./corroboration.js";
+import { repairUncitedClaims } from "./claim-repair.js";
 import { captionQuery, captionSearchEnabled } from "./caption-search.js";
 import { normaliseTiers, classifySource, ALL_TIERS } from "../public/source-quality.js";
 
@@ -147,12 +148,37 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "failed check of a claim that was never made. The app has its own way of showing that a",
   "post had nothing to check, and it reads off the absence of your claim blocks.",
   "",
+  "CHOOSING WHICH CLAIMS TO CHECK",
+  "A check is not an inventory of every sentence in the post. Pick the claims that matter",
+  "most — the ones the post's argument rests on, the ones a viewer is most likely to repeat",
+  "or act on, and the ones that could mislead or do harm if wrong — and check those. Hard",
+  "limits on how many claim blocks one answer may have:",
+  "  • a short clip (under about three minutes), a photo post, an article or a claim typed",
+  "    in the message: at most 3 claim blocks;",
+  "  • a longer video: at most 5 claim blocks, however many claims it makes.",
+  "Fold a minor supporting detail into the main claim it supports rather than giving it a",
+  "block of its own, and leave out asides, anecdotes, jokes, opinions and predictions —",
+  "they are not checkable facts. Fewer claims, each properly searched and cited, is a",
+  "better check than many claims each half-checked: you have three rounds of tool calls,",
+  "and every claim you keep needs its own search in them.",
+  "",
   "Each block renders in its own compact card, side by side with the others, not one long",
   "scrolling page — write what actually settles the claim, not everything you found. Keep the",
   "write-up to 1-2 sentences: the specific fact, its citation, and nothing that isn't load-",
   "bearing for the verdict. Save bullet points for a claim that genuinely has several parts",
   "(see FORMATTING WITH BULLET POINTS below), and skip headings and multi-paragraph asides",
   "inside a block — they read as padding in a card sized for one claim, not a full essay.",
+  "",
+  "EVERY VERDICT NEEDS A SOURCE",
+  "Every claim block must be covered by a `web_search` this turn — its own, or one it",
+  "shares with a claim settled by the same source — and every Corroborated, Contradicted",
+  "or Disputed verdict must rest on at least one [n] marker inside its block for a source",
+  "retrieved this turn. There is no claim so obvious that it can be",
+  "Corroborated from memory: if it is worth a claim block it is worth a search, and if it",
+  "is too obvious to search it is too obvious to be a claim block. A block with a decisive",
+  "verdict and no marker is caught by the app — it runs the search you skipped and asks you",
+  "to rewrite the block — which costs the reader another wait for something you should have",
+  "done the first time.",
   "",
   "WHAT COUNTS AS CORROBORATION",
   "A source corroborates a claim when it states the thing the claim asserts. Being about",
@@ -232,15 +258,16 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "HOW TO CHECK",
   "Work in two passes: identify what needs checking, look it up, then read it and write the answer.",
   "",
-  "First pass — read the post or video through, list every distinct claim in it, then filter:",
+  "First pass — read the post or video through, list its distinct claims, then filter:",
   "  • Anything you directly observed in the video or post (person in frame, text on screen,",
-  "    what someone explicitly said) — describe it, do not search.",
-  "  • Claims that are obviously true or obviously false (the Earth is round, 2+2=4, the video",
-  "    is playing) — note without searching.",
-  "  • Claims the reader could verify themselves from the post (color of someone's clothing) —",
-  "    describe without searching.",
-  "  • External facts (whether a claim is true, whether someone made a statement, what experts",
-  "    say) — issue a `web_search` for each one **in the same turn**.",
+  "    what someone explicitly said) is the subject, not a claim to check — describe it, do",
+  "    not search for it, and do not give it a claim block or a verdict.",
+  "  • Trivia nobody would dispute (the Earth is round, 2+2=4) and details the reader can",
+  "    see in the post (the colour of someone's clothing) are not worth a claim block either.",
+  "  • From what is left — external facts: whether a claim is true, whether someone made a",
+  "    statement, what experts say — keep the most important ones, within the limit in",
+  "    CHOOSING WHICH CLAIMS TO CHECK, and issue a `web_search` for every one you keep",
+  "    **in the same turn**. Every claim block you write must have been searched.",
   "",
   "Several calls in one turn are run at the same time; do not narrate what you are looking up,",
   "as the app already shows the reader every search as it runs. A turn that is nothing but",
@@ -1086,6 +1113,56 @@ export async function* verifiedChat({
     yield { type: "delta", text: answer };
   }
 
+  // A claim given a decisive verdict with no source under it gets the search it skipped —
+  // run by the app, one per claim, then one tool-less model call to rewrite those blocks
+  // against what came back. See lib/claim-repair.js. Not on a flawed answer: one cut off by
+  // the token cap or a dying stream is shown with every source listed and keeps its own
+  // numbering, and a rewrite spliced into half an answer would be the app finishing it.
+  let repaired = false;
+  if (answer.trim() && !truncated && !streamError && toolRunner) {
+    const recheck = repairUncitedClaims(answer, {
+      ledger,
+      signal,
+      search: (args) => searchImpl(args, { env, fetchImpl, signal, tiers }),
+      ask: async (prompt) => {
+        let reply = "";
+        for await (const frame of streamChat({
+          ...geminiOptions,
+          apiKey,
+          system,
+          signal,
+          fetchImpl,
+          messages: [...messages, { role: "assistant", content: answer }, { role: "user", content: prompt }],
+          // Everything this call needs is in the prompt. Re-attaching the clip would re-send
+          // the whole video for a rewrite of a few lines, and the history's links would
+          // otherwise be resolved and attached all over again.
+          attachMedia: false,
+          attachPages: false,
+          tools: null,
+          toolRunner: null,
+        })) {
+          if (frame.type === "delta") reply += frame.text;
+        }
+        return reply;
+      },
+    });
+    let step = await recheck.next();
+    while (!step.done) {
+      const frame = step.value;
+      yield frame;
+      if (frame.type === "search") {
+        const sources = provisionalSources();
+        if (sources) yield sources;
+      }
+      step = await recheck.next();
+    }
+    if (signal?.aborted) return;
+    if (step.value.repaired > 0) {
+      answer = step.value.text;
+      repaired = true;
+    }
+  }
+
   // Citation cleanup, and the last thing done to the answer.
   //
   // What it does is what a copy editor does — merge two markers that turn out to be one
@@ -1115,7 +1192,7 @@ export async function* verifiedChat({
       if (audited.changed) answer = audited.text;
 
       const cleaned = cleanCitations(answer, ledger, { renumber: !flawed });
-      if (cleaned.changed || audited.changed) {
+      if (cleaned.changed || audited.changed || repaired) {
         answer = cleaned.changed ? cleaned.text : answer;
         // A replacement rather than more deltas: the answer streamed token by token while it
         // was being written, and this pass could only run once it was whole.

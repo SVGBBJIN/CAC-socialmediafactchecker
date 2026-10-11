@@ -2230,3 +2230,115 @@ test("a Corroborated verdict whose source carries the specific fact is left exac
 
   assert.equal(readerSees(frames), answer);
 });
+
+/* ---------------------------------------------------------------- re-check of uncited verdicts */
+
+function bridgeResult(claim, url) {
+  return {
+    query: claim,
+    claim,
+    provider: "test",
+    retrievedAt: "2026-07-28T00:00:00.000Z",
+    results: [
+      {
+        title: "Harbour bridge history",
+        url,
+        domain: new URL(url).hostname,
+        snippet: "The harbour bridge opened in 2011 and cost $2.1 billion.",
+        published: null,
+      },
+    ],
+  };
+}
+
+test("a Corroborated claim written without a source is searched and re-checked, not left bare", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $2.1 billion" } }] },
+    {
+      text:
+        "[[claim: The bridge cost $2.1 billion]]\nRecords give $2.1 billion [1].\nVERDICT: Corroborated\n" +
+        "[[claim: The bridge opened in 2011]]\nThat is well known.\nVERDICT: Corroborated",
+    },
+    {
+      text: "[[claim: The bridge opened in 2011]]\nThe bridge history confirms it opened in 2011 [2].\nVERDICT: Corroborated",
+    },
+  ]);
+  const searched = [];
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => {
+        searched.push(args.claim);
+        return bridgeResult(
+          args.claim,
+          args.claim.includes("opened") ? "https://history.example/bridge" : "https://records.example/cost",
+        );
+      },
+    }),
+  );
+
+  assert.deepEqual(searched, ["The bridge cost $2.1 billion", "The bridge opened in 2011"]);
+  // The re-check is one more model call, with no tools to call and the uncited block in it.
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].tools, undefined);
+  assert.match(JSON.stringify(sent[2].contents.at(-1)), /Re-check from the app/);
+
+  const shown = readerSees(frames);
+  assert.match(shown, /confirms it opened in 2011 \[2\]\.\nVERDICT: Corroborated$/);
+  assert.ok(!shown.includes("Checked by the app"), "nothing was lowered: the claim now has its source");
+  assert.ok(frames.some((f) => f.type === "stage" && f.stage === "rechecking"));
+  assert.deepEqual(readerSources(frames).map((s) => s.url), ["https://records.example/cost", "https://history.example/bridge"]);
+});
+
+test("a re-check the model does not answer still ends with the claim lowered, never bare", async () => {
+  const { fetchImpl } = fakeGemini([
+    { text: "[[claim: The bridge opened in 2011]]\nThat is well known.\nVERDICT: Corroborated" },
+    { text: "Sorry, I can't help with that." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => bridgeResult(args.claim, "https://history.example/bridge"),
+    }),
+  );
+
+  const shown = readerSees(frames);
+  assert.match(shown, /Checked by the app/);
+  assert.match(shown, /VERDICT: Insufficient evidence$/);
+});
+
+test("a turn with every verdict cited makes no extra search and no extra model call", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge", claim: "The bridge opened in 2011" } }] },
+    { text: "[[claim: The bridge opened in 2011]]\nIt opened in 2011 [1].\nVERDICT: Corroborated" },
+  ]);
+  let searches = 0;
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => {
+        searches += 1;
+        return bridgeResult(args.claim, "https://history.example/bridge");
+      },
+    }),
+  );
+
+  assert.equal(sent.length, 2);
+  assert.equal(searches, 1);
+  assert.ok(!frames.some((f) => f.type === "stage" && f.stage === "rechecking"));
+});

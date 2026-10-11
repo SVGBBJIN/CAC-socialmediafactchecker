@@ -31,9 +31,9 @@ see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
-test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
+test-claim-repair.js test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 644 tests; `worker/`'s is 5.
+this writing the whole suite is 686 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
@@ -157,6 +157,21 @@ lines and on text the app itself retrieved, never on a guess about which prose i
 Nor is it an entailment check — a page saying cases *rose* contains every name and figure of
 a claim that they *fell*, and catching that is the model's job, which the WHAT COUNTS AS
 CORROBORATION section of the prompt asks it to do. Don't grow this into one.
+
+**A decisive verdict with no source under it is re-checked before that audit runs.**
+`lib/claim-repair.js` finds every claim block closed Corroborated, Contradicted or Disputed
+whose text cites nothing in the ledger (the model judged it "obvious", or a long video ran
+out of tool rounds), runs one `web_search` per such claim with its own `[[claim: …]]` line
+as the query, and makes one tool-less, video-less model call asking for just those blocks
+rewritten against the new sources. Each rewrite is spliced over its original block (claim
+line kept verbatim) and the answer then goes through the corroboration audit and cleanup as
+usual — so a rewrite that still cites nothing, or cites only the topic, is lowered the normal
+way. Capped at `MAX_REPAIR_CLAIMS` (5); any failure (search, model, unparseable reply) leaves
+the block for the audit. Skipped on a truncated or errored answer. The prompt's CHOOSING
+WHICH CLAIMS TO CHECK section caps claim blocks at 3 for a short clip/post/article and 5 for
+a longer video, so every kept claim fits in the three tool rounds; EVERY VERDICT NEEDS A
+SOURCE tells the model this re-check exists. Like the audit, this acts only on the model's
+own markers, not on guessed prose.
 
 **One search may run before the model has asked for anything.** `lib/caption-search.js`
 turns a post's caption into a single speculative `web_search`, issued while the clip is
