@@ -236,9 +236,9 @@ function statedRanges(evidence) {
 const FLOOR_BEFORE =
   /(?:^|\s)(?:over|above|beyond|more than|greater than|higher than|at least|upwards of|in excess of|north of|exceeds?|exceeded|exceeding|surpass(?:es|ed|ing)?|pass(?:es|ed|ing)?|tops?|topped|topping)\s*$/;
 const CEILING_BEFORE =
-  /(?:^|\s)(?:under|below|less than|fewer than|lower than|at most|up to|no more than|not more than|short of|nearly|almost|just shy of)\s*$/;
+  /(?:^|\s)(?:under|below|less than|fewer than|lower than|at most|up to|no more than|not more than|short of|just shy of)\s*$/;
 const BALLPARK_BEFORE =
-  /(?:^|\s)(?:about|around|roughly|approximately|approx|some|circa|close to|an estimated|estimated)\s*$/;
+  /(?:^|\s)(?:about|around|roughly|approximately|approx|some|circa|close to|nearly|almost|an estimated|estimated)\s*$/;
 
 /** A word after a figure that multiplies it, in the forms claims and pages write it. */
 const SCALES = {

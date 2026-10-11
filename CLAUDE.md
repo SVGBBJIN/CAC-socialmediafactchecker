@@ -33,7 +33,7 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-claim-repair.js test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 706 tests; `worker/`'s is 5.
+this writing the whole suite is 707 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there

@@ -665,3 +665,9 @@ test("a downgraded floor is named as the claim stated it, not as a bare number",
   assert.equal(audited.changed, true);
   assert.match(audited.text, /none of them mentions over 300 million,/);
 });
+
+test("'nearly' is a ballpark, not a ceiling ten times wide", () => {
+  const claim = "Minecraft has sold nearly 300 million copies";
+  assert.equal(sourceConfirms(claim, page("Minecraft has sold 290 million copies.")).confirms, true);
+  assert.equal(sourceConfirms(claim, page("Minecraft has sold 40 million copies.")).confirms, false);
+});
