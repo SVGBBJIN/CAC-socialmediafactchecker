@@ -3569,6 +3569,7 @@ function dialVariant(frame) {
       return "watching";
     case "waiting":
       return frame.media ? "watching" : "searching";
+    case "judging":
     case "rechecking":
       return "searching";
     case "rewriting":
@@ -4784,6 +4785,10 @@ function stageText(frame) {
       return "Every Gemini model is busy — waiting a moment and trying again";
     case "rewriting":
       return "Rewriting — the first answer failed the citation check";
+    case "judging":
+      return frame.claims === 1
+        ? "Reading the cited pages to confirm a verdict"
+        : "Reading the cited pages to confirm the verdicts";
     case "rechecking":
       return frame.claims === 1
         ? "Searching for a claim that was given a verdict without a source"

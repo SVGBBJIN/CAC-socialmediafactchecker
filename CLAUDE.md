@@ -31,9 +31,9 @@ see the `test` script in `web/package.json` for the full list of suites:
 `test.js test-search.js test-find.js test-cleanup.js test-probe.js test-hint.js
 test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
-test-claim-repair.js test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
+test-corroboration-judge.js test-claim-repair.js test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 707 tests; `worker/`'s is 5.
+this writing the whole suite is 725 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
@@ -156,9 +156,19 @@ travels as the same `{type: "answer"}` replacement frame.
 This is **not** the sentence-level claim detection torn out above, for the same reason the
 claim-marker section below gives: it acts on the model's own `[[claim: …]]` and `VERDICT:`
 lines and on text the app itself retrieved, never on a guess about which prose is a claim.
-Nor is it an entailment check — a page saying cases *rose* contains every name and figure of
-a claim that they *fell*, and catching that is the model's job, which the WHAT COUNTS AS
-CORROBORATION section of the prompt asks it to do. Don't grow this into one.
+The word match is a **filter, not the gate**. A downgrade it proposes is first sent to
+`lib/corroboration-judge.js`: the cited pages are read for the claim (`findImpl` over the
+turn's `PageCache`, usually already prefetched; capped at `READ_BUDGET_MS`), and one
+tool-less, video-less model call (`JUDGE_SYSTEM_PROMPT`, temperature 0) judges every flagged
+claim at once, one `CLAIM n: SUPPORTED|NOT SUPPORTED` line each. A claim judged supported is
+passed back to `auditCorroboration` as `spare` and keeps its verdict. Anything else — judged
+unsupported, a claim that cited nothing, a failed or unparseable call, a stream that already
+errored — keeps the word match's downgrade. The judge only runs when the word match flagged
+something, so a clean turn costs nothing extra; `CORROBORATION_JUDGE_ENABLED=false` turns it
+off. It can only spare a verdict the model wrote, never raise one, and it never looks at a
+claim the word match passed — so a page saying cases *rose*, cited for a claim they *fell*,
+still gets through when every name and figure matches. Catching that stays the model's job,
+which the WHAT COUNTS AS CORROBORATION section of the prompt asks it to do.
 
 **A decisive verdict with no source under it is re-checked before that audit runs.**
 `lib/claim-repair.js` finds every claim block closed Corroborated, Contradicted or Disputed
