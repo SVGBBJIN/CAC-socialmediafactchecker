@@ -50,6 +50,13 @@
 // its sources still linked underneath. The cost of the false positive it prevents is a
 // false claim stamped **Corroborated** in green. Those are not the same size, which is why
 // the coverage rule below is strict about entities and why the whole thing is one-way.
+//
+// ## It is not the last word
+//
+// Matching words cannot read, so this pass only proposes a downgrade. Before one is applied,
+// lib/corroboration-judge.js reads the cited pages for the claim and asks the model whether
+// they state it; a claim it finds supported is passed back here as `spare` and keeps its
+// verdict. The strictness above is what keeps that second call rare, not what decides.
 
 import { markersIn } from "./citations.js";
 import { TIMESTAMP_MARKER } from "../public/timestamps.js";
@@ -223,6 +230,118 @@ function statedRanges(evidence) {
 }
 
 /**
+ * How people actually state a figure: as a floor ("over 300 million", "more than 1.3
+ * million", "surpassed 5 million"), a ceiling ("under 5%", "fewer than 200"), or a
+ * ballpark ("about 300 million"). A claim written that way is not asserting the bare
+ * number, and holding sources to the bare number is how this check came to lower
+ * "Minecraft has sold over 300 million copies" to Insufficient evidence while every cited
+ * page said 350 million or more — the sources carried the claim, just not the digits.
+ *
+ * Matched against the few words immediately before the figure (or a `+`/"plus" straight
+ * after it). Read off normalised text, so "more than" and "More than" are one phrase.
+ */
+const FLOOR_BEFORE =
+  /(?:^|\s)(?:over|above|beyond|more than|greater than|higher than|at least|upwards of|in excess of|north of|exceeds?|exceeded|exceeding|surpass(?:es|ed|ing)?|pass(?:es|ed|ing)?|tops?|topped|topping)\s*$/;
+const CEILING_BEFORE =
+  /(?:^|\s)(?:under|below|less than|fewer than|lower than|at most|up to|no more than|not more than|short of|just shy of)\s*$/;
+const BALLPARK_BEFORE =
+  /(?:^|\s)(?:about|around|roughly|approximately|approx|some|circa|close to|nearly|almost|an estimated|estimated)\s*$/;
+
+/** A word after a figure that multiplies it, in the forms claims and pages write it. */
+const SCALES = {
+  thousand: 1e3,
+  k: 1e3,
+  million: 1e6,
+  m: 1e6,
+  mn: 1e6,
+  mil: 1e6,
+  billion: 1e9,
+  bn: 1e9,
+  b: 1e9,
+  trillion: 1e12,
+  tn: 1e12,
+};
+const SCALE_WORD = "thousand|million|billion|trillion|mil|mn|bn|tn|k|m|b";
+
+/**
+ * How far from a stated floor or ceiling a source's figure may sit and still be read as
+ * carrying it. A page saying 350 million carries "over 300 million"; one saying 40 billion
+ * is about something else that happens to be bigger, and with no cap at all *any* larger
+ * number on the page — a year, a page count — would confirm every floor ever written.
+ */
+const BOUND_SPAN = 10;
+/** A ballpark figure's tolerance either side: "about 300 million" is carried by 290-330. */
+const BALLPARK_TOLERANCE = 0.1;
+
+/** A four-digit whole number in the range years live in, with no scale word after it. */
+const yearLike = (value, scaled) => !scaled && Number.isInteger(value) && value >= 1800 && value <= 2200;
+
+/**
+ * Which kind of qualifier, if any, the normalised text just before a figure ends in —
+ * `{kind, words}`, or null. `words` is the qualifier itself ("more than"), for the note.
+ */
+function qualifierBefore(before) {
+  for (const [kind, pattern] of [
+    ["floor", FLOOR_BEFORE],
+    ["ceiling", CEILING_BEFORE],
+    ["ballpark", BALLPARK_BEFORE],
+  ]) {
+    const match = before.match(pattern);
+    if (match) return { kind, words: match[0].trim() };
+  }
+  return null;
+}
+
+/**
+ * Every figure a normalised text states, with its scale applied and the qualifier in
+ * front of it. Read off the evidence once per source (see `evidenceOf`), so a bounded
+ * claim can be checked against what each page actually says rather than its digits.
+ */
+function statedFigures(text) {
+  const figures = [];
+  const pattern = new RegExp(`(?<![a-z0-9.])(\\d+(?:\\.\\d+)?)(?:\\s?(${SCALE_WORD}))?(?![a-z0-9])`, "g");
+  for (const match of text.matchAll(pattern)) {
+    const base = Number(match[1]);
+    if (!Number.isFinite(base)) continue;
+    const scale = match[2] ? SCALES[match[2]] : 1;
+    figures.push({
+      value: base * scale,
+      scaled: Boolean(match[2]),
+      qualifier: qualifierBefore(text.slice(Math.max(0, match.index - 24), match.index))?.kind ?? null,
+    });
+  }
+  return figures;
+}
+
+/**
+ * Whether a source carries a floor, ceiling or ballpark the claim states.
+ *
+ * A source's figure counts when it is on the right side of the bound (or, for a ballpark,
+ * within `BALLPARK_TOLERANCE` of it) and within `BOUND_SPAN` of it. Two more rules keep
+ * this from matching numbers that are on the page for some other reason: a figure the
+ * claim scaled ("million") is only matched by a figure the page scaled too, and an
+ * unscaled claim is never matched by a year. And a source figure qualified the *other* way
+ * says nothing about the bound — "under 400 million" does not establish "over 300 million".
+ */
+function boundCovered(bound, evidence) {
+  for (const figure of evidence.figures) {
+    if (figure.scaled !== bound.scaled) continue;
+    if (yearLike(figure.value, figure.scaled)) continue;
+    const { value } = figure;
+    if (bound.kind === "floor") {
+      if (figure.qualifier === "ceiling") continue;
+      if (value >= bound.value && value <= bound.value * BOUND_SPAN) return true;
+    } else if (bound.kind === "ceiling") {
+      if (figure.qualifier === "floor") continue;
+      if (value <= bound.value && value >= bound.value / BOUND_SPAN) return true;
+    } else if (Math.abs(value - bound.value) <= bound.value * BALLPARK_TOLERANCE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Does this source carry the claim's figure?
  *
  * Exact first. Then rounding, at the claim's own precision: a clip saying 4 million
@@ -234,8 +353,9 @@ function statedRanges(evidence) {
  * purpose: a claim that says 4.2 is *not* confirmed by a page that only says "about 4",
  * because the page never carried the precision the claim is asserting.
  */
-function numberCovered(number, evidence) {
+function numberCovered(number, evidence, bound = null) {
   if (evidence.tokens.has(number)) return true;
+  if (bound && boundCovered(bound, evidence)) return true;
   const claimValue = Number(number);
   if (!Number.isFinite(claimValue)) return false;
   const decimals = number.includes(".") ? number.split(".")[1].length : 0;
@@ -343,13 +463,40 @@ export function claimSpecifics(claim) {
   }
 
   const numbers = [];
+  // Figures the claim states as a floor, ceiling or ballpark rather than outright, keyed by
+  // the figure as it appears in `numbers` — see `FLOOR_BEFORE` and `boundCovered`.
+  const bounds = {};
   // A figure, not a digit that happens to be inside a name: the 19 of COVID-19 and the 7 of
   // G7 are parts of words, and counting them as figures the source must quote would both
   // demand nonsense of the page and — because two matched figures relax the word rule below
-  // — hand a claim a specificity it never had.
-  for (const match of text.matchAll(/(?<![A-Za-z\d-])\d[\d,]*(?:\.\d+)?\b/g)) {
+  // — hand a claim a specificity it never had. A scale written straight onto the figure
+  // ("300m", "$4.2bn") is still a figure, so it ends one rather than hiding it.
+  const figurePattern = new RegExp(
+    `(?<![A-Za-z\\d-])\\d[\\d,]*(?:\\.\\d+)?(?=\\b|(?:${SCALE_WORD})\\b)`,
+    "gi",
+  );
+  for (const match of text.matchAll(figurePattern)) {
     const value = numeric(match[0]);
-    if (value && !numbers.includes(value)) numbers.push(value);
+    if (!value || numbers.includes(value)) continue;
+    numbers.push(value);
+
+    const after = text.slice(match.index + match[0].length);
+    const scaleWord = after.match(new RegExp(`^\\s?(${SCALE_WORD})\\b`, "i"))?.[1]?.toLowerCase();
+    const scaled = Boolean(scaleWord);
+    const amount = Number(value) * (scaled ? SCALES[scaleWord] : 1);
+    if (!Number.isFinite(amount) || yearLike(amount, scaled)) continue;
+    // "300 million" keeps its space; "300m" stays attached, the way it was written.
+    const unit = !scaled ? "" : scaleWord.length > 2 ? ` ${scaleWord}` : scaleWord;
+    const rest = after.replace(new RegExp(`^\\s?(?:${SCALE_WORD})\\b`, "i"), "");
+    const qualifier = /^\s?(?:\+|plus\b)/i.test(rest)
+      ? { kind: "floor", words: null }
+      : qualifierBefore(normalize(text.slice(Math.max(0, match.index - 24), match.index)));
+    if (!qualifier) continue;
+    const { kind } = qualifier;
+    // The figure as the claim qualified it, so a downgrade note can say "none of them
+    // mentions over 300 million" rather than naming a bare 300 the claim never asserted.
+    const phrase = qualifier.words ? `${qualifier.words} ${value}${unit}` : `${value}${unit} or more`;
+    bounds[value] = { kind, value: amount, scaled, phrase };
   }
 
   const entityWords = new Set(entities.flatMap((entity) => entity.split(" ")));
@@ -362,7 +509,7 @@ export function claimSpecifics(claim) {
       !FRAMING_WORDS.has(term),
   );
 
-  return { entities, numbers, terms: [...new Set(terms)] };
+  return { entities, numbers, bounds, terms: [...new Set(terms)] };
 }
 
 /**
@@ -427,7 +574,7 @@ function evidenceOf(entry) {
     const figure = numeric(token);
     if (figure) tokens.add(figure);
   }
-  return { text, tokens, ranges: statedRanges(text) };
+  return { text, tokens, ranges: statedRanges(text), figures: statedFigures(text) };
 }
 
 /**
@@ -453,7 +600,7 @@ function evidenceOf(entry) {
  *   what makes a downgrade explainable rather than mysterious.
  */
 export function claimConfirmed(claim, entries) {
-  const { entities, numbers, terms } = claimSpecifics(claim);
+  const { entities, numbers, bounds, terms } = claimSpecifics(claim);
   if (entities.length === 0 && numbers.length === 0 && terms.length === 0) {
     return { confirms: true, missing: [] };
   }
@@ -467,7 +614,9 @@ export function claimConfirmed(claim, entries) {
   const missingEntities = entities.filter(
     (entity) => !somewhere((ev) => entityCovered(ev.text, ev.tokens, entity)),
   );
-  const missingNumbers = numbers.filter((number) => !somewhere((ev) => numberCovered(number, ev)));
+  const missingNumbers = numbers.filter(
+    (number) => !somewhere((ev) => numberCovered(number, ev, bounds[number] ?? null)),
+  );
   const missingTerms = terms.filter((term) => !somewhere((ev) => wordPresent(term, ev.tokens)));
 
   // Names and figures are required outright. Nothing else in a claim is as hard: a set of
@@ -497,7 +646,13 @@ export function claimConfirmed(claim, entries) {
   const confirms = missingEntities.length === 0 && missingNumbers.length === 0 && !termsShort;
   return {
     confirms,
-    missing: confirms ? [] : [...missingEntities, ...missingNumbers, ...(termsShort ? missingTerms : [])],
+    missing: confirms
+      ? []
+      : [
+          ...missingEntities,
+          ...missingNumbers.map((number) => bounds[number]?.phrase ?? number),
+          ...(termsShort ? missingTerms : []),
+        ],
   };
 }
 
@@ -560,10 +715,15 @@ function downgradeNote(claim, missing, cited) {
  * sources do confirm it, and — because there is nothing to check against — a turn with an
  * empty ledger.
  *
+ * `spare` is a set of claim indices (positions in `splitClaims`) to leave alone whatever
+ * the word match says — the claims lib/corroboration-judge.js read the pages for and found
+ * supported. The usual call passes nothing and gets the word match's verdict on everything.
+ *
  * @returns `{text, changed, downgrades}` where each downgrade is
- *   `{title, cited, missing}`, for logging and for tests.
+ *   `{index, title, body, cited, missing}` — `index` and `body` are what the judge needs to
+ *   take a second look; the rest is for logging and for tests.
  */
-export function auditCorroboration(answer, ledger) {
+export function auditCorroboration(answer, ledger, { spare = null } = {}) {
   const text = String(answer ?? "");
   const claims = splitClaims(text);
   if (!claims || !ledger || ledger.size === 0) return { text, changed: false, downgrades: [] };
@@ -571,8 +731,12 @@ export function auditCorroboration(answer, ledger) {
   const downgrades = [];
   const edits = [];
 
-  for (const claim of claims) {
-    if (claim.verdictKey !== "corroborated" || !claim.verdict) continue;
+  claims.forEach((claim, index) => {
+    if (claim.verdictKey !== "corroborated" || !claim.verdict) return;
+    // A second opinion already read the cited pages and found the claim in them — see
+    // lib/corroboration-judge.js. The word match is a tool for spotting the topical-only
+    // citation, not the last word on it.
+    if (spare?.has(index)) return;
 
     const cited = [...new Set(markersIn(claim.text))].filter((n) => ledger.has(n));
     // The claim says confirmed and points at nothing. Whatever it rests on, it is not a
@@ -582,9 +746,9 @@ export function auditCorroboration(answer, ledger) {
       claim.title,
       cited.map((n) => ledger.sources[n - 1]),
     );
-    if (confirms) continue;
+    if (confirms) return;
 
-    downgrades.push({ title: claim.title, cited, missing });
+    downgrades.push({ index, title: claim.title, body: claim.text, cited, missing });
     edits.push({
       start: claim.verdict.start,
       end: claim.verdict.end,
@@ -595,7 +759,7 @@ export function auditCorroboration(answer, ledger) {
         (claim.verdict.text.startsWith("\n") ? "\n" : "") +
         `VERDICT: ${VERDICTS.insufficient.label}`,
     });
-  }
+  });
 
   if (edits.length === 0) return { text, changed: false, downgrades: [] };
 

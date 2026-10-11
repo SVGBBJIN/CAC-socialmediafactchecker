@@ -41,6 +41,8 @@ import { findInPage, PageCache, PageFindError } from "./page-find.js";
 import { CitationLedger } from "./citations.js";
 import { cleanCitations } from "./citation-cleanup.js";
 import { auditCorroboration } from "./corroboration.js";
+import { repairUncitedClaims } from "./claim-repair.js";
+import { judgeDowngrades } from "./corroboration-judge.js";
 import { captionQuery, captionSearchEnabled } from "./caption-search.js";
 import { normaliseTiers, classifySource, ALL_TIERS } from "../public/source-quality.js";
 
@@ -156,6 +158,21 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "failed check of a claim that was never made. The app has its own way of showing that a",
   "post had nothing to check, and it reads off the absence of your claim blocks.",
   "",
+  "CHOOSING WHICH CLAIMS TO CHECK",
+  "A check is not an inventory of every sentence in the post. Pick the claims that matter",
+  "most — the post's central claim first (see FIND THE CLAIM THE POST IS MAKING below), then",
+  "the ones its argument rests on, the ones a viewer is most likely to repeat",
+  "or act on, and the ones that could mislead or do harm if wrong — and check those. Hard",
+  "limits on how many claim blocks one answer may have:",
+  "  • a short clip (under about three minutes), a photo post, an article or a claim typed",
+  "    in the message: at most 3 claim blocks;",
+  "  • a longer video: at most 5 claim blocks, however many claims it makes.",
+  "Fold a minor supporting detail into the main claim it supports rather than giving it a",
+  "block of its own, and leave out asides, anecdotes, opinions, predictions and jokes that",
+  "assert nothing real — they are not checkable facts. Fewer claims, each properly searched and cited, is a",
+  "better check than many claims each half-checked: you have three rounds of tool calls,",
+  "and every claim you keep needs its own search in them.",
+  "",
   "The answer opens directly on the first `[[claim: …]]` line — no preamble, no \"here is the",
   "fact-check\". The one exception is a single line of context about the post as a whole that",
   "no individual claim owns, chiefly that the post is a sketch, parody or satire (see that",
@@ -168,6 +185,46 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "bearing for the verdict. Save bullet points for a claim that genuinely has several parts",
   "(see FORMATTING WITH BULLET POINTS below), and skip headings and multi-paragraph asides",
   "inside a block — they read as padding in a card sized for one claim, not a full essay.",
+  "",
+  "EVERY VERDICT NEEDS A SOURCE",
+  "Every claim block must be covered by a `web_search` this turn — its own, or one it",
+  "shares with a claim settled by the same source — and every Corroborated, Contradicted",
+  "or Disputed verdict must rest on at least one [n] marker inside its block for a source",
+  "retrieved this turn. There is no claim so obvious that it can be",
+  "Corroborated from memory: if it is worth a claim block it is worth a search, and if it",
+  "is too obvious to search it is too obvious to be a claim block. A block with a decisive",
+  "verdict and no marker is caught by the app — it runs the search you skipped and asks you",
+  "to rewrite the block — which costs the reader another wait for something you should have",
+  "done the first time.",
+  "",
+  "WHAT EACH VERDICT MEANS",
+  "There are exactly four verdicts. Pick one by these tests, not by how confident the post",
+  "sounds or how the claim makes you feel, so that the same evidence gets the same verdict",
+  "every time:",
+  "  • Corroborated: credible sources you cited state what the claim asserts, including its",
+  "    specifics (the person, figure, date or quote), and no credible source you found says",
+  "    otherwise. Rounding, paraphrase and a claim inside a stated range still count (see",
+  "    WHAT COUNTS AS CORROBORATION below).",
+  "  • Contradicted: credible sources you cited state the opposite of the claim, or state",
+  "    facts that cannot both be true alongside it (a different figure, a different date, a",
+  "    different person), and no credible source you found backs the claim. A source merely",
+  "    not mentioning the claim is not a contradiction.",
+  "  • Disputed: use it in either of these cases, and say in the block which one it is:",
+  "      1. Credible sources disagree with each other on the claim, and neither side clearly",
+  "         outweighs the other. Cite both sides.",
+  "      2. The claim is partly true and partly false, or true as worded but misleading:",
+  "         it leaves out context that reverses or substantially changes what a viewer",
+  "         would take from it (an old figure presented as current, a cherry-picked",
+  "         period, a correlation presented as a cause). Cite what is true and what is",
+  "         missing or wrong.",
+  "    Disputed is not a hedge. If one side is a primary or official record and the other",
+  "    is a blog, a forum post or an outlet repeating the claim, the verdict follows the",
+  "    stronger source. If only a minor detail is off and the core of the claim holds, it",
+  "    is Corroborated, with the detail noted.",
+  "  • Insufficient evidence: you searched and found no credible source that settles the",
+  "    claim either way, or only pages about the topic rather than about the specific",
+  "    claim. It is the honest answer when that is what happened, and the wrong one when",
+  "    your sources do settle it but in different words.",
   "",
   "FIND THE CLAIM THE POST IS MAKING",
   "Before you list anything, work out what the post asserts as a whole — the thing a viewer",
@@ -193,8 +250,8 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "Then the supporting claims, ranked by how much the post's message depends on them —",
   "figures, quotes, events and named people it uses to make its case. Skip incidental",
   "background a viewer would not take away as the point (a birth date mentioned in passing),",
-  "unless it is wrong. Five or six blocks is plenty for most posts; the central claim is the",
-  "one that must never be missing.",
+  "unless it is wrong. Stay inside the limits in CHOOSING WHICH CLAIMS TO CHECK; when they",
+  "force a cut, the central claim is the one that must never be missing.",
   "",
   "WHEN THE POST IS A SKETCH, SATIRE OR PARODY",
   "A comedy sketch, a parody, a satirical news segment or an impression of a real person is",
@@ -210,7 +267,8 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "   the real-world claims under the jokes. Only say it when the post shows it: if you",
   "   cannot tell whether something is meant as comedy, check it straight and do not guess.",
   "",
-  "2. Check the real claims. Every statistic it quotes, every thing it says or implies a real",
+  "2. Check the real claims — the ones that matter most, within the limits in CHOOSING WHICH",
+  "   CLAIMS TO CHECK. Every statistic it quotes, every thing it says or implies a real",
   "   person said or did, every event it presents as having happened, and the factual premise",
   "   a joke depends on to land. Each one is an ordinary claim block — researched, cited and",
   "   given a verdict exactly like a news clip's. Words put in a real person's mouth are a",
@@ -257,7 +315,9 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "for a claim you genuinely could not source: nothing credible found, or only pages about",
   "the topic. It is not for a claim your sources substantially support but word differently.",
   "A source that gives the figure as 4.2 million confirms a clip saying 4 million; one that",
-  "reports a range confirms a figure inside it; one that says the same thing in other words",
+  "reports a range confirms a figure inside it; a claim of 'over 300 million' is confirmed",
+  "by a source saying 350 million or 'more than 400 million', because the claim states a",
+  "floor, not the number 300 (the same goes for 'under', 'at least', 'about'); one that says the same thing in other words",
   "confirms it. Rounding, paraphrase, a different unit, a figure a source states more",
   "precisely than the claim — none of those is a reason to withhold a verdict. Ask whether",
   "a careful reader following your links would find the claim borne out. If yes, that is",
@@ -311,15 +371,16 @@ export const FACT_CHECK_SYSTEM_PROMPT = [
   "HOW TO CHECK",
   "Work in two passes: identify what needs checking, look it up, then read it and write the answer.",
   "",
-  "First pass — read the post or video through, list every distinct claim in it, then filter:",
+  "First pass — read the post or video through, list its distinct claims, then filter:",
   "  • Anything you directly observed in the video or post (person in frame, text on screen,",
-  "    what someone explicitly said) — describe it, do not search.",
-  "  • Claims that are obviously true or obviously false (the Earth is round, 2+2=4, the video",
-  "    is playing) — note without searching.",
-  "  • Claims the reader could verify themselves from the post (color of someone's clothing) —",
-  "    describe without searching.",
-  "  • External facts (whether a claim is true, whether someone made a statement, what experts",
-  "    say) — issue a `web_search` for each one **in the same turn**.",
+  "    what someone explicitly said) is the subject, not a claim to check — describe it, do",
+  "    not search for it, and do not give it a claim block or a verdict.",
+  "  • Trivia nobody would dispute (the Earth is round, 2+2=4) and details the reader can",
+  "    see in the post (the colour of someone's clothing) are not worth a claim block either.",
+  "  • From what is left — external facts: whether a claim is true, whether someone made a",
+  "    statement, what experts say — keep the most important ones, within the limit in",
+  "    CHOOSING WHICH CLAIMS TO CHECK, and issue a `web_search` for every one you keep",
+  "    **in the same turn**. Every claim block you write must have been searched.",
   "",
   "Several calls in one turn are run at the same time; do not narrate what you are looking up,",
   "as the app already shows the reader every search as it runs. A turn that is nothing but",
@@ -614,6 +675,16 @@ export function searchEnabled(env = process.env) {
   // `Web_Search_Enabled=false` meant it, and silently ignoring the flag would be worse
   // than either honouring it or complaining about it.
   return (readEnv(env, "WEB_SEARCH_ENABLED") ?? "true").toLowerCase() !== "false";
+}
+
+/**
+ * Whether a downgrade the corroboration word match proposes gets a second opinion from the
+ * model before it is applied — see lib/corroboration-judge.js. On unless switched off: the
+ * call only happens when the word match has already flagged a claim, so a turn whose
+ * verdicts all match their sources costs nothing extra.
+ */
+export function corroborationJudgeEnabled(env = process.env) {
+  return (readEnv(env, "CORROBORATION_JUDGE_ENABLED") ?? "true").toLowerCase() !== "false";
 }
 
 /**
@@ -1228,6 +1299,67 @@ export async function* verifiedChat({
     yield { type: "delta", text: answer };
   }
 
+  /**
+   * One model call with no tools and no media, collected rather than streamed — for the
+   * passes after the answer that need the model's judgement on a few lines of text and
+   * nothing else. Re-attaching the clip would re-send the whole video for a rewrite or a
+   * judgement of a few lines, and the history's links would otherwise be resolved and
+   * attached all over again.
+   */
+  async function askOnce({ system: callSystem, messages: callMessages, ...options }) {
+    let reply = "";
+    for await (const frame of streamChat({
+      ...geminiOptions,
+      ...options,
+      apiKey,
+      system: callSystem,
+      signal,
+      fetchImpl,
+      messages: callMessages,
+      attachMedia: false,
+      attachPages: false,
+      tools: null,
+      toolRunner: null,
+    })) {
+      if (frame.type === "delta") reply += frame.text;
+    }
+    return reply;
+  }
+
+  // A claim given a decisive verdict with no source under it gets the search it skipped —
+  // run by the app, one per claim, then one tool-less model call to rewrite those blocks
+  // against what came back. See lib/claim-repair.js. Not on a flawed answer: one cut off by
+  // the token cap or a dying stream is shown with every source listed and keeps its own
+  // numbering, and a rewrite spliced into half an answer would be the app finishing it.
+  let repaired = false;
+  if (answer.trim() && !truncated && !streamError && toolRunner) {
+    const recheck = repairUncitedClaims(answer, {
+      ledger,
+      signal,
+      search: (args) => searchImpl(args, { env, fetchImpl, signal, tiers }),
+      ask: (prompt) =>
+        askOnce({
+          system,
+          messages: [...messages, { role: "assistant", content: answer }, { role: "user", content: prompt }],
+        }),
+    });
+    let step = await recheck.next();
+    while (!step.done) {
+      const frame = step.value;
+      yield frame;
+      if (frame.type === "search") {
+        const sources = provisionalSources();
+        if (sources) yield sources;
+      }
+      step = await recheck.next();
+    }
+    if (signal?.aborted) return;
+    if (step.value.repaired > 0) {
+      answer = step.value.text;
+      repaired = true;
+    }
+  }
+
   // Citation cleanup, and the last thing done to the answer.
   //
   // What it does is what a copy editor does — merge two markers that turn out to be one
@@ -1253,11 +1385,36 @@ export async function* verifiedChat({
       //
       // It runs first, on the ledger's own numbering, so a marker still means here exactly
       // what it meant when the model wrote it; cleanup then renumbers text and note alike.
-      const audited = auditCorroboration(answer, ledger);
+      let audited = auditCorroboration(answer, ledger);
+      // The word match is a filter, not the verdict: what it would lower is first read
+      // against the cited pages by the model, and a claim found in them keeps its verdict.
+      // See lib/corroboration-judge.js. Any failure there leaves the downgrade standing.
+      if (audited.changed && !streamError && corroborationJudgeEnabled(env) && !signal?.aborted) {
+        const flagged = audited.downgrades.filter((d) => d.cited.length > 0).length;
+        if (flagged > 0) yield { type: "stage", stage: "judging", claims: flagged };
+        const spare = await judgeDowngrades(audited.downgrades, ledger, {
+          signal,
+          read: async (url, find) => {
+            const found = await findImpl(
+              { url, find, claim: find, max_passages: 3 },
+              { apiKey, fetchImpl, signal, cache: pages },
+            );
+            return found.passages.map((passage) => passage.text);
+          },
+          ask: (judgeSystem, prompt) =>
+            askOnce({
+              system: judgeSystem,
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0,
+            }),
+        });
+        if (signal?.aborted) return;
+        if (spare.size > 0) audited = auditCorroboration(answer, ledger, { spare });
+      }
       if (audited.changed) answer = audited.text;
 
       const cleaned = cleanCitations(answer, ledger, { renumber: !flawed });
-      if (cleaned.changed || audited.changed) {
+      if (cleaned.changed || audited.changed || repaired) {
         answer = cleaned.changed ? cleaned.text : answer;
         // A replacement rather than more deltas: the answer streamed token by token while it
         // was being written, and this pass could only run once it was whole.

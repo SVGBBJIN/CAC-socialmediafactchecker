@@ -2827,8 +2827,8 @@ function chatThreadHTML(newestIndex) {
           <div class="thread-q">${escapeHTML(c.question)}</div>
           ${turnBodyHTML(c, c.sources, animate)}
           ${incompleteHTML(c.incomplete, animate)}
-          ${durationHTML(c.durationMs, animate, "Answered in")}
           ${chatEntryId ? actionRowHTML(chatEntryId, index, "turn") : ""}
+          ${durationHTML(c.durationMs, animate, "Answered in")}
           ${turnSourcesHTML(c, animate)}
         </div>`;
     })
@@ -3600,6 +3600,9 @@ function dialVariant(frame) {
       return "watching";
     case "waiting":
       return frame.media ? "watching" : "searching";
+    case "judging":
+    case "rechecking":
+      return "searching";
     case "rewriting":
       return "compiling";
     case "thinking":
@@ -4595,8 +4598,8 @@ function threadHTML(entry, newestIndex) {
           <div class="thread-q">${escapeHTML(f.question)}</div>
           ${turnBodyHTML(f, f.sources, animate, seekable)}
           ${incompleteHTML(f.incomplete, animate)}
-          ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
+          ${durationHTML(f.durationMs, animate, "Answered in")}
           ${turnSourcesHTML(f, animate)}
         </div>`;
     })
@@ -4643,8 +4646,8 @@ function claimPanesHTML(entry, animate, newestFollowup, attributed = attributeSo
       const isLast = index === claims.length - 1;
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
-           ${durationHTML(entry.durationMs, animate)}
            ${actionRowHTML(entry.id, null)}
+           ${durationHTML(entry.durationMs, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
 
@@ -4794,8 +4797,8 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(readableAnswer(entry.answer, { overview: settings.showOverview }), entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
-      ${durationHTML(entry.durationMs, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
+      ${durationHTML(entry.durationMs, animateAnalysis)}
       ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
     </div>`);
@@ -4823,6 +4826,14 @@ function stageText(frame) {
       return "Every Gemini model is busy — waiting a moment and trying again";
     case "rewriting":
       return "Rewriting — the first answer failed the citation check";
+    case "judging":
+      return frame.claims === 1
+        ? "Reading the cited pages to confirm a verdict"
+        : "Reading the cited pages to confirm the verdicts";
+    case "rechecking":
+      return frame.claims === 1
+        ? "Searching for a claim that was given a verdict without a source"
+        : "Searching for claims that were given a verdict without a source";
     default:
       return "Working";
   }

@@ -2270,3 +2270,226 @@ test("a Corroborated verdict whose source carries the specific fact is left exac
 
   assert.equal(readerSees(frames), answer);
 });
+
+/* ---------------------------------------------------------------- re-check of uncited verdicts */
+
+function bridgeResult(claim, url) {
+  return {
+    query: claim,
+    claim,
+    provider: "test",
+    retrievedAt: "2026-07-28T00:00:00.000Z",
+    results: [
+      {
+        title: "Harbour bridge history",
+        url,
+        domain: new URL(url).hostname,
+        snippet: "The harbour bridge opened in 2011 and cost $2.1 billion.",
+        published: null,
+      },
+    ],
+  };
+}
+
+test("a Corroborated claim written without a source is searched and re-checked, not left bare", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge cost", claim: "The bridge cost $2.1 billion" } }] },
+    {
+      text:
+        "[[claim: The bridge cost $2.1 billion]]\nRecords give $2.1 billion [1].\nVERDICT: Corroborated\n" +
+        "[[claim: The bridge opened in 2011]]\nThat is well known.\nVERDICT: Corroborated",
+    },
+    {
+      text: "[[claim: The bridge opened in 2011]]\nThe bridge history confirms it opened in 2011 [2].\nVERDICT: Corroborated",
+    },
+  ]);
+  const searched = [];
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => {
+        searched.push(args.claim);
+        return bridgeResult(
+          args.claim,
+          args.claim.includes("opened") ? "https://history.example/bridge" : "https://records.example/cost",
+        );
+      },
+    }),
+  );
+
+  assert.deepEqual(searched, ["The bridge cost $2.1 billion", "The bridge opened in 2011"]);
+  // The re-check is one more model call, with no tools to call and the uncited block in it.
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].tools, undefined);
+  assert.match(JSON.stringify(sent[2].contents.at(-1)), /Re-check from the app/);
+
+  const shown = readerSees(frames);
+  assert.match(shown, /confirms it opened in 2011 \[2\]\.\nVERDICT: Corroborated$/);
+  assert.ok(!shown.includes("Checked by the app"), "nothing was lowered: the claim now has its source");
+  assert.ok(frames.some((f) => f.type === "stage" && f.stage === "rechecking"));
+  assert.deepEqual(readerSources(frames).map((s) => s.url), ["https://records.example/cost", "https://history.example/bridge"]);
+});
+
+test("a re-check the model does not answer still ends with the claim lowered, never bare", async () => {
+  const { fetchImpl } = fakeGemini([
+    { text: "[[claim: The bridge opened in 2011]]\nThat is well known.\nVERDICT: Corroborated" },
+    { text: "Sorry, I can't help with that." },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => bridgeResult(args.claim, "https://history.example/bridge"),
+    }),
+  );
+
+  const shown = readerSees(frames);
+  assert.match(shown, /Checked by the app/);
+  assert.match(shown, /VERDICT: Insufficient evidence$/);
+});
+
+test("a turn with every verdict cited makes no extra search and no extra model call", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "bridge", claim: "The bridge opened in 2011" } }] },
+    { text: "[[claim: The bridge opened in 2011]]\nIt opened in 2011 [1].\nVERDICT: Corroborated" },
+  ]);
+  let searches = 0;
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      searchImpl: async (args) => {
+        searches += 1;
+        return bridgeResult(args.claim, "https://history.example/bridge");
+      },
+    }),
+  );
+
+  assert.equal(sent.length, 2);
+  assert.equal(searches, 1);
+  assert.ok(!frames.some((f) => f.type === "stage" && f.stage === "rechecking"));
+});
+
+/* ---------------------------------------------------------------- the corroboration judge */
+
+function surveyResult(claim) {
+  return {
+    query: claim,
+    claim,
+    provider: "test",
+    retrievedAt: "2026-07-28T00:00:00.000Z",
+    results: [
+      {
+        title: "Survey results",
+        url: "https://stats.example/survey",
+        domain: "stats.example",
+        snippet: "Usage of the service across Europe.",
+        published: null,
+      },
+    ],
+  };
+}
+
+const SURVEY_ANSWER =
+  "[[claim: 33% of adults in Spain used the service last year]]\nThe survey reports that share [1].\nVERDICT: Corroborated";
+
+test("a verdict the word match would lower is read against its page and kept when the page states it", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "spain usage", claim: "33% of adults in Spain" } }] },
+    { text: SURVEY_ANSWER },
+    { text: "CLAIM 1: SUPPORTED — [1] says a third of adults in Spain" },
+  ]);
+  const reads = [];
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      prefetchPerSearch: 0,
+      searchImpl: async (args) => surveyResult(args.claim),
+      findImpl: async (query) => {
+        reads.push(query);
+        return { url: query.url, find: query.find, passages: [{ text: "A third of adults in Spain used it last year." }] };
+      },
+    }),
+  );
+
+  assert.deepEqual(reads.map((r) => [r.url, r.find]), [
+    ["https://stats.example/survey", "33% of adults in Spain used the service last year"],
+  ]);
+  assert.equal(sent.length, 3);
+  const judgeRequest = JSON.stringify(sent[2]);
+  assert.match(judgeRequest, /You check whether sources state a claim/);
+  assert.match(judgeRequest, /A third of adults in Spain used it last year/);
+  assert.equal(sent[2].tools, undefined);
+  assert.ok(frames.some((f) => f.type === "stage" && f.stage === "judging"));
+
+  const shown = readerSees(frames);
+  assert.ok(!shown.includes("Checked by the app"), shown);
+  assert.match(shown, /VERDICT: Corroborated$/);
+});
+
+test("a verdict the judge does not find in its page is lowered as before", async () => {
+  const { fetchImpl } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "spain usage", claim: "33% of adults in Spain" } }] },
+    { text: SURVEY_ANSWER },
+    { text: "CLAIM 1: NOT SUPPORTED — no share is given" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: {},
+      fetchImpl,
+      attachMedia: false,
+      prefetchPerSearch: 0,
+      searchImpl: async (args) => surveyResult(args.claim),
+      findImpl: async (query) => ({ url: query.url, find: query.find, passages: [] }),
+    }),
+  );
+
+  const shown = readerSees(frames);
+  assert.match(shown, /Checked by the app/);
+  assert.match(shown, /VERDICT: Insufficient evidence$/);
+});
+
+test("with the judge switched off the word match decides alone, with no extra call", async () => {
+  const { fetchImpl, sent } = fakeGemini([
+    { calls: [{ name: "web_search", args: { query: "spain usage", claim: "33% of adults in Spain" } }] },
+    { text: SURVEY_ANSWER },
+    { text: "CLAIM 1: SUPPORTED" },
+  ]);
+
+  const frames = await collect(
+    verifiedChat({
+      apiKey: "k",
+      messages: [{ role: "user", content: "Is this true?" }],
+      env: { CORROBORATION_JUDGE_ENABLED: "false" },
+      fetchImpl,
+      attachMedia: false,
+      prefetchPerSearch: 0,
+      searchImpl: async (args) => surveyResult(args.claim),
+      findImpl: async () => assert.fail("no page should be read"),
+    }),
+  );
+
+  assert.equal(sent.length, 2);
+  assert.match(readerSees(frames), /VERDICT: Insufficient evidence$/);
+});
