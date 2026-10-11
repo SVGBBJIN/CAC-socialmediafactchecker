@@ -2329,9 +2329,12 @@
      `createElapsedTicker` that runs live above the loading grid. A retrospective number
      under a finished card doesn't fight the eased progress bar's reasoning the way a live
      clock during the wait would; it's shown only once the wait is already over. Fades in
-     the same way `.notice`/`.source-pills` do — `revealAttrs` drives all three the same. */
+     the same way `.notice`/`.source-pills` do — `revealAttrs` drives all three the same.
+     It sits directly above the source pills, after the action row, and the 12px under it
+     is the same 12px the pills have under their rule, so the line reads as the caption on
+     the sources rather than a stray line floating between the text and the buttons. */
   .check-duration {
-    font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); margin: -2px 0 12px;
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); margin: 8px 0 0;
     opacity: 0; transform: translateY(4px);
     transition: opacity 0.4s ease, transform 0.4s ease;
   }
@@ -2343,7 +2346,7 @@
      is purely a width problem, not a return of that old list — see `collapseSourcePillsOverflow`
      for why the cutoff is measured rather than a fixed count. */
   .source-pills {
-    border-top: 1px solid var(--border); margin-top: 4px; padding-top: 12px;
+    border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px;
     opacity: 0; transform: translateY(4px);
     transition: opacity 0.4s ease, transform 0.4s ease;
   }

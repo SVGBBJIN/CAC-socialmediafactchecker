@@ -2796,8 +2796,8 @@ function chatThreadHTML(newestIndex) {
           <div class="thread-q">${escapeHTML(c.question)}</div>
           ${turnBodyHTML(c, c.sources, animate)}
           ${incompleteHTML(c.incomplete, animate)}
-          ${durationHTML(c.durationMs, animate, "Answered in")}
           ${chatEntryId ? actionRowHTML(chatEntryId, index, "turn") : ""}
+          ${durationHTML(c.durationMs, animate, "Answered in")}
           ${sourcePillsHTML(c.sources, animate)}
         </div>`;
     })
@@ -4566,8 +4566,8 @@ function threadHTML(entry, newestIndex) {
           <div class="thread-q">${escapeHTML(f.question)}</div>
           ${turnBodyHTML(f, f.sources, animate, seekable)}
           ${incompleteHTML(f.incomplete, animate)}
-          ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
+          ${durationHTML(f.durationMs, animate, "Answered in")}
           ${sourcePillsHTML(f.sources, animate)}
         </div>`;
     })
@@ -4614,8 +4614,8 @@ function claimPanesHTML(entry, animate, newestFollowup) {
       const isLast = index === claims.length - 1;
       const footer = isLast
         ? `${incompleteHTML(entry.incomplete, animate)}
-           ${durationHTML(entry.durationMs, animate)}
            ${actionRowHTML(entry.id, null)}
+           ${durationHTML(entry.durationMs, animate)}
            ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
@@ -4755,8 +4755,8 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       <div ${revealAttrs("claim-text", animateAnalysis)}>${renderMarkdown(entry.answer, entry.sources, seekableEntry(entry))}</div>
       ${incompleteHTML(entry.incomplete, animateAnalysis)}
       ${verdictHTML(entry, animateAnalysis)}
-      ${durationHTML(entry.durationMs, animateAnalysis)}
       ${actionRowHTML(entry.id, null)}
+      ${durationHTML(entry.durationMs, animateAnalysis)}
       ${sourcePillsHTML(entry.sources, animateAnalysis)}
       ${threadHTML(entry, newestFollowup)}
     </div>`);
