@@ -181,6 +181,27 @@ export function splitClaims(rawAnswer) {
 }
 
 /**
+ * The text an answer opens with before its first `[[claim: …]]` marker, or `null` when
+ * there is none (or no markers at all — then the whole answer is the body, not a preamble).
+ *
+ * The prompt allows exactly one thing here: a line of context about the post as a whole
+ * that no single claim owns — chiefly "this is a sketch/satire, and these are the real
+ * claims under the jokes" (see WHEN THE POST IS A SKETCH, SATIRE OR PARODY in
+ * lib/verified-chat.js). `splitClaims` starts each block at its marker, so without this the
+ * line was parsed out of every rendering and the reader never saw it — the model telling
+ * them what they were looking at, dropped on the floor by the app.
+ */
+export function claimsPreamble(rawAnswer) {
+  const text = String(rawAnswer ?? "");
+  CLAIM_MARKER.lastIndex = 0;
+  const first = CLAIM_MARKER.exec(text);
+  CLAIM_MARKER.lastIndex = 0;
+  if (!first) return null;
+  const preamble = text.slice(0, first.index).trim();
+  return preamble || null;
+}
+
+/**
  * What changed between two successive parses of the *same* answer as it streams.
  *
  * `splitClaims` is already incremental — it is called on the partial text after every delta

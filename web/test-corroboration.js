@@ -105,6 +105,15 @@ test("claimSpecifics ignores the app's own timestamp and citation markers", () =
   assert.deepEqual(claimSpecifics("Inflation fell to 4.2% in 2024 [t=1:13]").numbers, ["4.2", "2024"]);
 });
 
+test("claimSpecifics ignores the timestamp shapes the model drifts into, too", () => {
+  // The canonical `[t=…]` was stripped before; `[0:40]`, `[t=45s]` and a list were not, so
+  // each one handed the audit figures — 40, 45, 1, 05 — that no source would ever quote.
+  const plain = claimSpecifics("The mayor resigned in March");
+  for (const marker of ["[0:40]", "[t=45s]", "[t=1:05, 1:10]", "(t=0:12)", "[t = 0:12 to 0:20]"]) {
+    assert.deepEqual(claimSpecifics(`The mayor resigned in March ${marker}`), plain, marker);
+  }
+});
+
 /* ---------------------------------------------------------------- sourceEvidenceText */
 
 test("sourceEvidenceText reads the page, including its slug and its read passages", () => {

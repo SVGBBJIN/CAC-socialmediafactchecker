@@ -983,6 +983,22 @@ test("the system prompt says a greeting needs no tool call", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Do not search to have searched/);
 });
 
+test("the system prompt checks a sketch's real claims instead of waving it through", () => {
+  // It used to list "a comedy sketch" beside a recipe and a dog as posts with nothing to
+  // check, and the model took the hint: satire about real people came back as "this is a
+  // sketch" and no verdicts, which is the one answer a shared satire clip most needs not to get.
+  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /nothing checkable — a music video, a comedy sketch/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /WHEN THE POST IS A SKETCH, SATIRE OR PARODY/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Check the real claims/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Put the exaggeration in context/);
+  // The "this is satire" line has somewhere to go that the app actually renders.
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /before the first claim line, and the app\nshows it above the claims/);
+});
+
+test("the system prompt pins the one timestamp shape", () => {
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /one moment per bracket/);
+});
+
 test("the system prompt no longer threatens a rewrite that cannot happen", () => {
   // The repair round is gone. Telling the model its answer will be "rejected and you are
   // made to rewrite it" would be instructing it against a mechanism that does not exist,

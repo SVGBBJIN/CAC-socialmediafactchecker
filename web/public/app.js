@@ -19,14 +19,15 @@
 import { watchDevice } from "./device.js";
 import {
   TIMESTAMP_MARKER,
-  parseClock,
+  marksIn,
+  markLabel,
   formatClock,
   plainTimestamps,
   timeline,
   activeAt,
 } from "./timestamps.js";
 import { parseBlocks } from "./markdown.js";
-import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimDiff, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimsPreamble, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
 import { filterLibrary, platformsIn, verdictsIn } from "./library-search.js";
@@ -1329,21 +1330,33 @@ function linkCitations(html, sources) {
  * highlight reads its windows straight back off the DOM (see `refreshTimeline`) rather than
  * threading ids through the markup.
  */
+// A marker plus whatever punctuation closes the sentence right after it. A chip is an
+// inline-flex box, and the line may break after one, so "…said at [t=0:40]." used to leave
+// the full stop alone at the start of the next line. Kept together, they wrap as one.
+const TIMESTAMP_WITH_PUNCTUATION = new RegExp(`(?:${TIMESTAMP_MARKER.source})([.,;:!?)]*)`, "gi");
+
 function linkTimestamps(html, seekable) {
-  return html.replace(TIMESTAMP_MARKER, (raw, start, end) => {
-    const from = parseClock(start);
-    if (from == null) return raw;
-    const to = end == null ? null : parseClock(end);
-    const label = to != null && to > from ? `${formatClock(from)}–${formatClock(to)}` : formatClock(from);
-    if (!seekable) return `<span class="ts-chip static">${label}</span>`;
-    const endAttr = to != null && to > from ? ` data-end="${to}"` : "";
-    return (
-      `<button type="button" class="ts-chip" data-seek="${from}" data-start="${from}"${endAttr}` +
-      ` title="Play the video from ${formatClock(from)}" aria-label="Play the video from ${formatClock(from)}">` +
-      `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>` +
-      `${label}</button>`
-    );
+  return html.replace(TIMESTAMP_WITH_PUNCTUATION, (raw, punctuation) => {
+    const marks = marksIn(raw.slice(0, raw.length - punctuation.length));
+    if (!marks.length) return raw;
+    // One marker can hold several moments (`[t=1:05, 1:10]`) — each gets its own chip,
+    // since each is a different place to seek to.
+    const chips = marks.map((mark) => timestampChip(mark, seekable)).join(" ");
+    return punctuation ? `<span class="ts-keep">${chips}${punctuation}</span>` : chips;
   });
+}
+
+function timestampChip(mark, seekable) {
+  const label = markLabel(mark);
+  if (!seekable) return `<span class="ts-chip static">${label}</span>`;
+  const clock = formatClock(mark.start);
+  const endAttr = mark.end != null ? ` data-end="${mark.end}"` : "";
+  return (
+    `<button type="button" class="ts-chip" data-seek="${mark.start}" data-start="${mark.start}"${endAttr}` +
+    ` title="Play the video from ${clock}" aria-label="Play the video from ${clock}">` +
+    `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>` +
+    `${label}</button>`
+  );
 }
 
 /** Inline spans within one line: code, bold, italic, then timestamp and citation markers.
@@ -2199,10 +2212,10 @@ function renderLibrary(filter = "") {
     title.title = entry.title;
     const sub = document.createElement("div");
     sub.className = "lib-sub";
-    sub.append(
-      entry.status === "running" ? boltIcon() : dotIcon(dotClassFor(entry)),
-      document.createTextNode(`${entry.platform} · ${statusLabel(entry)}`),
-    );
+    const subText = document.createElement("span");
+    subText.className = "lib-sub-text";
+    subText.textContent = `${entry.platform} · ${statusLabel(entry)}`;
+    sub.append(entry.status === "running" ? boltIcon() : dotIcon(dotClassFor(entry)), subText);
     meta.append(title, sub);
 
     const deleteBtn = document.createElement("button");
@@ -2769,7 +2782,7 @@ function turnBodyHTML(turn, sources, animate, seekable) {
       <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(turn.answer, sources, seekable)}</div>
       ${badgeHTML(turn.verdictKey, animate)}`;
   }
-  return turn.claims
+  return contextNoteHTML(turn.rawAnswer, sources, seekable, animate) + turn.claims
     .map(
       (claim) => `
       <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, sources, seekable)}</p>
@@ -3707,10 +3720,18 @@ function renderRunningCard() {
  * or touch it), so a listener attached to one card node would need re-attaching on every one
  * of those instead of once, here, on the pane that outlives all of them.
  *
- * `mouseout`, not `mouseleave`, for the per-card reset: `mouseleave` doesn't bubble, so a
- * delegated listener for it never fires for anything but the pane's own boundary. `mouseout`
- * does bubble, and checking `relatedTarget` against `card.contains(...)` is what tells "the
- * pointer left this card" apart from "the pointer moved between two elements inside it".
+ * `pointerout`, not `pointerleave`, for the per-card reset: `pointerleave` doesn't bubble,
+ * so a delegated listener for it never fires for anything but the pane's own boundary.
+ * `pointerout` does bubble, and checking `relatedTarget` against `card.contains(...)` is what
+ * tells "the pointer left this card" apart from "the pointer moved between two elements
+ * inside it".
+ *
+ * Mouse only. A tap on a touch screen fires a compatibility `mousemove` and then nothing
+ * that ever counts as leaving, so on a phone every tapped claim box stayed tilted until the
+ * next tap landed somewhere else — a card frozen at an angle, which reads as a rendering
+ * fault rather than a hover effect. A pen hovering is a pointer the same way a mouse is, so
+ * it keeps the effect; `pointerType` is what tells the cases apart, which the mouse events
+ * this used to listen for can't.
  */
 function tiltGlare(card) {
   let glare = card.querySelector(":scope > .tilt-glare");
@@ -3724,14 +3745,17 @@ function tiltGlare(card) {
 
 function resetCardTilt(card) {
   card.style.transform = "";
+  card.style.willChange = "";
   const glare = card.querySelector(":scope > .tilt-glare");
   if (glare) glare.style.opacity = "0";
 }
 
-el.claimsPane.addEventListener("mousemove", (e) => {
-  if (prefersReducedMotion()) return;
+el.claimsPane.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "touch" || prefersReducedMotion()) return;
   const card = e.target.closest(".claim-card");
   if (!card) return;
+  // Promoted only while it is actually moving — see the note on `.claim-card` in index.html.
+  card.style.willChange = "transform";
   const rect = card.getBoundingClientRect();
   const px = (e.clientX - rect.left) / rect.width;
   const py = (e.clientY - rect.top) / rect.height;
@@ -3742,7 +3766,7 @@ el.claimsPane.addEventListener("mousemove", (e) => {
   glare.style.opacity = "1";
   glare.style.background = `radial-gradient(circle at ${px * 100}% ${py * 100}%, rgba(156,140,240,0.12), transparent 60%)`;
 });
-el.claimsPane.addEventListener("mouseout", (e) => {
+el.claimsPane.addEventListener("pointerout", (e) => {
   const card = e.target.closest(".claim-card");
   if (!card || card.contains(e.relatedTarget)) return;
   resetCardTilt(card);
@@ -4094,6 +4118,22 @@ function renderErrorCard(entry) {
  * it says, then how much of it there is, then what it concluded — and on an incomplete turn
  * the third one is usually missing, which this is the explanation for.
  */
+/**
+ * The line of context the model may write before its first claim — "this is a sketch, and
+ * these are the real claims under the jokes" — as a note above the claims rather than
+ * nowhere (see `claimsPreamble`). Rendered as markdown, since it can carry a citation or a
+ * timestamp like any other sentence the model writes.
+ */
+function contextNoteHTML(rawAnswer, sources, seekable, animate) {
+  const preamble = claimsPreamble(rawAnswer);
+  if (!preamble) return "";
+  return `
+    <div ${revealAttrs("context-note", animate)}>
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5.5M12 7.6v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <div class="context-note-text">${renderMarkdown(preamble, sources, seekable)}</div>
+    </div>`;
+}
+
 function incompleteHTML(incomplete, animate) {
   if (!incomplete) return "";
   return `
@@ -4743,7 +4783,9 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       // and its title is already in the shell's own title bar — a third copy of the same
       // URL, styled as something the reader said, was the check quoting the paste back at
       // them before answering it.
-      summaryCardHTML(entry.claims) + claimPanesHTML(entry, animateAnalysis, newestFollowup),
+      summaryCardHTML(entry.claims) +
+        contextNoteHTML(entry.rawAnswer, entry.sources, seekableEntry(entry), animateAnalysis) +
+        claimPanesHTML(entry, animateAnalysis, newestFollowup),
     );
   } else {
     setClaimsGridMode(null);
@@ -4981,14 +5023,15 @@ function composeCheckPrompt(url) {
   // invented one.
   const timestamps = isVideo
     ? "Mark each claim with when it happens in the video, as `[t=M:SS]` (or `[t=M:SS-M:SS]` " +
-      "for a stretch) written immediately after the claim. Use the video's own clock, and " +
-      "only for moments you actually observed — no guesses.\n\n"
+      "for a stretch) written immediately after the claim — exactly that shape, one moment per " +
+      "bracket. Use the video's own clock, and only for moments you actually observed — no guesses.\n\n"
     : "";
   return withCustomInstructions(
     `Fact-check this ${subject}: ${url}\n\n` +
       "List the distinct factual claims it makes and check each one, using the CLAIM " +
       `STRUCTURE from the system prompt — one \`[[claim: …]]\` block per claim, each ` +
-      `ending in its own VERDICT line. ${timestamps}`,
+      `ending in its own VERDICT line. If it is comedy, satire or parody, say so in one line ` +
+      `first and still check the real claims under the jokes. ${timestamps}`,
   );
 }
 

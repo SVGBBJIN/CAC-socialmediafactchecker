@@ -443,12 +443,19 @@
   /* Favicons are drawn at every size and quality; a fixed box with `contain` keeps a 16px
      .ico and a 512px .png the same size in the row. */
   .lib-favicon { width: 18px; height: 18px; object-fit: contain; border-radius: 3px; }
-  .lib-meta { min-width: 0; }
+  /* `flex: 1` so the title's ellipsis lands against the delete button rather than wherever
+     the text happened to stop; without it the column was only as wide as its content and
+     a long title cut off with a gap still open beside it. */
+  .lib-meta { flex: 1 1 auto; min-width: 0; }
   .lib-title {
     font-size: 12.5px; color: var(--ink); line-height: 1.3;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+  .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; min-width: 0; }
+  /* One line, like the title above it. "Page · Insufficient evidence" used to wrap to a
+     second line under its dot, which made that one row taller than its neighbours and left
+     the dot floating beside the middle of two lines. */
+  .lib-sub-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* The row's delete control — invisible until the row itself is hovered/focused/active,
      the same "reveal on intent" pattern `.source-expand`'s own controls use elsewhere, so a
@@ -548,6 +555,11 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* Shrink-wrapped to the text, so the gradient spans the title rather than the whole
+       bar. As a full-width block, a short title never reached the accent at all and a long
+       one crossed into it at a fixed x position — mid-word, wherever that happened to land
+       — which read as two differently-coloured halves rather than one fade. */
+    display: inline-block; max-width: 100%; vertical-align: top;
     /* "New check" swapping for the real title used to be an instant snap — jarring on a
        line this prominent, right at the top of the shell. `setStatusText` (app.js) fades it
        out and back in around the swap, the same beat `.stage-text` already gets. */
@@ -1054,6 +1066,15 @@
     align-self: flex-start;
     margin-bottom: 10px;
   }
+  /* A claim box that ends on its analysis ends there, with the card's own padding and no
+     more. `.claim-text` carries a bottom margin for whatever follows it — the sources,
+     actions and thread the last box gets — but every other box has nothing after it except
+     the phone's "Read more" cue, which is `display: none` at this width and still counts as
+     the last child, so the margin never collapsed away: each box sat on 16px of blank space
+     on top of its 20px of padding, a band nobody could account for. */
+  @media (min-width: 701px) {
+    .claim-pane > .claim-text:has(+ .claim-expand-cue:last-child) { margin-bottom: 0; }
+  }
 
   .claim-grid-status {
     grid-column: 1 / -1;
@@ -1097,15 +1118,21 @@
     border-radius: 14px;
     padding: 20px;
     overflow: hidden;
-    /* Pointer-driven 3D tilt, from the TRASE Design System's ClaimCard — see
-       `handleCardTilt`/`resetCardTilt` in app.js, which set `transform` inline on
-       mousemove/mouseleave. `transform-style: preserve-3d` is what makes the `perspective()`
-       those set actually read as depth rather than a flat skew; `will-change` hints the
-       compositor this card's transform changes every pointer move so it doesn't repaint from
-       scratch each frame. */
-    transform-style: preserve-3d;
+    /* Pointer-driven 3D tilt, from the TRASE Design System's ClaimCard — see the
+       `pointermove` handler and `resetCardTilt` in app.js, which set `transform` inline.
+       The depth comes from the `perspective()` inside that transform, not from
+       `transform-style: preserve-3d`: the card has no 3D children to preserve, and
+       preserve-3d on a box that also clips (`overflow: hidden`, `border-radius`) is the
+       combination browsers flatten inconsistently — mid-tilt the rounded clip dropped and
+       the square corners of the accent bar and glare showed past the curve.
+       `isolation: isolate` gives the card its own stacking context so everything inside it
+       is composited, and clipped, as one rounded layer rather than per-child.
+       `will-change` is left off at rest and set by the handler only while the pointer is
+       over the card: a permanently promoted layer per card is GPU memory spent on a dozen
+       boxes nobody is touching, and on some GPUs a promoted layer is drawn without
+       anti-aliasing on its rounded corners. */
+    isolation: isolate;
     transition: transform 0.12s ease-out;
-    will-change: transform;
   }
   /* The DS's ClaimCard gives *every* card a `card-in` scale/translate entrance. Here it is
      scoped to the freshly-started running card alone (`.run-enter`, see `renderRunningCard`
@@ -1141,6 +1168,13 @@
   .tilt-glare {
     position: absolute;
     inset: 0;
+    /* Follows the card's curve itself rather than relying on the card to clip it: the
+       desktop claim stack sets `overflow: visible` on its boxes (so source popovers can
+       escape them), and with no clip a square glare painted its brightest pixels straight
+       past the rounded corner whenever the pointer was near one. `inherit` takes the card's
+       outer radius; inset 0 sits inside the 1px border, so it is one pixel generous, which
+       the border itself covers. */
+    border-radius: inherit;
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.2s ease;
@@ -1149,12 +1183,21 @@
      appears outside the loading iris. This is the *legacy* card: the settings switch
      ("Legacy mode", General tab) falls back to exactly this, so nothing above or in this
      rule changes — the new variations below are added alongside it rather than over it. */
+  /* Drawn as a 3px gradient across the top of a layer the full size of the card, with the
+     card's own radius, rather than as a 3px-tall rectangle: a rectangle has square ends,
+     and wherever the card isn't clipping — the desktop claim stack's `overflow: visible`
+     boxes, or a tilted card mid-transform — those ends stuck out past the rounded corners.
+     A full-size layer with `border-radius: inherit` follows the curve on its own. `-1px`
+     puts it on the border box so the bar sits flush with the top edge, as it did. */
   .claim-card::before {
     content: "";
     position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 3px;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    inset: -1px;
+    border-radius: inherit;
+    /* 4px on the border box: where the card clips (single-card mode, `overflow: hidden`) the
+       clip is the padding box, one pixel in, which leaves the 3px bar it always was. */
+    background: linear-gradient(90deg, var(--accent), var(--accent-2)) top / 100% 4px no-repeat;
+    pointer-events: none;
   }
 
   /* ---------------------------------------------- the verdict card variations
@@ -2231,6 +2274,9 @@
     font-variant-numeric: tabular-nums; white-space: nowrap;
     cursor: pointer; transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
   }
+  /* A chip and the punctuation right after it (see `linkTimestamps`), so a line never
+     starts with an orphaned full stop. */
+  .ts-keep { white-space: nowrap; }
   .ts-chip svg { width: 0.8em; height: 0.8em; flex: none; opacity: 0.75; }
   .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
   .ts-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2277,6 +2323,28 @@
     font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.06em; color: var(--warn);
   }
+
+  /* The model's one line of context about the post as a whole — "this is a sketch; these
+     are the real claims under the jokes" — above the claim boxes (see `contextNoteHTML`).
+     An accent rule rather than the warn-coloured `.notice`: this is information about the
+     post, not a problem with the check. */
+  .context-note {
+    grid-column: 1 / -1;
+    display: flex; gap: 10px; align-items: flex-start;
+    border-left: 2px solid var(--accent);
+    background: color-mix(in oklab, var(--accent) 7%, transparent);
+    border-radius: 0 10px 10px 0;
+    padding: 10px 14px; margin-bottom: 12px;
+    color: var(--ink-dim);
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .claims-pane > .context-note { margin-bottom: 0; }
+  .context-note.in { opacity: 1; transform: translateY(0); }
+  .context-note > svg { width: 16px; height: 16px; flex: none; margin-top: 3px; color: var(--accent); }
+  .context-note-text { font-size: 14px; line-height: 1.5; min-width: 0; }
+  .context-note-text p { margin: 0 0 6px; }
+  .context-note-text > :last-child { margin-bottom: 0; }
 
   .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .badge {
@@ -3076,6 +3144,8 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* Shrink-wrapped for the same reason as `.shell-title`. */
+    display: inline-block; max-width: 100%; vertical-align: top;
     /* Same fade-around-the-swap treatment as `.shell-title` — see its own comment. */
     opacity: 1;
     transition: opacity 0.3s ease;
@@ -3367,6 +3437,10 @@
       border-radius: 100px;
       background: rgba(10,12,16,0.55);
       backdrop-filter: blur(8px);
+      /* The scrim is dark in both themes — it sits over video, not over the page — so the
+         text can't follow the theme's accent: in light mode that is a dark teal, and the
+         link to the original post was dark text on a dark pill. */
+      color: #f2f5f7;
     }
 
     /* The stack itself: video strip, then sheet. No `justify-content: flex-end` any more —
@@ -3480,6 +3554,15 @@
     }
     /* Says "there is more of this" without a row of dots pretending to be text — the last
        visible line fades into the card rather than being sliced flat by its own clamp. */
+    /* The clamp above is exactly two lines of text, which only holds while the lines sit
+       on that grid. A list item's margin or a paragraph's gap shifts everything under it
+       off the grid, and the clamp then sliced a line through the middle of its glyphs (the
+       second bullet of a two-bullet claim was the usual casualty). Collapsed, the blocks
+       stack with no gaps between them; expanding gives the spacing back. */
+    .claim-pane:not(.expanded) .claim-text :is(p, ul, ol, li, blockquote, h4, pre) {
+      margin-top: 0; margin-bottom: 0;
+    }
+    .claim-pane:not(.expanded) .claim-text :is(blockquote) { padding-top: 0; padding-bottom: 0; }
     .claim-pane:not(.expanded) .claim-text::after {
       content: "";
       position: absolute; left: 0; right: 0; bottom: 0;
@@ -3744,6 +3827,7 @@
   [data-motion="reduced"] .claim-text,
   [data-motion="reduced"] .badge,
   [data-motion="reduced"] .notice,
+  [data-motion="reduced"] .context-note,
   [data-motion="reduced"] .check-duration,
   [data-motion="reduced"] .source-pills,
   [data-motion="reduced"] .seal-check,
@@ -3787,7 +3871,7 @@
   [data-motion="reduced"] .brand-hud * { animation: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
+    .claim-text, .badge, .notice, .context-note, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
     .badge.in { opacity: 1; transform: none; }
     .badge.in .badge-icon { opacity: 1; transform: none; }
     .iris-wrap *, .brand-hud * { animation: none !important; }

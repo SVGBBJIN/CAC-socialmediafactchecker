@@ -9,6 +9,7 @@ import {
   VERDICTS,
   splitVerdict,
   splitClaims,
+  claimsPreamble,
   claimDiff,
   aggregateVerdictKey,
 } from "./public/claims.js";
@@ -311,4 +312,29 @@ test("the brackets, the word VERDICT and the four findings all stay mandatory", 
   assert.equal(splitVerdict("x\nVERDICT: Probably fine").verdictKey, null);
   // Not the last line in the block, so not this block's verdict.
   assert.equal(splitVerdict("x\nVERDICT: Contradicted\nOne more thought.").verdictKey, null);
+});
+
+/* ---------------------------------------------------------------- claimsPreamble */
+
+test("claimsPreamble returns the context line before the first claim", () => {
+  const answer = [
+    "This is a comedy sketch; the claims below are the real ones under the jokes.",
+    "",
+    "[[claim: Inflation hit 40%]]",
+    "It peaked at 9.1% [1].",
+    "VERDICT: Contradicted",
+  ].join("\n");
+  assert.equal(
+    claimsPreamble(answer),
+    "This is a comedy sketch; the claims below are the real ones under the jokes.",
+  );
+  // Parsing the preamble must not disturb the claims themselves.
+  assert.equal(splitClaims(answer).length, 1);
+});
+
+test("claimsPreamble is null when the answer opens on a claim, or has none", () => {
+  assert.equal(claimsPreamble("[[claim: X]]\nbody\nVERDICT: Disputed"), null);
+  assert.equal(claimsPreamble("  \n\n[[claim: X]]\nbody"), null);
+  assert.equal(claimsPreamble("Just a reply, no claims."), null);
+  assert.equal(claimsPreamble(undefined), null);
 });

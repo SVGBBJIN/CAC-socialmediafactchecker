@@ -7,6 +7,9 @@ import assert from "node:assert/strict";
 
 import {
   TIMESTAMP_MARKER,
+  marksIn,
+  mapTimestamps,
+  markLabel,
   parseClock,
   formatClock,
   extractTimestamps,
@@ -27,6 +30,18 @@ test("parseClock reads m:ss, h:mm:ss and bare seconds", () => {
   assert.equal(parseClock("12:30"), 750);
   assert.equal(parseClock("1:02:03"), 3723);
   assert.equal(parseClock("90"), 90);
+});
+
+test("parseClock reads unit forms, fractions and a stray trailing unit", () => {
+  assert.equal(parseClock("12s"), 12);
+  assert.equal(parseClock("1m05s"), 65);
+  assert.equal(parseClock("1m 5s"), 65);
+  assert.equal(parseClock("2m"), 120);
+  assert.equal(parseClock("1h2m3s"), 3723);
+  assert.equal(parseClock("45 sec"), 45);
+  assert.equal(parseClock("0:12s"), 12);
+  assert.equal(parseClock("0:12.5"), 12.5);
+  assert.equal(parseClock("1:5"), 65);
 });
 
 test("parseClock rejects anything that isn't a clock", () => {
@@ -94,6 +109,59 @@ test("the marker is matched case-insensitively", () => {
   );
 });
 
+test("every shape the model drifts into is read, not leaked as raw text", () => {
+  const cases = {
+    "[t = 0:12]": [[12, null]],
+    "[t: 0:12]": [[12, null]],
+    "[t=0:12 to 0:20]": [[12, 20]],
+    "[t=0:12s]": [[12, null]],
+    "[t=12s]": [[12, null]],
+    "[t=1m05s]": [[65, null]],
+    "[t=45]": [[45, null]],
+    "[t=0:12.5]": [[12.5, null]],
+    "[t=1:5]": [[65, null]],
+    "(t=0:12)": [[12, null]],
+    "[0:12]": [[12, null]],
+    "[0:12-0:20]": [[12, 20]],
+    "[1:02:03]": [[3723, null]],
+    "[t=1:05, 1:10]": [[65, null], [70, null]],
+    "[t=1:05, t=1:10-1:20]": [[65, null], [70, 80]],
+    "[t=0:12 and 0:40]": [[12, null], [40, null]],
+    "[t=0:12; 0:30]": [[12, null], [30, null]],
+  };
+  for (const [text, expected] of Object.entries(cases)) {
+    assert.deepEqual(
+      extractTimestamps(`said ${text} here`).map((m) => [m.start, m.end]),
+      expected,
+      text,
+    );
+  }
+});
+
+test("a bracket without `t=` needs a colon, so citations are never claimed", () => {
+  // `[12]` is a citation — and citation cleanup deletes the ones it can't resolve, so
+  // treating one as a timestamp would put it in the wrong pass entirely.
+  assert.deepEqual(extractTimestamps("[12] [3] [1, 2] [2024] (0:12) at 0:12"), []);
+});
+
+test("marksIn reads every moment one marker holds, in order", () => {
+  assert.deepEqual(marksIn("[t=1:05, 1:10-1:20]"), [
+    { start: 65, end: null },
+    { start: 70, end: 80 },
+  ]);
+  assert.deepEqual(marksIn("[t=nope]"), []);
+});
+
+test("mapTimestamps leaves non-markers alone and renders each one it finds", () => {
+  const out = mapTimestamps("a [t=0:12] b [3] c [0:40, 0:50]", (marks) => `<${marks.map(markLabel).join("|")}>`);
+  assert.equal(out, "a <0:12> b [3] c <0:40|0:50>");
+});
+
+test("markLabel writes a point as a clock and a span with an en dash", () => {
+  assert.equal(markLabel({ start: 12, end: null }), "0:12");
+  assert.equal(markLabel({ start: 65, end: 80 }), "1:05–1:20");
+});
+
 /* ---------------------------------------------------------------- coexistence with citations */
 
 test("citation cleanup leaves timestamp markers alone", () => {
@@ -121,6 +189,26 @@ test("plainTimestamps rewrites markers for copied text and touches nothing else"
     plainTimestamps("Claim [t=0:12] and span [t=1:05-1:20], cited [2]."),
     "Claim [0:12] and span [1:05–1:20], cited [2].",
   );
+});
+
+test("plainTimestamps normalises drifted markers the same way", () => {
+  assert.equal(
+    plainTimestamps("At [t=12s], again [t=1:05, 1:10], and (t=0:20 to 0:25) [4]."),
+    "At [0:12], again [1:05, 1:10], and [0:20–0:25] [4].",
+  );
+});
+
+test("citation cleanup leaves the bare and listed timestamp shapes alone too", () => {
+  const ledger = new CitationLedger();
+  ledger.record({
+    claim: "rates",
+    query: "interest rates",
+    results: [{ title: "Rates", url: "https://example.com/rates", domain: "example.com" }],
+  });
+  const cleaned = cleanCitations("Said at [0:12] and [t=1:05, 1:10], cited [1], invented [9].", ledger);
+  assert.match(cleaned.text, /\[0:12\]/);
+  assert.match(cleaned.text, /\[t=1:05, 1:10\]/);
+  assert.doesNotMatch(cleaned.text, /\[9\]/);
 });
 
 /* ---------------------------------------------------------------- windows */

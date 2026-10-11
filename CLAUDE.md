@@ -33,7 +33,7 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 644 tests; `worker/`'s is 5.
+this writing the whole suite is 681 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
@@ -194,9 +194,13 @@ each claim, marking when in the clip it is made. `public/timestamps.js` owns tha
 parsing, formatting, and turning the marks into playback windows — and `public/app.js`
 renders each one as a chip that seeks the video pane (`currentTime` on the MP4 element,
 `postMessage` for the YouTube embed) and lights up while the playhead is inside it. The
-`t=` is load-bearing: `lib/citation-cleanup.js` deletes any `[n]` it can't resolve in the
-ledger, so a bare `[0:12]` would be destroyed on the way out. Chips are only rendered as
-controls when there is something to seek — an article or a photo carousel gets inert text.
+`t=` keeps the asked-for shape well clear of citations: `lib/citation-cleanup.js` deletes
+any digits-only `[n]` it can't resolve in the ledger. The parser is tolerant of the shapes
+the model drifts into anyway, including `[0:12]`, `[t=12s]`, `[t=1:05, 1:10]`, `(t=0:12)` and
+`[t=0:12 to 0:20]`, so none of them leaks out as raw text. One line holds firm: a bracket
+without `t=` must contain a colon, so `[12]` is never claimed from the citation pass. Chips
+are only rendered as controls when there is something to seek — an article or a photo
+carousel gets inert text.
 
 **Claims are split into panes by a marker the model writes, not by guessing from prose.**
 The CLAIM STRUCTURE section of `FACT_CHECK_SYSTEM_PROMPT` (`lib/verified-chat.js`) asks the
