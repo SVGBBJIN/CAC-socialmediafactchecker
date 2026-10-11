@@ -18,21 +18,57 @@
 // Pure and DOM-free on purpose, like `device.js` — that is what lets `test-timestamps.js`
 // exercise it in Node with no browser and no network, per the convention in CLAUDE.md.
 
-// h:mm:ss, m:ss, or a bare count of seconds. Minutes and seconds are held to two digits
-// each so a stray `[t=1:2:3:4]` is simply not a marker rather than a marker meaning
-// something nobody intended.
-const CLOCK = String.raw`\d{1,3}(?::[0-5]\d){0,2}`;
+// The marker the prompt asks for is exactly `[t=M:SS]` or `[t=M:SS-M:SS]`, and most of the
+// time that is what arrives. But the model is writing prose, and the shapes it drifts into
+// are a short, predictable list — every one of which used to reach the reader as raw
+// bracket text sitting in the middle of a sentence, a broken parser in plain sight:
+//
+//   [t=0:12]           the canonical point             [t = 0:12]       spaced
+//   [t=0:12-0:20]      span, any dash or "to"          [t=0:12s]        a stray unit
+//   [t=1:05, 1:10]     several moments in one bracket  [t=12s] [t=1m05s] unit form
+//   [0:12] [0:12-0:20] the `t=` forgotten              [t=0:12.5]       fractional seconds
+//   (t=0:12)           parentheses instead             [t=1:5]          one-digit seconds
+//
+// What stays out is just as deliberate. A bracket without `t=` has to contain a colon to
+// count — `[12]` is a citation, and `lib/citation-cleanup.js` deletes any it cannot resolve,
+// so claiming one as a timestamp would put a real citation in the wrong pass. Unbracketed
+// times in running prose ("at 0:12") are left alone: there is no marker there to replace,
+// only words, and turning prose into controls is guessing.
+
+// h:mm:ss or m:ss, the seconds allowed one digit (`1:5`) or a fraction (`0:12.5`).
+const COLON_CLOCK = String.raw`\d{1,3}(?::[0-5]?\d){1,2}(?:\.\d+)?`;
+// `12s`, `1m05s`, `1m 5s`, `2m`, `1h2m3s`, `45 sec`. Either seconds or minutes must be
+// present, so a bare `h` never matches on its own.
+const UNIT_CLOCK = String.raw`(?:\d{1,2}\s?h\s?)?(?:\d{1,3}\s?m(?:in)?\s?)?\d{1,5}(?:\.\d+)?\s?s(?:ec)?|(?:\d{1,2}\s?h\s?)?\d{1,3}\s?m(?:in)?`;
+// A plain count of seconds — only ever after `t=`, where nothing else can be meant.
+const BARE_SECONDS = String.raw`\d{1,5}(?:\.\d+)?`;
+
+const PREFIX = String.raw`t\s*[=:]\s*`;
+const RANGE = String.raw`\s*(?:-|–|—|\bto\b)\s*`;
+const SEPARATOR = String.raw`\s*(?:[,;]|\band\b)\s*`;
+
+function list(point) {
+  const span = `(?:${point})s?(?:${RANGE}(?:${PREFIX})?(?:${point})s?)?`;
+  return `${span}(?:${SEPARATOR}(?:${PREFIX})?${span})*`;
+}
+
+const ANY_POINT = `${COLON_CLOCK}|${UNIT_CLOCK}|${BARE_SECONDS}`;
 
 /**
- * One timestamp marker. `g`-flagged, so callers that need it more than once must reset
- * `lastIndex` or use it through `String.replace`/`matchAll`, which do that themselves.
+ * One timestamp marker, in any of the shapes above. `g`-flagged, so callers that need it
+ * more than once must reset `lastIndex` or use it through `String.replace`/`matchAll`,
+ * which do that themselves.
  *
- * The separator for a span accepts a hyphen, an en dash or an em dash: the model is writing
- * prose, and which dash it reaches for is not something worth failing over. Whitespace
- * around it is optional for the same reason.
+ * It finds a marker and nothing more — no capture groups. One bracket can hold several
+ * moments, so what it holds is read by `marksIn`, not by groups that could only ever have
+ * held one start and one end.
  */
 export const TIMESTAMP_MARKER = new RegExp(
-  String.raw`\[t=(${CLOCK})(?:\s*[-–—]\s*(${CLOCK}))?\]`,
+  [
+    String.raw`\[\s*${PREFIX}(?:${list(ANY_POINT)})\s*\]`,
+    String.raw`\(\s*${PREFIX}(?:${list(ANY_POINT)})\s*\)`,
+    String.raw`\[\s*(?:${list(COLON_CLOCK)})\s*\]`,
+  ].join("|"),
   "gi",
 );
 
@@ -41,17 +77,74 @@ export const TIMESTAMP_MARKER = new RegExp(
  *
  * `1:05` is a minute and five seconds, never an hour and five minutes — short-form video is
  * what this app checks, so the smallest units are the ones that are always present. That is
- * the same rule every player's own scrubber uses.
+ * the same rule every player's own scrubber uses. Unit forms (`1m05s`, `45s`) and a stray
+ * trailing `s` on a clock (`0:12s`) read the way they would to a person.
  */
 export function parseClock(text) {
-  const parts = String(text ?? "").trim().split(":");
-  if (parts.length === 0 || parts.length > 3) return null;
+  const value = String(text ?? "").trim().toLowerCase();
+  if (!value) return null;
+
+  const units = value.match(
+    /^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+(?:\.\d+)?)\s*s(?:ec)?)?$/,
+  );
+  if (units && (units[1] || units[2] || units[3])) {
+    return Number(units[1] ?? 0) * 3600 + Number(units[2] ?? 0) * 60 + Number(units[3] ?? 0);
+  }
+
+  const parts = value.replace(/s$/, "").split(":");
+  if (parts.length > 3) return null;
   let seconds = 0;
-  for (const part of parts) {
-    if (!/^\d+$/.test(part)) return null;
+  for (const [i, part] of parts.entries()) {
+    // Only the last part — the seconds — may carry a fraction.
+    const shape = i === parts.length - 1 ? /^\d+(?:\.\d+)?$/ : /^\d+$/;
+    if (!shape.test(part)) return null;
     seconds = seconds * 60 + Number(part);
   }
   return Number.isFinite(seconds) ? seconds : null;
+}
+
+/**
+ * Every moment one matched marker holds, in the order written: `[t=0:12]` is one,
+ * `[t=1:05, 1:10-1:20]` is two. Each is `{ start, end }`, with `end` null unless a span was
+ * written and runs forward — a backwards range is a typo, and the useful part of it (where
+ * to seek to) is still the start. An empty array means the marker held nothing readable.
+ */
+export function marksIn(marker) {
+  const inner = String(marker ?? "")
+    .trim()
+    .slice(1, -1)
+    .trim()
+    .replace(/^t\s*[=:]\s*/i, "");
+  const marks = [];
+  for (const item of inner.split(/\s*(?:[,;]|\band\b)\s*/i)) {
+    if (!item) continue;
+    const [from, to] = item
+      .replace(/^t\s*[=:]\s*/i, "")
+      .split(/\s*(?:-|–|—|\bto\b)\s*/i)
+      .map((part) => part.replace(/^t\s*[=:]\s*/i, ""));
+    const start = parseClock(from);
+    if (start == null) continue;
+    const end = to == null ? null : parseClock(to);
+    marks.push({ start, end: end != null && end > start ? end : null });
+  }
+  return marks;
+}
+
+/**
+ * The same text with every marker replaced by whatever `render(marks, raw)` returns for it.
+ * A marker that held nothing readable is left exactly as written — that is not something
+ * this module can make a better guess about than the reader can.
+ */
+export function mapTimestamps(text, render) {
+  return String(text ?? "").replace(TIMESTAMP_MARKER, (raw) => {
+    const marks = marksIn(raw);
+    return marks.length ? render(marks, raw) : raw;
+  });
+}
+
+/** A mark as the clock text a reader sees: `0:12`, or `1:05–1:20` for a span. */
+export function markLabel({ start, end }) {
+  return end != null && end > start ? `${formatClock(start)}–${formatClock(end)}` : formatClock(start);
 }
 
 /** Seconds as the clock a player would show: `0:07`, `4:31`, `1:02:03`. */
@@ -74,15 +167,9 @@ export function formatClock(seconds) {
 export function extractTimestamps(text) {
   const found = [];
   for (const match of String(text ?? "").matchAll(TIMESTAMP_MARKER)) {
-    const start = parseClock(match[1]);
-    if (start == null) continue;
-    const end = match[2] == null ? null : parseClock(match[2]);
-    found.push({
-      raw: match[0],
-      index: match.index,
-      start,
-      end: end != null && end > start ? end : null,
-    });
+    for (const mark of marksIn(match[0])) {
+      found.push({ raw: match[0], index: match.index, ...mark });
+    }
   }
   return found;
 }
@@ -94,12 +181,7 @@ export function extractTimestamps(text) {
  * `[t=0:12]` is app syntax leaking out. Nothing else is touched, including citation markers.
  */
 export function plainTimestamps(text) {
-  return String(text ?? "").replace(TIMESTAMP_MARKER, (raw, start, end) => {
-    const from = parseClock(start);
-    if (from == null) return raw;
-    const to = end == null ? null : parseClock(end);
-    return to != null && to > from ? `[${formatClock(from)}–${formatClock(to)}]` : `[${formatClock(from)}]`;
-  });
+  return mapTimestamps(text, (marks) => `[${marks.map(markLabel).join(", ")}]`);
 }
 
 /**

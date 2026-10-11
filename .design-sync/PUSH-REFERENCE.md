@@ -246,6 +246,50 @@ None of these introduces a token. `--on-accent` from §1 is still the only new o
   as extra keys. The vocabulary is closed at four and the product's spelling is the real
   one. This has been flagged in `NOTES.md` across two sessions and is still unfixed.
 
+### 7. Polish pass: tilt corners, context note, timestamp chips
+
+Product-side fixes the DS's own `ClaimCard` (`useTilt`) shares the cause of, plus one new
+pattern. None introduces a token.
+
+- **Tilt corners.** The product dropped `transform-style: preserve-3d` (the depth is the
+  `perspective()` inside the transform; the card has no 3D children) and keeps
+  `will-change: transform` on only while the pointer is over the card. The tilt is
+  mouse/pen only: on touch, a tap left the card stuck at an angle. The glare layer gets
+  `border-radius: inherit`. The legacy top bar is now a full-size `::before` with
+  `border-radius: inherit` and a 3px top gradient, not a 3px rectangle. Without a clip, its
+  square ends and the glare's corners showed past the curve. The DS's `ClaimCard` has all
+  three of these problems.
+- **`.context-note`** — new. One line the model may write before its first claim (chiefly
+  "this is a sketch/satire; these are the real claims under the jokes"), shown between the
+  summary pill and the first claim box. Accent left rule and a faint accent wash, with an
+  info glyph. Deliberately not the warn-coloured `.notice`, because it describes the post
+  rather than a problem with the check.
+- **Timestamp chips.** One marker can now render as several `.ts-chip`s (`[t=1:05, 1:10]`).
+  A chip plus the punctuation after it is wrapped in `.ts-keep` (`white-space: nowrap`), so
+  a full stop never starts a line on its own.
+
+### 8. Per-claim sources, the overview card, a bar-less landing
+
+- **Source pills live on their own claim.** Each `.claim-pane` carries a `.source-pills`
+  row of just the sources its text cites. Uncited ones get an `.other-sources` row after
+  the last claim, with a `.source-pills-label` reading "Other sources". The DS's
+  `ClaimCard`/`ClaimStack` still model one shared ledger under the stack.
+- **`.overview-card`** — new. A `<details>`: closed, it shows a mono "Overview" label, a
+  one-line `.overview-peek` (`contain: inline-size`, so it never widens the pane) and a
+  chevron. Open, it shows the summary and its own pills. Behind a new General-tab switch
+  (`data-overview="off"`), so `SettingsMenu` owes a row.
+- **Landing has no top bar.** `.lshell-topbar` is now an absolutely positioned,
+  click-through row holding two blurred-backing buttons, over a full-height `.lshell-scroll`
+  padded by `--lshell-bar`. The DS's landing screen draws a bar row above the scroller,
+  which slices the page on scroll.
+
+- **Claim motion now follows the DS.** The product's FLIP "split" (boxes scaled
+  non-uniformly from the loading card's rect) and its staggered re-fade of every box on
+  every rebuild are gone. In their place is the DS's own `claim-stack-in`, played only by a
+  box on the render it is new. The badge's stamp/twist/overshoot is now a 0.3s fade on
+  arrival only, and the settle border flash is gone. The DS is owed nothing here; the
+  mirror's `ClaimGridSplit` is now doubly dead.
+
 ---
 
 ## Permanent divergences — do not "fix" these in either direction

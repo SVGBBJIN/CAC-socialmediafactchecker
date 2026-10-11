@@ -17,7 +17,7 @@ import {
 } from "./lib/search-schema.js";
 import { search, providerFromEnv, unwrapDuckDuckGoURL, SearchError } from "./lib/search.js";
 import { CitationLedger, markersIn } from "./lib/citations.js";
-import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT } from "./lib/verified-chat.js";
+import { verifiedChat, searchEnabled, FACT_CHECK_SYSTEM_PROMPT, factCheckSystemPrompt } from "./lib/verified-chat.js";
 import { PageFindError } from "./lib/page-find.js";
 
 /* ---------------- query schema ---------------- */
@@ -981,6 +981,46 @@ test("the system prompt says a greeting needs no tool call", () => {
   // turns the rule does not govern. Without this the model reaches for a search on "hi".
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Not every message is a fact-check/);
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Do not search to have searched/);
+});
+
+test("the system prompt checks a sketch's real claims instead of waving it through", () => {
+  // It used to list "a comedy sketch" beside a recipe and a dog as posts with nothing to
+  // check, and the model took the hint: satire about real people came back as "this is a
+  // sketch" and no verdicts, which is the one answer a shared satire clip most needs not to get.
+  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /nothing checkable — a music video, a comedy sketch/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /WHEN THE POST IS A SKETCH, SATIRE OR PARODY/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Check the real claims/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /Put the exaggeration in context/);
+  // The "this is satire" line has somewhere to go that the app actually renders.
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /before the first claim line, and the app\nshows it above the claims/);
+});
+
+test("the system prompt puts the post's own central claim first", () => {
+  // A video titled "How Washington's Election Led to Minecraft" came back with its birthday
+  // and sales figures checked and its actual argument — the causal chain — never mentioned.
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /FIND THE CLAIM THE POST IS MAKING/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /That central claim is your first block, always/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /is a causal claim, and\nit is checked as one/);
+});
+
+test("the system prompt closes a check with an overview after the last verdict", () => {
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /\[\[overview\]\]/);
+  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /nothing follows the final VERDICT/i);
+});
+
+test("switching the overview off takes it out of the prompt, not just off the screen", () => {
+  // Hiding the card alone left the model writing an overview on every check regardless.
+  const off = factCheckSystemPrompt({ overview: false });
+  assert.doesNotMatch(off, /\[\[overview\]\]/);
+  assert.match(off, /nothing follows the final VERDICT line: no summary, no overview/);
+  // Everything else is the same prompt.
+  assert.match(off, /FIND THE CLAIM THE POST IS MAKING/);
+  assert.equal(factCheckSystemPrompt(), FACT_CHECK_SYSTEM_PROMPT);
+  assert.equal(factCheckSystemPrompt({ overview: true }), FACT_CHECK_SYSTEM_PROMPT);
+});
+
+test("the system prompt pins the one timestamp shape", () => {
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /one moment per bracket/);
 });
 
 test("the system prompt no longer threatens a rewrite that cannot happen", () => {

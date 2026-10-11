@@ -443,12 +443,19 @@
   /* Favicons are drawn at every size and quality; a fixed box with `contain` keeps a 16px
      .ico and a 512px .png the same size in the row. */
   .lib-favicon { width: 18px; height: 18px; object-fit: contain; border-radius: 3px; }
-  .lib-meta { min-width: 0; }
+  /* `flex: 1` so the title's ellipsis lands against the delete button rather than wherever
+     the text happened to stop; without it the column was only as wide as its content and
+     a long title cut off with a gap still open beside it. */
+  .lib-meta { flex: 1 1 auto; min-width: 0; }
   .lib-title {
     font-size: 12.5px; color: var(--ink); line-height: 1.3;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+  .lib-sub { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 5px; min-width: 0; }
+  /* One line, like the title above it. "Page · Insufficient evidence" used to wrap to a
+     second line under its dot, which made that one row taller than its neighbours and left
+     the dot floating beside the middle of two lines. */
+  .lib-sub-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* The row's delete control — invisible until the row itself is hovered/focused/active,
      the same "reveal on intent" pattern `.source-expand`'s own controls use elsewhere, so a
@@ -548,6 +555,11 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* Shrink-wrapped to the text, so the gradient spans the title rather than the whole
+       bar. As a full-width block, a short title never reached the accent at all and a long
+       one crossed into it at a fixed x position — mid-word, wherever that happened to land
+       — which read as two differently-coloured halves rather than one fade. */
+    display: inline-block; max-width: 100%; vertical-align: top;
     /* "New check" swapping for the real title used to be an instant snap — jarring on a
        line this prominent, right at the top of the shell. `setStatusText` (app.js) fades it
        out and back in around the swap, the same beat `.stage-text` already gets. */
@@ -1054,6 +1066,15 @@
     align-self: flex-start;
     margin-bottom: 10px;
   }
+  /* A claim box that ends on its analysis ends there, with the card's own padding and no
+     more. `.claim-text` carries a bottom margin for whatever follows it — the sources,
+     actions and thread the last box gets — but every other box has nothing after it except
+     the phone's "Read more" cue, which is `display: none` at this width and still counts as
+     the last child, so the margin never collapsed away: each box sat on 16px of blank space
+     on top of its 20px of padding, a band nobody could account for. */
+  @media (min-width: 701px) {
+    .claim-pane > .claim-text:has(+ .claim-expand-cue:last-child) { margin-bottom: 0; }
+  }
 
   .claim-grid-status {
     grid-column: 1 / -1;
@@ -1097,25 +1118,30 @@
     border-radius: 14px;
     padding: 20px;
     overflow: hidden;
-    /* Pointer-driven 3D tilt, from the TRASE Design System's ClaimCard — see
-       `handleCardTilt`/`resetCardTilt` in app.js, which set `transform` inline on
-       mousemove/mouseleave. `transform-style: preserve-3d` is what makes the `perspective()`
-       those set actually read as depth rather than a flat skew; `will-change` hints the
-       compositor this card's transform changes every pointer move so it doesn't repaint from
-       scratch each frame. */
-    transform-style: preserve-3d;
+    /* Pointer-driven 3D tilt, from the TRASE Design System's ClaimCard — see the
+       `pointermove` handler and `resetCardTilt` in app.js, which set `transform` inline.
+       The depth comes from the `perspective()` inside that transform, not from
+       `transform-style: preserve-3d`: the card has no 3D children to preserve, and
+       preserve-3d on a box that also clips (`overflow: hidden`, `border-radius`) is the
+       combination browsers flatten inconsistently — mid-tilt the rounded clip dropped and
+       the square corners of the accent bar and glare showed past the curve.
+       `isolation: isolate` gives the card its own stacking context so everything inside it
+       is composited, and clipped, as one rounded layer rather than per-child.
+       `will-change` is left off at rest and set by the handler only while the pointer is
+       over the card: a permanently promoted layer per card is GPU memory spent on a dozen
+       boxes nobody is touching, and on some GPUs a promoted layer is drawn without
+       anti-aliasing on its rounded corners. */
+    isolation: isolate;
     transition: transform 0.12s ease-out;
-    will-change: transform;
   }
   /* The DS's ClaimCard gives *every* card a `card-in` scale/translate entrance. Here it is
      scoped to the freshly-started running card alone (`.run-enter`, see `renderRunningCard`
      in app.js) — `.landing` plays the same entrance below, just not by riding on this class
      — and that is deliberate: in this app a `.claim-card` is also a `.claim-pane` in the
-     claims grid (see `claimPanesHTML`), and those boxes are torn down and rebuilt on every
-     streamed claim while `flipClaimsPane` animates `transform` on them through the Web
-     Animations API. A CSS entrance on the same property would fight it for the same reason
-     the note on `.claim-grid-loading .claim-pane.in` gives, and would replay from the top on
-     every rebuild — a flicker per claim, not an arrival. The running card's very first paint
+     claims stack (see `claimPanesHTML`), and those boxes are torn down and rebuilt on every
+     streamed claim. An entrance riding on `.claim-card` would replay from the top on every
+     rebuild — a flicker per claim, not an arrival — which is why a box gets the DS's
+     ClaimStack entrance (`.stack-in`) only on the render it is new. The running card's very first paint
      is the one moment of that kind that mounts once and then just sits there —
      `renderRunningCard` is only ever called once per check. */
   .claim-card.run-enter {
@@ -1141,6 +1167,13 @@
   .tilt-glare {
     position: absolute;
     inset: 0;
+    /* Follows the card's curve itself rather than relying on the card to clip it: the
+       desktop claim stack sets `overflow: visible` on its boxes (so source popovers can
+       escape them), and with no clip a square glare painted its brightest pixels straight
+       past the rounded corner whenever the pointer was near one. `inherit` takes the card's
+       outer radius; inset 0 sits inside the 1px border, so it is one pixel generous, which
+       the border itself covers. */
+    border-radius: inherit;
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.2s ease;
@@ -1149,12 +1182,21 @@
      appears outside the loading iris. This is the *legacy* card: the settings switch
      ("Legacy mode", General tab) falls back to exactly this, so nothing above or in this
      rule changes — the new variations below are added alongside it rather than over it. */
+  /* Drawn as a 3px gradient across the top of a layer the full size of the card, with the
+     card's own radius, rather than as a 3px-tall rectangle: a rectangle has square ends,
+     and wherever the card isn't clipping — the desktop claim stack's `overflow: visible`
+     boxes, or a tilted card mid-transform — those ends stuck out past the rounded corners.
+     A full-size layer with `border-radius: inherit` follows the curve on its own. `-1px`
+     puts it on the border box so the bar sits flush with the top edge, as it did. */
   .claim-card::before {
     content: "";
     position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 3px;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    inset: -1px;
+    border-radius: inherit;
+    /* 4px on the border box: where the card clips (single-card mode, `overflow: hidden`) the
+       clip is the padding box, one pixel in, which leaves the 3px bar it always was. */
+    background: linear-gradient(90deg, var(--accent), var(--accent-2)) top / 100% 4px no-repeat;
+    pointer-events: none;
   }
 
   /* ---------------------------------------------- the verdict card variations
@@ -1326,42 +1368,25 @@
     100% { background-position: 0% 50%; }
   }
 
-  /* A box that has just stopped shimmering (`settleClaimPane` in app.js). Claims settle one
-     at a time and several seconds apart, anywhere in the grid — including above where the
-     reader is looking — so the border lights up once and fades back rather than the box
-     silently swapping its contents. It is the one moment in a long check where something
-     the reader can actually *read* arrives, and it should be findable without re-scanning
-     the grid. Plays once and stops; the class is never removed because there is nothing
-     left for it to do. */
-  .claim-pane.just-settled { animation: claim-settle 1.4s ease-out 1; }
-  @keyframes claim-settle {
-    0%   { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent); }
-    100% { border-color: var(--border); box-shadow: none; }
+  /* A claim box arriving — the TRASE Design System's ClaimStack entrance, ported as is: up
+     16px and in, once, on its own easing. It goes on a box only the render it is new
+     (`loadingClaimHTML`'s `isNew`, or a finished result shown fresh in `claimPanesHTML`);
+     boxes already on screen are redrawn without it, so a new claim landing moves nothing
+     but itself. This replaced a FLIP "split" that animated every box from the old loading
+     card's rect with a non-uniform scale — text visibly squashed and stretched for a full
+     second — plus a staggered re-fade of every box on every rebuild, and a border flash on
+     each settle. The DS does none of that; a box settling into its analysis is just the
+     height transition below. `--stack-delay` is a short stagger for a whole result at once. */
+  .claim-pane.stack-in {
+    animation: claim-stack-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: var(--stack-delay, 0s);
   }
-
-  /* The single loading card growing into per-claim boxes as the model names them — see
-     renderClaimSkeletons and, for the position/size half of this, flipClaimsPane in app.js.
-     flipClaimsPane is what makes the grid read as the original card actually dividing into
-     these pieces rather than boxes appearing in a bigger grid: it measures each box before
-     and after a rebuild and animates a FLIP transform from its old rect to its new one, so a
-     box that already existed visibly slides/resizes into its new slot and a brand new box
-     grows out of whatever single box preceded it (ported from the TRASE Design System's
-     ClaimGridSplit, whose stage-keyed absolute layout this achieves the same "mitosis"
-     motion for any claim count rather than the DS demo's fixed four).
-     This opacity-only rule is deliberately *not* also animating `transform` the way it used
-     to (a plain scale/translateY pop) — flipClaimsPane sets `transform` on the same element
-     via the Web Animations API, and a class-driven CSS `transition` on the same property
-     would fight it, since the two can't agree on what "in" means for a box FLIP is actively
-     moving through space. Opacity has no such conflict, so it stays here, stagger and all. */
-  .claim-grid-loading .claim-pane[data-reveal] { opacity: 0; }
-  .claim-grid-loading .claim-pane.in {
-    opacity: 1;
-    /* Matches flipClaimsPane's slower 1100ms/ease-out FLIP transform (app.js) — the fade
-       used to finish (0.32s) well before that motion did, so a box would go fully opaque
-       mid-slide instead of arriving solid right as it settled into its cell. */
-    transition: opacity 0.6s cubic-bezier(.2,1,.3,1);
-    transition-delay: var(--split-delay, 0s);
+  @keyframes claim-stack-in {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
+  [data-motion="reduced"] .claim-pane.stack-in { animation: none; }
+  @media (prefers-reduced-motion: reduce) { .claim-pane.stack-in { animation: none; } }
   /* A box already in the stack changing height — a skeleton settling into its real analysis
      — animates rather than snapping, which is what the DS's `.claim-stack-cell` does with
      its own measured height. Here the box owns its height directly, so the transition goes
@@ -1628,8 +1653,13 @@
   .claim-text.in { opacity: 1; transform: translateY(0); }
   .claim-text code { font-family: var(--font-mono); font-size: 0.85em; background: var(--surface-raised); padding: 0.1em 0.35em; border-radius: 4px; }
   .claim-text pre { font-family: var(--font-mono); font-size: 0.8em; background: var(--surface-raised); padding: 10px; border-radius: 8px; overflow-x: auto; }
-  .claim-text a.citation { color: var(--accent); text-decoration: none; }
-  .claim-text a.citation:hover { text-decoration: underline; }
+  .claim-text a.citation,
+  .context-note-text a.citation,
+  .overview-text a.citation { color: var(--accent); text-decoration: none; }
+  .claim-text a.citation:hover,
+  .context-note-text a.citation:hover,
+  .overview-text a.citation:hover { text-decoration: underline; }
+  .overview-text strong, .context-note-text strong { color: var(--ink); }
 
   /* ---------- The landing page ----------
      The TRASE Design System's "App shell — Landing" screen, ported at its own size.
@@ -1651,14 +1681,33 @@
        reaches back over it — see `.landing-hud` and `.landing-entry` below. Lives here
        rather than on the HUD so both can read it. */
     --hud-scale: 1.204;
+    /* Height of the band the two buttons float in — the scroller pads its top by this much
+       so the page starts below them, then scrolls up underneath them. */
+    --lshell-bar: 76px;
     display: flex; flex-direction: column;
     flex: 1 1 auto; min-height: 0; width: 100%;
+    position: relative;
   }
+  /* Not a bar: two buttons floating over the page. This used to be a row of its own above
+     the scroller, which made the scroller's top edge a hard line 76px down the window — on
+     any screen short enough to scroll, the page slid up and was sliced off along it, under
+     a strip of empty background. Now the scroller runs the full height of the window and
+     only the buttons themselves sit over it; the row passes clicks through everywhere else. */
   .lshell-topbar {
-    flex: 0 0 auto;
+    position: absolute; top: 0; left: 0; right: 0; z-index: 3;
+    height: var(--lshell-bar); box-sizing: border-box;
     display: flex; align-items: center; justify-content: space-between;
     padding: 20px 32px;
+    pointer-events: none;
   }
+  .lshell-topbar > * { pointer-events: auto; }
+  /* With the page scrolling underneath them, the buttons need their own backing to stay
+     legible over whatever passes behind — the wordmark, the HUD's rings, the composer. */
+  .lshell-topbar .icon-btn-plain {
+    background: color-mix(in oklab, var(--bg) 72%, transparent);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  }
+  .lshell-topbar .icon-btn-plain:hover { background: var(--surface-raised); }
   .icon-btn-plain {
     width: 36px; height: 36px; flex-shrink: 0;
     border-radius: 8px;
@@ -1675,7 +1724,7 @@
      left to fight with this one. */
   .lshell-scroll {
     flex: 1 1 auto; min-height: 0; overflow-y: auto;
-    padding: 8px 32px 48px;
+    padding: calc(var(--lshell-bar) + 8px) 32px 48px;
     display: flex; flex-direction: column; align-items: center;
   }
   /* A column flex container shrinks its items to fit before it will overflow, and every
@@ -1809,8 +1858,9 @@
   /* Phone: the DS's "Mobile Landing" is the same composition with its margins and type
      pulled in, not a different one — same single markup path, same order. */
   @media (max-width: 520px) {
+    .landing { --lshell-bar: 64px; }
     .lshell-topbar { padding: 14px 16px; }
-    .lshell-scroll { padding: 4px 16px 32px; }
+    .lshell-scroll { padding: calc(var(--lshell-bar) + 4px) 16px 32px; }
     .brand-mark { width: 44px; height: 44px; margin-bottom: 10px; }
     .landing-wordmark { font-size: 32px; }
     .landing-tagline { font-size: 11px; margin-top: 10px; }
@@ -2231,6 +2281,9 @@
     font-variant-numeric: tabular-nums; white-space: nowrap;
     cursor: pointer; transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
   }
+  /* A chip and the punctuation right after it (see `linkTimestamps`), so a line never
+     starts with an orphaned full stop. */
+  .ts-keep { white-space: nowrap; }
   .ts-chip svg { width: 0.8em; height: 0.8em; flex: none; opacity: 0.75; }
   .ts-chip:hover { color: var(--ink); border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, transparent); }
   .ts-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2278,6 +2331,93 @@
     text-transform: uppercase; letter-spacing: 0.06em; color: var(--warn);
   }
 
+  /* The model's one line of context about the post as a whole — "this is a sketch; these
+     are the real claims under the jokes" — above the claim boxes (see `contextNoteHTML`).
+     An accent rule rather than the warn-coloured `.notice`: this is information about the
+     post, not a problem with the check. */
+  .context-note {
+    grid-column: 1 / -1;
+    display: flex; gap: 10px; align-items: flex-start;
+    border-left: 2px solid var(--accent);
+    background: color-mix(in oklab, var(--accent) 7%, transparent);
+    border-radius: 0 10px 10px 0;
+    padding: 10px 14px; margin-bottom: 12px;
+    color: var(--ink-dim);
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .claims-pane > .context-note { margin-bottom: 0; }
+  .context-note.in { opacity: 1; transform: translateY(0); }
+  .context-note > svg { width: 16px; height: 16px; flex: none; margin-top: 3px; color: var(--accent); }
+  .context-note-text { font-size: 14px; line-height: 1.5; min-width: 0; }
+  .context-note-text p { margin: 0 0 6px; }
+  .context-note-text > :last-child { margin-bottom: 0; }
+
+  .context-note-text + .source-pills { margin-top: 8px; }
+  .context-note > .context-note-body { min-width: 0; flex: 1 1 auto; }
+
+  /* The model's overall read of the post (see `overviewCardHTML`), above the claims. A
+     `<details>`: closed it is one line — the label and the start of the summary — so it
+     never pushes the claims down; open it is the whole paragraph and whatever it cites.
+     The settings switch (General → Overview card) hides it with `data-overview="off"`
+     rather than re-rendering, the same CSS-only approach as Legacy mode. */
+  .overview-card {
+    grid-column: 1 / -1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 0;
+    opacity: 0; transform: translateY(4px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .overview-card.in { opacity: 1; transform: translateY(0); }
+  [data-overview="off"] .overview-card { display: none; }
+  .overview-card > summary {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px;
+    cursor: pointer; list-style: none;
+    border-radius: 14px;
+  }
+  .overview-card > summary::-webkit-details-marker { display: none; }
+  .overview-card > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .overview-label {
+    flex: none;
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent);
+  }
+  .overview-peek {
+    flex: 1 1 auto; min-width: 0;
+    font-size: 13.5px; color: var(--ink-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* No intrinsic width of its own: a one-line peek of a whole paragraph is as wide as the
+       paragraph, and without this that width fed the pane's min-content and squeezed the
+       video column beside it to make room for text that is truncated anyway. */
+    contain: inline-size;
+  }
+  .overview-card[open] .overview-peek { visibility: hidden; }
+  .overview-chevron { width: 16px; height: 16px; flex: none; color: var(--muted); transition: transform 0.2s ease; }
+  .overview-card[open] .overview-chevron { transform: rotate(180deg); }
+  .overview-body { padding: 0 16px 14px; }
+  .overview-body .overview-text { font-size: 14.5px; line-height: 1.6; color: var(--ink-dim); }
+  .overview-body .overview-text p { margin: 0 0 8px; }
+  .overview-body .overview-text > :last-child { margin-bottom: 0; }
+  .overview-body .source-pills { margin-top: 12px; }
+
+  /* Sources nothing on screen cites — the turn retrieved them, but no claim, intro or
+     overview names them (an answer cut off before it cited, usually). Their own row after
+     the last claim, labelled, rather than inside the last claim's card, where they read as
+     that claim's evidence. */
+  .other-sources {
+    grid-column: 1 / -1;
+    padding: 2px 4px;
+  }
+  .other-sources .source-pills { border-top: none; margin-top: 0; padding-top: 0; }
+  .source-pills-label {
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+    margin-bottom: 8px;
+  }
+
   .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .badge {
     display: inline-flex; align-items: center; gap: 6px;
@@ -2286,27 +2426,19 @@
      sentence case in the middle of a card it read as one more label. */
     font-size: 11.5px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.03em;
-    opacity: 0; transform: scale(0.5) rotate(-6deg);
   }
-  .badge-icon {
-    width: 12px; height: 12px; flex-shrink: 0;
-    opacity: 0; transform: scale(0.3);
-  }
-  .badge.in { animation: stamp-in 0.42s cubic-bezier(.2,1.4,.4,1) forwards; }
-  /* The icon lands a beat after the badge itself settles — a little confirmation click
-     right as the stamp stops moving, rather than arriving already baked into the same
-     scale/rotate the pill stamps in with. */
-  .badge.in .badge-icon { animation: badge-icon-pop 0.3s cubic-bezier(.2,1.4,.4,1) 0.3s forwards; }
-  @keyframes stamp-in {
-    0%   { opacity: 0; transform: scale(0.5) rotate(-6deg); }
-    60%  { opacity: 1; transform: scale(1.08) rotate(2deg); }
-    100% { opacity: 1; transform: scale(1) rotate(0deg); }
-  }
-  @keyframes badge-icon-pop {
-    0%   { opacity: 0; transform: scale(0.3); }
-    70%  { opacity: 1; transform: scale(1.25); }
-    100% { opacity: 1; transform: scale(1); }
-  }
+  .badge-icon { width: 12px; height: 12px; flex-shrink: 0; }
+  /* The DS's VerdictBadge has no entrance of its own — it arrives with its card. This is the
+     least that still reads as arrival: a short fade with no movement. It used to stamp in
+     (scale from half size, a 6° twist, overshoot) with its icon popping in a beat later,
+     which inside a card that was itself sliding in was three motions for one verdict. */
+  /* Keyed on `data-reveal`, which only a badge that is actually arriving carries (see
+     `revealAttrs`): a badge redrawn already-settled — every box above a newly streamed
+     claim, and every badge again when the finished result replaces the loading stack —
+     is simply there, rather than fading out and back in under the reader. */
+  .badge[data-reveal] { opacity: 0; }
+  .badge[data-reveal].in { animation: badge-in 0.3s ease-out forwards; }
+  @keyframes badge-in { from { opacity: 0; } to { opacity: 1; } }
   /* Derived from the tokens rather than hard-coded rgba: the four verdict hues moved when
      the palette was raised for contrast, and a badge that kept the old literals would have
      been tinted one colour and lettered another. `color-mix` against `transparent` is the
@@ -3079,6 +3211,8 @@
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* Shrink-wrapped for the same reason as `.shell-title`. */
+    display: inline-block; max-width: 100%; vertical-align: top;
     /* Same fade-around-the-swap treatment as `.shell-title` — see its own comment. */
     opacity: 1;
     transition: opacity 0.3s ease;
@@ -3370,6 +3504,10 @@
       border-radius: 100px;
       background: rgba(10,12,16,0.55);
       backdrop-filter: blur(8px);
+      /* The scrim is dark in both themes — it sits over video, not over the page — so the
+         text can't follow the theme's accent: in light mode that is a dark teal, and the
+         link to the original post was dark text on a dark pill. */
+      color: #f2f5f7;
     }
 
     /* The stack itself: video strip, then sheet. No `justify-content: flex-end` any more —
@@ -3483,6 +3621,15 @@
     }
     /* Says "there is more of this" without a row of dots pretending to be text — the last
        visible line fades into the card rather than being sliced flat by its own clamp. */
+    /* The clamp above is exactly two lines of text, which only holds while the lines sit
+       on that grid. A list item's margin or a paragraph's gap shifts everything under it
+       off the grid, and the clamp then sliced a line through the middle of its glyphs (the
+       second bullet of a two-bullet claim was the usual casualty). Collapsed, the blocks
+       stack with no gaps between them; expanding gives the spacing back. */
+    .claim-pane:not(.expanded) .claim-text :is(p, ul, ol, li, blockquote, h4, pre) {
+      margin-top: 0; margin-bottom: 0;
+    }
+    .claim-pane:not(.expanded) .claim-text :is(blockquote) { padding-top: 0; padding-bottom: 0; }
     .claim-pane:not(.expanded) .claim-text::after {
       content: "";
       position: absolute; left: 0; right: 0; bottom: 0;
@@ -3747,6 +3894,8 @@
   [data-motion="reduced"] .claim-text,
   [data-motion="reduced"] .badge,
   [data-motion="reduced"] .notice,
+  [data-motion="reduced"] .context-note,
+  [data-motion="reduced"] .overview-card,
   [data-motion="reduced"] .check-duration,
   [data-motion="reduced"] .source-pills,
   [data-motion="reduced"] .seal-check,
@@ -3757,8 +3906,6 @@
   [data-motion="reduced"] .topbar-title,
   [data-motion="reduced"] .topbar-sub,
   [data-motion="reduced"] .skeleton-line,
-  [data-motion="reduced"] .claim-pane.just-settled,
-  [data-motion="reduced"] .claim-grid-loading .claim-pane,
   [data-motion="reduced"] .live-sources .source-pill,
   [data-motion="reduced"] .ts-chip.playing,
   [data-motion="reduced"] .listening-wave span,
@@ -3777,12 +3924,11 @@
      should never matter in practice — kept anyway, the same way every other JS-gated
      animation in this file still gets a CSS-level fallback. */
   [data-motion="reduced"] .analyzing-overlay { display: none !important; }
-  /* `.badge`/`.badge-icon` reach their visible state only through the stamp-in/pop
-     keyframes' `forwards` fill — unlike the `.in`-class/`transition` pairs above, killing
+  /* `.badge` reaches its visible state only through the badge-in keyframes' `forwards`
+     fill — unlike the `.in`-class/`transition` pairs above, killing
      the animation with nothing else in its place would leave every badge and its icon
-     stuck at their 0%-keyframe opacity (invisible) instead of just arriving instantly. */
+     stuck at its 0%-keyframe opacity (invisible) instead of just arriving instantly. */
   [data-motion="reduced"] .badge.in { opacity: 1; transform: none; }
-  [data-motion="reduced"] .badge.in .badge-icon { opacity: 1; transform: none; }
   /* The loading dial and the brand HUD each carry many descendants with their own
      `animation` — one per ring/tick/core/node, times three variants for the dial — so this
      is a wildcard rather than each one named individually the way the rest of this list is. */
@@ -3790,7 +3936,7 @@
   [data-motion="reduced"] .brand-hud * { animation: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
-    .claim-text, .badge, .notice, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.just-settled, .claim-grid-loading .claim-pane, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
+    .claim-text, .badge, .notice, .context-note, .overview-card, .check-duration, .source-pills, .seal-check, .thread-spinner, .stage-text, .shell-title, .shell-sub, .topbar-title, .topbar-sub, .mini-progress-bar, .skeleton-line, .claim-pane.stack-in, .live-sources .source-pill, .ts-chip.playing, .listening-wave span, .listening-wave, .listening-label, .source-expand, .source-expand-item, .bolt, .summary-num.rolling { animation: none !important; transition: none !important; }
     .badge.in { opacity: 1; transform: none; }
     .badge.in .badge-icon { opacity: 1; transform: none; }
     .iris-wrap *, .brand-hud * { animation: none !important; }
@@ -4349,6 +4495,16 @@
             </div>
             <label class="switch">
               <input type="checkbox" id="setting-legacy-cards" aria-labelledby="label-legacy-cards" />
+              <span class="track"></span><span class="thumb"></span>
+            </label>
+          </div>
+          <div class="settings-row">
+            <div>
+              <div class="settings-row-label" id="label-overview">Overview card</div>
+              <div class="settings-row-sub">A short, expandable summary of what the post argues as a whole and how it holds up, above the claims.</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-overview" aria-labelledby="label-overview" />
               <span class="track"></span><span class="thumb"></span>
             </label>
           </div>
