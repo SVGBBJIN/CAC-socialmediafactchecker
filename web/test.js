@@ -34,6 +34,8 @@ import {
   supportsAgenticVideo,
   videoProcessingFromEnv,
   resetClipCache,
+  resolveVideoTitles,
+  describeVideoTitle,
 } from "./lib/gemini.js";
 import {
   withRetry,
@@ -4570,4 +4572,51 @@ test("a callback that throws does not take the clip down with it", async () => {
 
   const contents = toGeminiContents([{ role: "user", content: SOURCE_URL }], { clips });
   assert.ok(contents[0].parts[0].inline_data, "the clip attached anyway");
+});
+
+
+/* ---------------------------------------------------------------- YouTube titles */
+
+test("a YouTube video's title rides in beside the video it names", () => {
+  // The model is handed the video as a file_data URL and nothing else, so without this it
+  // never saw the title — often the biggest claim the post makes.
+  const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const [turn] = toGeminiContents([{ role: "user", content: `Fact-check this video: ${url}` }], {
+    videoTitles: new Map([["dQw4w9WgXcQ", { title: "How Washington's Election Led to Minecraft", authorName: "Someone" }]]),
+  });
+  const text = turn.parts.find((part) => part.text).text;
+  assert.match(text, /is titled: How Washington's Election Led to Minecraft — posted by Someone/);
+  assert.ok(turn.parts.some((part) => part.file_data), "the video is still attached");
+
+  // No title, no note — the turn is exactly what it was.
+  const [plain] = toGeminiContents([{ role: "user", content: `Fact-check this video: ${url}` }]);
+  assert.doesNotMatch(plain.parts.find((part) => part.text).text, /is titled/);
+});
+
+test("describeVideoTitle collapses whitespace and says nothing without a title", () => {
+  assert.equal(describeVideoTitle("dQw4w9WgXcQ", { title: null }), null);
+  assert.match(describeVideoTitle("dQw4w9WgXcQ", { title: "A\n  title" }), /is titled: A title\./);
+});
+
+test("resolveVideoTitles looks up each linked video once and drops failures", async () => {
+  const asked = [];
+  const fetchImpl = async (url) => {
+    asked.push(url);
+    if (url.includes("bbbbbbbbbbb")) return new Response("nope", { status: 404 });
+    return new Response(JSON.stringify({ title: "The title", author_name: "Chan" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const titles = await resolveVideoTitles(
+    [
+      { role: "user", content: "https://youtu.be/aaaaaaaaaaa and https://youtu.be/bbbbbbbbbbb" },
+      { role: "assistant", content: "https://youtu.be/ccccccccccc" },
+      { role: "user", content: "again https://www.youtube.com/watch?v=aaaaaaaaaaa" },
+    ],
+    { fetchImpl },
+  );
+  assert.equal(asked.length, 2, "one lookup per distinct video, none for the assistant's turn");
+  assert.deepEqual([...titles.keys()], ["aaaaaaaaaaa"]);
+  assert.equal(titles.get("aaaaaaaaaaa").title, "The title");
 });

@@ -29,6 +29,7 @@ import {
   BROWSER_RESOLVE_TIMEOUT_MS,
 } from "./browser-resolve.js";
 import { fetchPostPreview } from "./post-preview.js";
+import { fetchYouTubeOEmbed } from "./youtube.js";
 import {
   modelHealth,
   planChain,
@@ -1450,6 +1451,7 @@ export function toGeminiContents(
     attachVideos = true,
     extraNotes = [],
     videoProcessing = MEDIA_PROCESSING_AGENTIC,
+    videoTitles = null,
   } = {},
 ) {
   const attachedVideos = new Set();
@@ -1516,6 +1518,9 @@ export function toGeminiContents(
         // `MEDIA_PROCESSING_AGENTIC`.
         if (videoProcessing) video.media_processing = videoProcessing;
         parts.push(video);
+        // The title, beside the video it names — the same place a TikTok's caption goes.
+        const titleNote = videoTitles?.has(id) ? describeVideoTitle(id, videoTitles.get(id)) : null;
+        if (titleNote) notes.push(titleNote);
       }
 
       // The same provider list the links were resolved with, so a caller that narrowed or
@@ -1970,6 +1975,49 @@ class ModelTurn {
  * round announces itself first with `{type: "tool_start", calls}` so the consumer can show
  * what is in flight rather than only what has landed.
  */
+/**
+ * How long the YouTube title lookup may take. It runs alongside clip attachment, which for a
+ * YouTube-only turn is nothing at all — so this is the whole of what it can add to time to
+ * first token, and it is held well under the oEmbed client's own 8s default.
+ */
+export const VIDEO_TITLE_TIMEOUT_MS = 2_500;
+
+/**
+ * Titles for every YouTube video the user's turns link to, keyed by video ID.
+ *
+ * A YouTube video reaches Gemini as a `file_data` URL and nothing else, so the model watched
+ * the video and never saw its title — and a title is often the biggest claim a post makes
+ * ("How Washington's Election Led to Minecraft" *is* the video's thesis). TikTok and
+ * Instagram never had this gap: their caption rides in beside the clip (`describeClip`).
+ * Best-effort throughout: a lookup that fails or runs out of time is simply no note.
+ */
+export async function resolveVideoTitles(messages, { fetchImpl = fetch, signal, timeoutMs = VIDEO_TITLE_TIMEOUT_MS } = {}) {
+  const ids = new Set();
+  for (const message of messages ?? []) {
+    if (message?.role === "assistant") continue;
+    for (const id of findYouTubeVideoIDs(String(message?.content ?? ""))) ids.add(id);
+  }
+  const titles = new Map();
+  await Promise.all(
+    [...ids].map(async (id) => {
+      const info = await fetchYouTubeOEmbed(canonicalYouTubeURL(id), { fetchImpl, signal, timeoutMs });
+      if (info?.title) titles.set(id, info);
+    }),
+  );
+  return titles;
+}
+
+/** The title note that rides beside an attached YouTube video — see `resolveVideoTitles`. */
+export function describeVideoTitle(id, { title, authorName } = {}) {
+  if (!title) return null;
+  const clean = (text) => String(text).replace(/\s+/g, " ").trim().slice(0, MAX_CAPTION_CHARS);
+  return (
+    `[The YouTube video at ${canonicalYouTubeURL(id)} is titled: ${clean(title)}` +
+    (authorName ? ` — posted by ${clean(authorName)}` : "") +
+    `. The title is the poster's own framing of the video, part of what you are checking.]`
+  );
+}
+
 export async function* streamChat({
   apiKey,
   messages,
@@ -1998,6 +2046,10 @@ export async function* streamChat({
   // one by default. /api/chat opts in — see the note there.
   attachPages = false,
   articleOptions = {},
+  // Look up each linked YouTube video's title and give it to the model beside the video —
+  // see `resolveVideoTitles`. Opt-in like `attachPages`, because it is a network call a
+  // caller should choose to make; /api/chat opts in.
+  videoTitles = false,
   // An async provider for extra prompt context the caller gathered *during* attachment —
   // work it started off the back of `clipOptions.onResolved` and wants in front of the
   // model. Returns strings, appended to the last user turn by `toGeminiContents`. Kept as
@@ -2016,6 +2068,9 @@ export async function* streamChat({
   const deadline = new StreamDeadline(signal);
   let clips = null;
   let articles = null;
+  // Started now so it runs under the clip attachment rather than after it; collected below.
+  const titlesPending =
+    attachMedia && videoTitles ? resolveVideoTitles(messages, { fetchImpl, signal }).catch(() => null) : null;
 
   try {
     // Clips are fetched before the first model call, not per model: the bytes are the same
@@ -2075,12 +2130,16 @@ export async function* streamChat({
     }
     if (deadline.callerAborted) return;
 
+    const titles = titlesPending ? await titlesPending : null;
+    if (deadline.callerAborted) return;
+
     const contents = toGeminiContents(messages, {
       clips,
       articles,
       attachVideos: attachMedia,
       extraNotes,
       videoProcessing,
+      videoTitles: titles,
     });
 
     // Which parts asked for agentic video, captured **once**, here, rather than re-read

@@ -27,7 +27,7 @@ import {
   activeAt,
 } from "./timestamps.js";
 import { parseBlocks } from "./markdown.js";
-import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimsPreamble, claimDiff, aggregateVerdictKey } from "./claims.js";
+import { VERDICTS, NO_CLAIMS, splitVerdict, splitClaims, claimsPreamble, claimsOverview, attributeSources, claimDiff, aggregateVerdictKey } from "./claims.js";
 import * as accounts from "./auth.js";
 import { checkIdFromPath, pathForCheck, shareURL } from "./deeplink.js";
 import { filterLibrary, platformsIn, verdictsIn } from "./library-search.js";
@@ -181,6 +181,7 @@ const el = {
   settingReducedMotion: document.getElementById("setting-reduced-motion"),
   settingHighContrast: document.getElementById("setting-high-contrast"),
   settingLegacyCards: document.getElementById("setting-legacy-cards"),
+  settingOverview: document.getElementById("setting-overview"),
   settingFontSize: document.getElementById("setting-font-size"),
   settingTheme: document.getElementById("setting-theme"),
   settingSourceTiers: document.getElementById("setting-source-tiers"),
@@ -317,6 +318,9 @@ const DEFAULT_SETTINGS = {
   // on falls back to the older single top bar. Stored rather than derived so a reader who
   // prefers the flatter box keeps it across checks — see `applySettings`.
   legacyCards: false,
+  // The expandable overview card above the claims (see `overviewCardHTML`). On by default;
+  // off hides it with CSS, so flipping it never re-renders a check.
+  showOverview: true,
   systemPrompt: "", // appended to every outgoing message, see withCustomInstructions
   sidebarCollapsed: false, // the library rail, toggled by sidebarCollapseBtn
   // Which kinds of publisher a check may cite (see public/source-quality.js). Sent with every
@@ -376,6 +380,7 @@ function applySettings() {
   // mode is on (see `verdictPaneClass`), so flipping this restyles what is on screen
   // without re-rendering — and without disturbing a check that is mid-stream.
   setAttrIf(root, "data-cards", settings.legacyCards, "legacy");
+  setAttrIf(root, "data-overview", !settings.showOverview, "off");
   setAttrIf(root, "data-font-size", settings.fontSize === "large", "large");
   setAttrIf(root, "data-sidebar", settings.sidebarCollapsed, "collapsed");
   if (el.sidebarCollapseBtn) {
@@ -2782,14 +2787,27 @@ function turnBodyHTML(turn, sources, animate, seekable) {
       <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(turn.answer, sources, seekable)}</div>
       ${badgeHTML(turn.verdictKey, animate)}`;
   }
-  return contextNoteHTML(turn.rawAnswer, sources, seekable, animate) + turn.claims
-    .map(
-      (claim) => `
+  const attributed = attributeSources({ ...turn, sources });
+  return (
+    contextNoteHTML(turn.rawAnswer, sources, seekable, animate, attributed.preamble) +
+    overviewCardHTML(turn.rawAnswer, sources, seekable, animate, attributed.overview) +
+    turn.claims
+      .map(
+        (claim, index) => `
       <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, sources, seekable)}</p>
       <div ${revealAttrs("thread-a claim-text", animate)}>${renderMarkdown(claim.text, sources, seekable)}</div>
-      ${badgeHTML(claim.verdictKey, animate)}`,
-    )
-    .join("");
+      ${badgeHTML(claim.verdictKey, animate)}
+      ${sourcePillsHTML(attributed.claims[index], animate)}`,
+      )
+      .join("")
+  );
+}
+
+/** The pills under a whole thread item: every source for a plain answer, or — when the turn
+ * was split into claims, each carrying its own — only the ones none of them cites. */
+function turnSourcesHTML(turn, animate) {
+  if (!turn.claims) return sourcePillsHTML(turn.sources, animate);
+  return sourcePillsHTML(attributeSources(turn).other, animate, "Other sources");
 }
 
 /** One chat turn's markup, the same shape as an entry's follow-up thread item — see
@@ -2811,7 +2829,7 @@ function chatThreadHTML(newestIndex) {
           ${incompleteHTML(c.incomplete, animate)}
           ${durationHTML(c.durationMs, animate, "Answered in")}
           ${chatEntryId ? actionRowHTML(chatEntryId, index, "turn") : ""}
-          ${sourcePillsHTML(c.sources, animate)}
+          ${turnSourcesHTML(c, animate)}
         </div>`;
     })
     .join("");
@@ -4124,14 +4142,53 @@ function renderErrorCard(entry) {
  * nowhere (see `claimsPreamble`). Rendered as markdown, since it can carry a citation or a
  * timestamp like any other sentence the model writes.
  */
-function contextNoteHTML(rawAnswer, sources, seekable, animate) {
+function contextNoteHTML(rawAnswer, sources, seekable, animate, ownSources = []) {
   const preamble = claimsPreamble(rawAnswer);
   if (!preamble) return "";
   return `
     <div ${revealAttrs("context-note", animate)}>
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5.5M12 7.6v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      <div class="context-note-text">${renderMarkdown(preamble, sources, seekable)}</div>
+      <div class="context-note-body">
+        <div class="context-note-text">${renderMarkdown(preamble, sources, seekable)}</div>
+        ${sourcePillsHTML(ownSources, false)}
+      </div>
     </div>`;
+}
+
+/**
+ * The model's overall read of the post — what it argues as a whole and how that holds up —
+ * as a collapsed card above the claims (see `claimsOverview`). Closed, it is one line: the
+ * label and the start of the summary. Hidden entirely by the Overview card setting, via CSS
+ * (`data-overview="off"`), so the switch never has to re-render a check.
+ */
+function overviewCardHTML(rawAnswer, sources, seekable, animate, ownSources = []) {
+  const overview = claimsOverview(rawAnswer);
+  if (!overview) return "";
+  // The peek is plain text — a line of the summary, not a second rendering of it — so the
+  // markers come out rather than showing as `[2]` and `[t=0:12]` in a single-line preview.
+  const peek = plainTimestamps(overview)
+    .replace(/\s*\[\d+(?:\s*[,;]\s*\d+)*\]/g, "")
+    .replace(/[*_`#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `
+    <details ${revealAttrs("overview-card", animate)}>
+      <summary>
+        <span class="overview-label">Overview</span>
+        <span class="overview-peek">${escapeHTML(peek)}</span>
+        <svg class="overview-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </summary>
+      <div class="overview-body">
+        <div class="overview-text">${renderMarkdown(overview, sources, seekable)}</div>
+        ${sourcePillsHTML(ownSources, false)}
+      </div>
+    </details>`;
+}
+
+/** The sources nothing on screen cites, in their own labelled row after the claims. */
+function otherSourcesHTML(sources, animate) {
+  if (!sources.length) return "";
+  return `<div class="other-sources">${sourcePillsHTML(sources, animate, "Other sources")}</div>`;
 }
 
 function incompleteHTML(incomplete, animate) {
@@ -4306,12 +4363,13 @@ const sourcePillsStore = new Map();
  * narrower thing — pills that don't fit the row's width — via `collapseSourcePillsOverflow`,
  * not a return of that old per-source detail list.
  */
-function sourcePillsHTML(sources, animate) {
+function sourcePillsHTML(sources, animate, label = null) {
   if (!sources?.length) return "";
   const key = `sp${++sourcePillsSeq}`;
   sourcePillsStore.set(key, sources);
   return `
     <div ${revealAttrs("source-pills", animate)} data-source-pills="${key}">
+      ${label ? `<div class="source-pills-label">${escapeHTML(label)}</div>` : ""}
       <div class="source-pills-row" aria-label="Checked against ${sources.length} source${sources.length === 1 ? "" : "s"}">
         ${sources.map(sourcePillHTML).join("")}
       </div>
@@ -4606,7 +4664,7 @@ function threadHTML(entry, newestIndex) {
           ${incompleteHTML(f.incomplete, animate)}
           ${durationHTML(f.durationMs, animate, "Answered in")}
           ${actionRowHTML(entry.id, index)}
-          ${sourcePillsHTML(f.sources, animate)}
+          ${turnSourcesHTML(f, animate)}
         </div>`;
     })
     .join("");
@@ -4645,7 +4703,7 @@ function threadHTML(entry, newestIndex) {
  * given a card of their own; they're appended to the last claim's pane, the same place
  * they'd read as "the end of the analysis" when there was only one card to put them in.
  */
-function claimPanesHTML(entry, animate, newestFollowup) {
+function claimPanesHTML(entry, animate, newestFollowup, attributed = attributeSources(entry)) {
   const { claims } = entry;
   return claims
     .map((claim, index) => {
@@ -4654,7 +4712,6 @@ function claimPanesHTML(entry, animate, newestFollowup) {
         ? `${incompleteHTML(entry.incomplete, animate)}
            ${durationHTML(entry.durationMs, animate)}
            ${actionRowHTML(entry.id, null)}
-           ${sourcePillsHTML(entry.sources, animate)}
            ${threadHTML(entry, newestFollowup)}`
         : "";
 
@@ -4672,6 +4729,7 @@ function claimPanesHTML(entry, animate, newestFollowup) {
           ${badgeHTML(claim.verdictKey, animate)}
           <p ${revealAttrs("claim-title", animate)}>${claimTitleHTML(claim.title, entry.sources, seekableEntry(entry))}</p>
           <div ${revealAttrs("claim-text", animate)}>${renderMarkdown(claim.text, entry.sources, seekableEntry(entry))}</div>
+          ${sourcePillsHTML(attributed.claims[index], animate)}
           <!-- The tap affordance. On the phone layout this box is clipped to two lines of
                title and two of analysis, and until now the only thing saying so was the
                fade at the bottom of the text, which reads as a rendering fault at least as
@@ -4783,9 +4841,17 @@ function renderResultCard(entry, { animateAnalysis = true, newestFollowup = -1 }
       // and its title is already in the shell's own title bar — a third copy of the same
       // URL, styled as something the reader said, was the check quoting the paste back at
       // them before answering it.
-      summaryCardHTML(entry.claims) +
-        contextNoteHTML(entry.rawAnswer, entry.sources, seekableEntry(entry), animateAnalysis) +
-        claimPanesHTML(entry, animateAnalysis, newestFollowup),
+      (() => {
+        const attributed = attributeSources(entry);
+        const seekable = seekableEntry(entry);
+        return (
+          summaryCardHTML(entry.claims) +
+          contextNoteHTML(entry.rawAnswer, entry.sources, seekable, animateAnalysis, attributed.preamble) +
+          overviewCardHTML(entry.rawAnswer, entry.sources, seekable, animateAnalysis, attributed.overview) +
+          claimPanesHTML(entry, animateAnalysis, newestFollowup, attributed) +
+          otherSourcesHTML(attributed.other, animateAnalysis)
+        );
+      })(),
     );
   } else {
     setClaimsGridMode(null);
@@ -5028,9 +5094,10 @@ function composeCheckPrompt(url) {
     : "";
   return withCustomInstructions(
     `Fact-check this ${subject}: ${url}\n\n` +
-      "List the distinct factual claims it makes and check each one, using the CLAIM " +
+      "Start with the claim the post as a whole is making — its title, caption or thesis — " +
+      "then the distinct factual claims it relies on, and check each one, using the CLAIM " +
       `STRUCTURE from the system prompt — one \`[[claim: …]]\` block per claim, each ` +
-      `ending in its own VERDICT line. If it is comedy, satire or parody, say so in one line ` +
+      `ending in its own VERDICT line, then a short \`[[overview]]\`. If it is comedy, satire or parody, say so in one line ` +
       `first and still check the real claims under the jokes. ${timestamps}`,
   );
 }
@@ -6408,6 +6475,7 @@ function openSettingsDialog() {
   el.settingReducedMotion.checked = settings.reducedMotion;
   el.settingHighContrast.checked = settings.highContrast;
   el.settingLegacyCards.checked = settings.legacyCards;
+  el.settingOverview.checked = settings.showOverview;
   el.settingSystemPrompt.value = settings.systemPrompt;
   updateFontSizeButtons();
   updateThemeButtons();
@@ -6924,6 +6992,11 @@ el.settingHighContrast.addEventListener("change", () => {
 });
 el.settingLegacyCards.addEventListener("change", () => {
   settings.legacyCards = el.settingLegacyCards.checked;
+  persistSettings();
+  applySettings();
+});
+el.settingOverview.addEventListener("change", () => {
+  settings.showOverview = el.settingOverview.checked;
   persistSettings();
   applySettings();
 });

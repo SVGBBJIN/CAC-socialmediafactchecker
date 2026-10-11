@@ -995,6 +995,19 @@ test("the system prompt checks a sketch's real claims instead of waving it throu
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /before the first claim line, and the app\nshows it above the claims/);
 });
 
+test("the system prompt puts the post's own central claim first", () => {
+  // A video titled "How Washington's Election Led to Minecraft" came back with its birthday
+  // and sales figures checked and its actual argument — the causal chain — never mentioned.
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /FIND THE CLAIM THE POST IS MAKING/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /That central claim is your first block, always/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /is a causal claim, and\nit is checked as one/);
+});
+
+test("the system prompt closes a check with an overview after the last verdict", () => {
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /\[\[overview\]\]/);
+  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /nothing follows the final VERDICT/i);
+});
+
 test("the system prompt pins the one timestamp shape", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /one moment per bracket/);
 });

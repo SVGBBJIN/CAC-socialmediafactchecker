@@ -214,6 +214,10 @@ export default async function handler(req, res) {
       // fetch safe and the fencing that keeps the page's own words from being read as
       // instructions.
       attachPages: true,
+      // Look up a linked YouTube video's title and hand it to the model beside the video.
+      // The model otherwise watches the clip with no idea what it is called — and a title
+      // is often the post's biggest claim. See `resolveVideoTitles` in lib/gemini.js.
+      videoTitles: true,
       // Applied to every search this turn runs, so an excluded tier never enters the
       // ledger and therefore cannot be cited — this is a filter on the evidence, not a
       // display option. See `sourceTiers` in lib/verified-chat.js.

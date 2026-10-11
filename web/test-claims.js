@@ -10,6 +10,9 @@ import {
   splitVerdict,
   splitClaims,
   claimsPreamble,
+  claimsOverview,
+  attributeSources,
+  citedNumbers,
   claimDiff,
   aggregateVerdictKey,
 } from "./public/claims.js";
@@ -337,4 +340,92 @@ test("claimsPreamble is null when the answer opens on a claim, or has none", () 
   assert.equal(claimsPreamble("  \n\n[[claim: X]]\nbody"), null);
   assert.equal(claimsPreamble("Just a reply, no claims."), null);
   assert.equal(claimsPreamble(undefined), null);
+});
+
+
+/* ---------------------------------------------------------------- tolerant parsing */
+
+test("splitClaims reads a marker with its body starting on the same line", () => {
+  // The old `$` anchor made this marker invisible, and its whole check merged into the card
+  // above it — two claims rendered as one, under the first one's title.
+  const claims = splitClaims(
+    "[[claim: First]]\nBody one.\nVERDICT: Corroborated\n[[claim: Second]] Body two starts here [2].\nVERDICT: Contradicted",
+  );
+  assert.equal(claims.length, 2);
+  assert.equal(claims[1].title, "Second");
+  assert.equal(claims[1].text, "Body two starts here [2].");
+  assert.equal(claims[1].verdictKey, "contradicted");
+});
+
+test("splitClaims keeps a bracketed timestamp inside the title whole", () => {
+  const [claim] = splitClaims("[[claim: The senator said it [t=0:12-0:18]]]\nbody\nVERDICT: Disputed");
+  assert.equal(claim.title, "The senator said it [t=0:12-0:18]");
+});
+
+test("splitClaims accepts a numbered marker and a dash for the colon", () => {
+  const claims = splitClaims("[[Claim 1: One]]\na\nVERDICT: True\n[[claim — Two]]\nb\nVERDICT: False");
+  assert.deepEqual(claims.map((c) => [c.title, c.verdictKey]), [
+    ["One", "corroborated"],
+    ["Two", "contradicted"],
+  ]);
+});
+
+test("a claim keeps its verdict when something follows the VERDICT line", () => {
+  // A `---` separator or a stray line used to cost the claim its badge, because the verdict
+  // had to be the block's very last line. It only ever has to be in its own block.
+  const claims = splitClaims(
+    "[[claim: A]]\nbody a\nVERDICT: Disputed\n\n---\n\nA stray line.\n[[claim: B]]\nbody b\nVERDICT: Corroborated",
+  );
+  assert.equal(claims[0].verdictKey, "disputed");
+  assert.equal(claims[0].text, "body a\n\nA stray line.");
+  assert.equal(claims[1].verdictKey, "corroborated");
+});
+
+test("text after the last verdict is the overview, not the last claim's body", () => {
+  const unmarked = "[[claim: A]]\nbody\nVERDICT: Contradicted\n\nOverall, the video is mostly wrong.";
+  assert.equal(splitClaims(unmarked)[0].verdictKey, "contradicted");
+  assert.equal(splitClaims(unmarked)[0].text, "body");
+  assert.equal(claimsOverview(unmarked), "Overall, the video is mostly wrong.");
+
+  const marked = "[[claim: A]]\nbody\nVERDICT: Corroborated\n[[overview]]\nIt holds up [1].";
+  assert.equal(splitClaims(marked).length, 1);
+  assert.equal(claimsOverview(marked), "It holds up [1].");
+  assert.equal(claimsOverview("[[claim: A]]\nbody\nVERDICT: Corroborated"), null);
+  assert.equal(claimsOverview("No claims at all."), null);
+});
+
+test("a verdict's span still starts at the newline before it", () => {
+  // The corroboration audit replaces this span with a note and a fresh verdict line, and
+  // relies on the leading newline to keep the two apart.
+  const answer = "[[claim: A]]\nbody\nVERDICT: Corroborated\n\nOverall fine.";
+  const [claim] = splitClaims(answer);
+  assert.equal(claim.verdict.text, "\nVERDICT: Corroborated");
+  assert.equal(answer.slice(claim.verdict.start, claim.verdict.end), claim.verdict.text);
+});
+
+/* ---------------------------------------------------------------- source attribution */
+
+test("citedNumbers reads single and grouped markers, never timestamps", () => {
+  assert.deepEqual(citedNumbers("a [2] b [1, 3] c [2] at [t=0:12] and [0:40]"), ["2", "1", "3"]);
+});
+
+test("attributeSources puts each source on the card that cites it", () => {
+  const sources = [1, 2, 3, 4, 5].map((n) => ({ n, url: `https://e.com/${n}` }));
+  const rawAnswer = [
+    "This is satire [5].",
+    "[[claim: A [1]]]",
+    "body [2]",
+    "VERDICT: Corroborated",
+    "[[claim: B]]",
+    "body [2][3]",
+    "VERDICT: Disputed",
+    "[[overview]]",
+    "Summary.",
+  ].join("\n");
+  const out = attributeSources({ rawAnswer, claims: splitClaims(rawAnswer), sources });
+  assert.deepEqual(out.claims.map((list) => list.map((s) => s.n)), [[1, 2], [2, 3]]);
+  assert.deepEqual(out.preamble.map((s) => s.n), [5]);
+  assert.deepEqual(out.overview, []);
+  // Nothing cites source 4, so it is the only one left for the row after the claims.
+  assert.deepEqual(out.other.map((s) => s.n), [4]);
 });

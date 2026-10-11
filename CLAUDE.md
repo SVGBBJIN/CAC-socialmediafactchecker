@@ -33,7 +33,7 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 681 tests; `worker/`'s is 5.
+this writing the whole suite is 694 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
@@ -215,6 +215,22 @@ was torn out and must not come back — that guessed which sentences in already-
 "looked like" a claim; this only ever acts on a marker the model was explicitly asked to
 write, the same shape `[t=…]` timestamps and the (now per-claim) `VERDICT:` line already
 are. Don't blur the two back together by trying to split an answer some other way.
+
+The parse is deliberately tolerant of the shape drifting while still acting only on those
+markers. A marker must open its line, but body text may follow it on the same line. A
+claim's verdict is the *last* VERDICT line in its own block, so a `---` or a stray line
+after it no longer costs the badge. Text after the final claim (behind an `[[overview]]`
+marker, or bare) is the overview, rendered as a collapsible card above the claims
+(`claimsOverview`; Settings → Overview card hides it). Text before the first marker is a
+context note (`claimsPreamble`): the "this is satire" line. Source pills go on the card
+whose text cites them (`attributeSources`), and anything no card cites goes in an "Other
+sources" row after the claims, never into the last card.
+
+A YouTube video reaches Gemini as a bare `file_data` URL, so its title, often the post's
+biggest claim, is looked up via oEmbed (`resolveVideoTitles` in `lib/gemini.js`, opted
+into by `api/chat.js`, 2.5s cap, run alongside clip attachment) and handed to the model
+in a note beside the video. The prompt's FIND THE CLAIM THE POST IS MAKING section makes
+that central claim, causal chains included, the first block.
 
 The verdict vocabulary is closed — **Contradicted, Disputed, Corroborated, Insufficient
 evidence** — and it is written down twice: as the four labels the prompt asks for, and as

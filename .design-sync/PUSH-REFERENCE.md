@@ -268,6 +268,21 @@ pattern. None introduces a token.
   A chip plus the punctuation after it is wrapped in `.ts-keep` (`white-space: nowrap`), so
   a full stop never starts a line on its own.
 
+### 8. Per-claim sources, the overview card, a bar-less landing
+
+- **Source pills live on their own claim.** Each `.claim-pane` carries a `.source-pills`
+  row of just the sources its text cites. Uncited ones get an `.other-sources` row after
+  the last claim, with a `.source-pills-label` reading "Other sources". The DS's
+  `ClaimCard`/`ClaimStack` still model one shared ledger under the stack.
+- **`.overview-card`** — new. A `<details>`: closed, it shows a mono "Overview" label, a
+  one-line `.overview-peek` (`contain: inline-size`, so it never widens the pane) and a
+  chevron. Open, it shows the summary and its own pills. Behind a new General-tab switch
+  (`data-overview="off"`), so `SettingsMenu` owes a row.
+- **Landing has no top bar.** `.lshell-topbar` is now an absolutely positioned,
+  click-through row holding two blurred-backing buttons, over a full-height `.lshell-scroll`
+  padded by `--lshell-bar`. The DS's landing screen draws a bar row above the scroller,
+  which slices the page on scroll.
+
 ---
 
 ## Permanent divergences — do not "fix" these in either direction
