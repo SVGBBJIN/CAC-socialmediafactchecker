@@ -33,7 +33,7 @@ test-article.js test-browser-resolve.js test-post-preview.js test-device.js
 test-timestamps.js test-claims.js test-markdown.js test-corroboration.js
 test-claim-repair.js test-caption-search.js test-page-shapes.js test-supabase-config.js test-auth-callback.js
 test-youtube.js`). As of
-this writing the whole suite is 686 tests; `worker/`'s is 5.
+this writing the whole suite is 706 tests; `worker/`'s is 5.
 
 Note that `web/design-system/` is **not** part of `web/` — no bundler, no tests, not in the
 request flow. It is a hand-maintained React mirror of `web/public`'s markup, staged there
@@ -143,7 +143,9 @@ model marked Corroborated: do the pages it cited, **taken together**, contain th
 specifics? The set is read as a whole — a two-part claim carried by two sources, one part
 each, is confirmed, which asking each source for everything got wrong. Names
 and figures are required outright (a figure matches a source that rounds to it or states a
-range around it); the claim's other words are required on a scale that
+range around it, and a figure the claim qualifies — "over 300 million", "under 5%", "about 2
+million" — matches a source figure on the right side of it, within 10×, at the same scale,
+never a year); the claim's other words are required on a scale that
 loosens as more names and figures match, because a source that has matched two of them is
 demonstrably about *this claim* and the rest is wording (see the note in `sourceConfirms`).
 A claim nothing confirms is rewritten to **Insufficient evidence** with one app-voiced line

@@ -586,3 +586,82 @@ test("two figures joined by 'and' are not read as a range", () => {
   };
   assert.equal(sourceConfirms("A vote was held in 2022", source).confirms, false);
 });
+
+/* ---------------------------------------------------------------- floors, ceilings, ballparks */
+
+// "Over 300 million" is a floor, not the number 300. Sources reporting 350 million or "over
+// 400 million" carry it; holding them to the literal digits is what lowered a true claim to
+// Insufficient evidence with a note saying none of them mentioned 300.
+
+const page = (snippet, title = "Sales figures") => ({
+  title,
+  url: "https://example.com/sales",
+  domain: "example.com",
+  snippet,
+});
+
+test("a floor is carried by a source stating a larger figure — the reported Minecraft case", () => {
+  const answer = answerOf(
+    "Minecraft has sold over 300 million copies",
+    "The video reports this at [t=0:18]. Sales trackers place total sales between 350 million and over 400 million copies [1][2].",
+    "Corroborated",
+  );
+  const ledger = ledgerOf(
+    { title: "Minecraft sales", url: "https://a.example/minecraft", snippet: "Minecraft has sold more than 350 million copies worldwide." },
+    { title: "Best-selling video games", url: "https://b.example/best", snippet: "Minecraft, at over 400 million copies sold, is the best-selling game." },
+  );
+  const audited = auditCorroboration(answer, ledger);
+  assert.equal(audited.changed, false, JSON.stringify(audited.downgrades));
+});
+
+for (const [claim, snippet] of [
+  ["Minecraft has sold over 300 million copies", "Minecraft has sold 350 million copies."],
+  ["Minecraft has sold more than 300 million copies", "Minecraft copies sold: over 400 million."],
+  ["Minecraft surpassed 300 million copies sold", "Minecraft has sold 302 million copies."],
+  ["Minecraft has sold 300m+ copies", "Minecraft has sold 350 million copies."],
+  ["Minecraft has sold at least 300 million copies", "Minecraft sold an estimated 0.35 billion copies."],
+  ["Minecraft has sold under 400 million copies", "Minecraft has sold 350 million copies."],
+  ["Minecraft has sold about 300 million copies", "Minecraft has sold 310 million copies."],
+  ["Minecraft has sold over 300 million copies", "Minecraft has sold 300 million copies."],
+]) {
+  test(`a qualified figure is carried by a source on the right side of it — "${claim}" / "${snippet}"`, () => {
+    const result = sourceConfirms(claim, page(snippet));
+    assert.equal(result.confirms, true, `missing: ${result.missing.join(", ")}`);
+  });
+}
+
+for (const [claim, snippet, why] of [
+  ["Minecraft has sold over 300 million copies", "Minecraft has sold 200 million copies.", "below the floor"],
+  ["Minecraft has sold over 300 million copies", "Minecraft has sold under 400 million copies.", "a ceiling says nothing about a floor"],
+  ["Minecraft has sold over 300 million copies", "Minecraft copies sold since 2011, updated 2024.", "a year is not a sales figure"],
+  ["Minecraft has sold over 300 million copies", "Minecraft has sold 5 billion copies.", "too far past the floor to be the same fact"],
+  ["Minecraft has sold over 300 million copies", "Minecraft has sold 350 copies.", "a figure without the claim's scale"],
+  ["Minecraft has sold under 400 million copies", "Minecraft has sold 450 million copies.", "above the ceiling"],
+  ["Minecraft has sold about 300 million copies", "Minecraft has sold 400 million copies.", "outside the ballpark"],
+  ["Over 300 people attended the Minecraft festival", "The Minecraft festival was held in 2019.", "an unscaled floor is never met by a year"],
+]) {
+  test(`a qualified figure is not carried by a source that misses it — ${why}`, () => {
+    assert.equal(sourceConfirms(claim, page(snippet)).confirms, false);
+  });
+}
+
+test("a bare figure still needs the figure, not just a bigger one", () => {
+  assert.equal(
+    sourceConfirms("Minecraft has sold 300 million copies", page("Minecraft has sold 350 million copies.")).confirms,
+    false,
+  );
+});
+
+test("a year after a floor word is still a year, not a floor", () => {
+  assert.deepEqual(claimSpecifics("Prices rose over 2023").bounds, {});
+});
+
+test("a downgraded floor is named as the claim stated it, not as a bare number", () => {
+  const answer = answerOf("Minecraft has sold over 300 million copies", "Sales tracked here [1].", "Corroborated");
+  const audited = auditCorroboration(
+    answer,
+    ledgerOf({ title: "Minecraft sales", url: "https://a.example/m", snippet: "Minecraft has sold 200 million copies." }),
+  );
+  assert.equal(audited.changed, true);
+  assert.match(audited.text, /none of them mentions over 300 million,/);
+});
