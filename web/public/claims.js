@@ -136,9 +136,14 @@ const CLAIM_MARKER =
   /^[ \t]*(?:[-*\u2022]|#{1,6}|\d+[.)])?[ \t]*(?:\*\*|__|\*|_)?\[\[[ \t]*claim(?:[ \t]*#?\d+)?[ \t]*[:\u2014\u2013-][ \t]*((?:[^[\]\n]|\[[^[\]\n]*\])+?)[ \t]*\]\](?:\*\*|__|\*|_)?[ \t]*(?:[:\u2014\u2013-][ \t]*)?/gim;
 
 /**
- * `[[overview]]` — where the claims end and the model's short overall summary begins (see
- * the CLAIM STRUCTURE section of the system prompt). Same opening-the-line rule as the claim
- * marker; the summary may start on the marker's own line.
+ * `[[overview]]` — the model's short overall summary (see the CLAIM STRUCTURE section of the
+ * system prompt). Same opening-the-line rule as the claim marker; the summary may start on
+ * the marker's own line.
+ *
+ * The prompt asks for it first, ahead of the claims, so the reader gets the gist before the
+ * cards stream in; it runs from the marker to the first `[[claim: …]]` line (see
+ * `leadingOverview`). Answers written before that change put it last, after the final
+ * verdict, where it runs to the end of the text (see `claimsEnd`) — both still parse.
  */
 const OVERVIEW_MARKER =
   /^[ \t]*(?:#{1,6})?[ \t]*(?:\*\*|__|\*|_)?\[\[[ \t]*overview[ \t]*\]\](?:\*\*|__|\*|_)?[ \t]*:?[ \t]*/im;
@@ -157,10 +162,33 @@ function stripRules(text) {
   return text.replace(RULE_LINES, "").trim();
 }
 
-/** Where the claims stop: the `[[overview]]` marker if there is one, else the whole text. */
-function claimsEnd(text) {
-  const match = text.match(OVERVIEW_MARKER);
-  return match ? match.index : text.length;
+/** The first `[[claim: …]]` marker in `text`, or `null`. */
+function firstClaimMarker(text) {
+  CLAIM_MARKER.lastIndex = 0;
+  const first = CLAIM_MARKER.exec(text);
+  CLAIM_MARKER.lastIndex = 0;
+  return first;
+}
+
+/**
+ * An `[[overview]]` block written ahead of the claims, as offsets into `text`: `start` (the
+ * marker), `bodyStart` (just after it) and `end` (the first claim marker, or the end of the
+ * text while the claims have yet to stream in). `null` when the overview, if any, comes
+ * after the first claim — the older, trailing shape.
+ */
+function leadingOverview(text) {
+  const marker = text.match(OVERVIEW_MARKER);
+  if (!marker) return null;
+  const first = firstClaimMarker(text);
+  if (first && first.index < marker.index) return null;
+  return { start: marker.index, bodyStart: marker.index + marker[0].length, end: first ? first.index : text.length };
+}
+
+/** Where the claims stop: a trailing `[[overview]]` marker at or after `from` (where the
+ * claims start) if there is one, else the whole text. */
+function claimsEnd(text, from = 0) {
+  const match = text.slice(from).match(OVERVIEW_MARKER);
+  return match ? from + match.index : text.length;
 }
 
 /**
@@ -200,9 +228,13 @@ export function splitClaims(rawAnswer) {
  */
 function parseClaims(rawAnswer) {
   const full = String(rawAnswer ?? "");
-  const end = claimsEnd(full);
+  const lead = leadingOverview(full);
+  const end = claimsEnd(full, lead ? lead.end : 0);
   const text = full.slice(0, end);
-  const markers = [...text.matchAll(CLAIM_MARKER)];
+  const markers = [...text.slice(lead ? lead.end : 0).matchAll(CLAIM_MARKER)].map((marker) => {
+    marker.index += lead ? lead.end : 0;
+    return marker;
+  });
   if (markers.length === 0) return null;
 
   let trailing = "";
@@ -241,8 +273,9 @@ function parseClaims(rawAnswer) {
     };
   });
 
+  const leading = lead ? stripRules(full.slice(lead.bodyStart, lead.end)) : "";
   const marked = end < full.length ? full.slice(end).replace(OVERVIEW_MARKER, "").trim() : "";
-  const overview = [trailing, marked].filter(Boolean).join("\n\n");
+  const overview = [leading, trailing, marked].filter(Boolean).join("\n\n");
   return { claims, overview: overview || null };
 }
 
@@ -260,7 +293,8 @@ function verdictSpan(slice, offset, match) {
 
 /**
  * The model's short overall read of the post — what it argues as a whole and how that holds
- * up — written after the last claim, or `null` when there is none (or no claims at all).
+ * up — written ahead of the first claim (or, in older answers, after the last), or `null`
+ * when there is none (or no claims at all).
  *
  * Asked for behind an `[[overview]]` marker, but any text after the last claim's verdict is
  * taken as the overview with or without one: a model that writes "Overall, …" after its
@@ -284,11 +318,11 @@ export function claimsOverview(rawAnswer) {
  */
 export function claimsPreamble(rawAnswer) {
   const text = String(rawAnswer ?? "");
-  CLAIM_MARKER.lastIndex = 0;
-  const first = CLAIM_MARKER.exec(text);
-  CLAIM_MARKER.lastIndex = 0;
+  const first = firstClaimMarker(text);
   if (!first) return null;
-  const preamble = text.slice(0, first.index).trim();
+  // An overview written ahead of the claims is the overview card's, not part of this note.
+  const lead = leadingOverview(text);
+  const preamble = text.slice(0, lead ? lead.start : first.index).trim();
   return preamble || null;
 }
 
@@ -300,8 +334,13 @@ export function claimsPreamble(rawAnswer) {
  */
 export function readableAnswer(text, { overview = true } = {}) {
   let out = String(text ?? "");
+  const lead = leadingOverview(out);
   const marker = out.match(OVERVIEW_MARKER);
-  if (marker) {
+  if (lead) {
+    // Written ahead of the claims: relabel it, or cut just the overview, never what follows.
+    const body = out.slice(lead.bodyStart, lead.end).trim();
+    out = out.slice(0, lead.start) + (overview && body ? `Overview: ${body}\n\n` : "") + out.slice(lead.end);
+  } else if (marker) {
     out = overview
       ? out.slice(0, marker.index) + "Overview: " + out.slice(marker.index + marker[0].length).replace(/^\n+/, "")
       : out.slice(0, marker.index).trimEnd();
