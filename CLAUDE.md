@@ -246,9 +246,12 @@ are. Don't blur the two back together by trying to split an answer some other wa
 The parse is deliberately tolerant of the shape drifting while still acting only on those
 markers. A marker must open its line, but body text may follow it on the same line. A
 claim's verdict is the *last* VERDICT line in its own block, so a `---` or a stray line
-after it no longer costs the badge. Text after the final claim (behind an `[[overview]]`
-marker, or bare) is the overview, rendered as a collapsible card above the claims
-(`claimsOverview`). Switching it off in Settings is sent with each request (`overview:
+after it no longer costs the badge. The overview is an `[[overview]]` block the prompt asks
+for *ahead of* the first claim, so it is whole before the first claim card appears and is
+drawn above the claims from the loading grid onward (`renderClaimSkeletons`); text after the
+final claim (behind the marker, or bare) still parses as the overview too, which is how
+answers stored before that change were written. Either way it renders as a collapsible card
+above the claims (`claimsOverview`). Switching it off in Settings is sent with each request (`overview:
 false`), so the model is given `factCheckSystemPrompt({ overview: false })` and never asked
 for one. The CSS switch only covers answers stored before the change. Text before the first marker is a
 context note (`claimsPreamble`): the "this is satire" line. Source pills go on the card

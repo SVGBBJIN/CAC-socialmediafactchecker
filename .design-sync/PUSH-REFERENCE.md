@@ -278,6 +278,9 @@ pattern. None introduces a token.
   one-line `.overview-peek` (`contain: inline-size`, so it never widens the pane) and a
   chevron. Open, it shows the summary and its own pills. Behind a new General-tab switch
   (`data-overview="off"`), so `SettingsMenu` owes a row.
+  It now also sits in the *loading* stack, above the first skeleton box: the model writes the
+  overview before its claims, so it is whole by the time the first box appears. A DS
+  `ClaimStack` loading screen that shows claims streaming in owes it the same slot.
 - **Landing has no top bar.** `.lshell-topbar` is now an absolutely positioned,
   click-through row holding two blurred-backing buttons, over a full-height `.lshell-scroll`
   padded by `--lshell-bar`. The DS's landing screen draws a bar row above the scroller,

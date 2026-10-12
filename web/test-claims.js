@@ -395,6 +395,37 @@ test("text after the last verdict is the overview, not the last claim's body", (
   assert.equal(claimsOverview("No claims at all."), null);
 });
 
+test("an overview written ahead of the claims is the overview, not the preamble", () => {
+  const answer = [
+    "This is satire [3].",
+    "[[overview]]",
+    "Mostly wrong [1].",
+    "[[claim: A]]",
+    "body a",
+    "VERDICT: Contradicted",
+    "[[claim: B]]",
+    "body b",
+    "VERDICT: Corroborated",
+  ].join("\n");
+  const claims = splitClaims(answer);
+  assert.deepEqual(claims.map((claim) => claim.title), ["A", "B"]);
+  assert.deepEqual(claims.map((claim) => claim.verdictKey), ["contradicted", "corroborated"]);
+  assert.equal(claims[1].text, "body b");
+  assert.equal(claimsOverview(answer), "Mostly wrong [1].");
+  assert.equal(claimsPreamble(answer), "This is satire [3].");
+  // Offsets still point into the whole answer, which the corroboration audit relies on.
+  assert.equal(answer.slice(claims[0].verdict.start, claims[0].verdict.end), "\nVERDICT: Contradicted");
+  assert.equal(answer.slice(claims[1].range.start, claims[1].range.end), "[[claim: B]]\nbody b\nVERDICT: Corroborated");
+});
+
+test("mid-stream, a leading overview is whole before the first claim has finished", () => {
+  assert.equal(splitClaims("[[overview]]\nMostly wrong."), null);
+  const partial = "[[overview]]\nMostly wrong.\n[[claim: A]]\nbody so f";
+  assert.equal(splitClaims(partial)[0].verdictKey, null);
+  assert.equal(claimsOverview(partial), "Mostly wrong.");
+  assert.equal(claimsPreamble(partial), null);
+});
+
 test("a verdict's span still starts at the newline before it", () => {
   // The corroboration audit replaces this span with a note and a fresh verdict line, and
   // relies on the leading newline to keep the two apart.
@@ -443,4 +474,12 @@ test("readableAnswer turns the app's block syntax into words for copying", () =>
   // The reader switched the overview off: it stays out of the copy, too.
   assert.equal(readableAnswer(answer, { overview: false }), "Intro.\n\nClaim: A\nbody [1]\nVERDICT: Corroborated");
   assert.equal(readableAnswer("Just a reply."), "Just a reply.");
+
+  const leading = "Intro.\n\n[[overview]]\nIt holds up.\n[[claim: A]]\nbody [1]\nVERDICT: Corroborated";
+  assert.equal(
+    readableAnswer(leading),
+    "Intro.\n\nOverview: It holds up.\n\nClaim: A\nbody [1]\nVERDICT: Corroborated",
+  );
+  // Switched off, only the overview goes — never the claims after it.
+  assert.equal(readableAnswer(leading, { overview: false }), "Intro.\n\nClaim: A\nbody [1]\nVERDICT: Corroborated");
 });

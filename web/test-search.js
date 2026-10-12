@@ -992,7 +992,7 @@ test("the system prompt checks a sketch's real claims instead of waving it throu
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Check the real claims/);
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /Put the exaggeration in context/);
   // The "this is satire" line has somewhere to go that the app actually renders.
-  assert.match(FACT_CHECK_SYSTEM_PROMPT, /before the first claim line, and the app\nshows it above the claims/);
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /before any block, and the app\nshows it above them/);
 });
 
 test("the system prompt puts the post's own central claim first", () => {
@@ -1003,9 +1003,12 @@ test("the system prompt puts the post's own central claim first", () => {
   assert.match(FACT_CHECK_SYSTEM_PROMPT, /is a causal claim, and\nit is checked as one/);
 });
 
-test("the system prompt closes a check with an overview after the last verdict", () => {
-  assert.match(FACT_CHECK_SYSTEM_PROMPT, /\[\[overview\]\]/);
-  assert.doesNotMatch(FACT_CHECK_SYSTEM_PROMPT, /nothing follows the final VERDICT/i);
+test("the system prompt opens a check with an overview, ahead of the first claim", () => {
+  assert.match(FACT_CHECK_SYSTEM_PROMPT, /open\s+the answer with its overview/);
+  // The worked example has the same shape: the overview marker before any claim marker.
+  const example = FACT_CHECK_SYSTEM_PROMPT.slice(FACT_CHECK_SYSTEM_PROMPT.indexOf("EXAMPLE\n"));
+  assert.ok(example.indexOf("[[overview]]") >= 0);
+  assert.ok(example.indexOf("[[overview]]") < example.indexOf("[[claim:"));
 });
 
 test("switching the overview off takes it out of the prompt, not just off the screen", () => {

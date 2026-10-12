@@ -3915,10 +3915,14 @@ function loadingClaimHTML(claim, index, sources, seekable, isNew) {
  * real text rather than reverting to a shimmer — see `settleClaimPane` for the in-place
  * version that runs when no redraw is needed.
  */
-function renderClaimSkeletons(claims, stage, sources, seekable, previousCount = 0) {
+function renderClaimSkeletons(claims, stage, sources, seekable, previousCount = 0, rawAnswer = "") {
   // Whether the reader is currently reading the bottom of the stack, measured *before* the
   // rebuild — see `stickToNewestClaim`.
   const atBottom = claimsPaneAtBottom();
+  // The overview is written ahead of the claims, so it is already whole by the time the
+  // first box appears. Every later rebuild redraws it, and a reader who opened it to read
+  // while the claims stream in shouldn't have it snap shut under them.
+  const overviewOpen = isOverviewOpen();
   setClaimsGridMode("grid-loading");
   // Prepended the same way renderResultCard prepends it to the finished grid — see
   // summaryCardHTML's own comment for why this now runs through every stage rather than
@@ -3926,15 +3930,35 @@ function renderClaimSkeletons(claims, stage, sources, seekable, previousCount = 
   setClaimsPaneHTML(
     summaryCardHTML(claims) +
       claimGridStatusHTML(stage) +
+      overviewCardHTML(
+        rawAnswer,
+        sources,
+        seekable,
+        previousCount === 0,
+        attributeSources({ rawAnswer, claims, sources }).overview,
+      ) +
       claims
         .map((claim, i) => loadingClaimHTML(claim, i, sources, seekable, i >= previousCount))
         .join(""),
   );
+  restoreOverviewOpen(overviewOpen);
   revealIn(el.claimsPane);
   stickToNewestClaim(atBottom);
   refreshTimeline();
   runProgress.resync();
   runElapsed.resync();
+}
+
+/** Whether the overview card in the claims pane is currently expanded. */
+function isOverviewOpen() {
+  return Boolean(el.claimsPane.querySelector(".overview-card")?.open);
+}
+
+/** Re-expands a redrawn overview card the reader had open before the redraw. */
+function restoreOverviewOpen(wasOpen) {
+  if (!wasOpen) return;
+  const card = el.claimsPane.querySelector(".overview-card");
+  if (card) card.open = true;
 }
 
 /** Whether the claims pane is scrolled to (or very near) its own bottom. The slack is for
@@ -5736,7 +5760,7 @@ async function runCheck(url, existingId, hint) {
           // renderClaimSkeletons prepends a fresh summaryCardHTML(claims) of its own, so
           // the counts are already current the moment this lands — nothing more to patch.
           // Only the boxes past `previousCount` are new, and only those animate in.
-          renderClaimSkeletons(claims, stage, liveSources, seekable, previousCount);
+          renderClaimSkeletons(claims, stage, liveSources, seekable, previousCount, text);
         } else {
           for (const index of settled) {
             settleClaimPane(index, claims[index], liveSources, seekable);
@@ -5790,7 +5814,9 @@ async function runCheck(url, existingId, hint) {
           parsed.claims.length > 0 &&
           parsed.claims.length === drawn.length &&
           drawn.every((claim) => claim.verdictKey);
+        const overviewOpen = isOverviewOpen();
         renderResultCard(entry, { animateAnalysis: !alreadyOnScreen });
+        restoreOverviewOpen(overviewOpen);
       }
     }
   } catch (error) {
